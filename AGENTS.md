@@ -24,6 +24,32 @@ python tools/measure_startup.py build/release/geditor.exe --metric app
 - `app_ms`: `wWinMain` 開始から初回描画まで（プログラム自身の起動コスト）
 - `geditor.exe --measure-startup` は段階ごとの時刻（`stage <name>=<ms>`）も標準エラーに出す
 
+コアの性能計測（M1 の 100MB 基準）。生成した 100MB の UTF-8 テキストで、読込（デコード＋構築）・1 文字挿入と行番号検索・自己挿入キーの処理時間・全削除と undo のメモリ増分を測り、基準を超えると終了コード 1 で終わる。ctest には入れていないので、Release ビルドを手で実行する:
+
+```powershell
+build/release/tests/geditor_perf.exe
+```
+
+## 構成
+
+- `src/core/`: 編集の核（静的ライブラリ `geditor_core`）。piece tree・undo・文字コード・キー表記・キーマップ・コマンド・ミニバッファ・升目計算を持つ。ファイル・クリップボード・ダイアログ・ウィンドウ起動などの環境依存の処理は `src/core/host.h` の `Host`（抽象クラス）を通して呼ぶ。Win32 側（`src/win/`）がこれを実装し、テストは `tests/fake_host.*` の偽物を使う
+- `geditor_core` には `user32` などの UI 系ライブラリをリンクしない
+- `tests/`: `geditor_tests`（ctest に登録）と `tests/perf/` の `geditor_perf`（登録しない）
+
+## 文字幅表の生成
+
+`src/core/char_width_table.inc` は `tools/gen_char_width.py` が Unicode Character Database から作る生成物で、手で直さない。Unicode を更新するときは、新しい空のフォルダーに次の 3 ファイルを置いて実行する（`<version>` は unicode.org の最新版。生成物の先頭に版が記録される）:
+
+- `https://www.unicode.org/Public/<version>/ucd/EastAsianWidth.txt`
+- `https://www.unicode.org/Public/<version>/ucd/DerivedCoreProperties.txt`
+- `https://www.unicode.org/Public/<version>/ucd/extracted/DerivedGeneralCategory.txt`
+
+```powershell
+python -I tools/gen_char_width.py <folder>
+```
+
+同じ入力からは同じバイト列が出る。幅の規則（0 / 1 / 2 桁）はスクリプト冒頭の説明にある。
+
 ## コードの約束
 
 - C++20。Win32 API を直接使う。GUI フレームワークや COM の初期化を持ち込まない

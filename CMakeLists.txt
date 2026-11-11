@@ -25,6 +25,24 @@ target_compile_definitions(geditor_options INTERFACE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_compile_options(geditor_options INTERFACE /W4 /utf-8)
 
+# Editing core: no Win32 UI dependency (tests drive it through a fake host).
+add_library(geditor_core STATIC
+  src/core/char_width.cpp
+  src/core/commands.cpp
+  src/core/editor.cpp
+  src/core/encoding.cpp
+  src/core/files.cpp
+  src/core/key.cpp
+  src/core/keymap.cpp
+  src/core/layout.cpp
+  src/core/minibuffer.cpp
+  src/core/path.cpp
+  src/core/piece_tree.cpp
+  src/core/undo.cpp
+  src/core/unicode.cpp)
+target_include_directories(geditor_core PUBLIC src/core)
+target_link_libraries(geditor_core PRIVATE geditor_options)
+
 add_executable(geditor WIN32 src/win/main.cpp)
 target_link_libraries(geditor PRIVATE geditor_options d2d1 dwrite)
 
