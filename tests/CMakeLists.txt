@@ -13,8 +13,14 @@ add_executable(geditor_tests
   test_minibuffer.cpp
   test_piece_tree.cpp
   test_review_fixes.cpp
-  test_undo.cpp)
-target_link_libraries(geditor_tests PRIVATE geditor_options geditor_core pcre2_16)
+  test_session_clipboard.cpp
+  test_shift_translation.cpp
+  test_undo.cpp
+  test_win_echo.cpp
+  test_win_input.cpp
+  test_win_logic.cpp)
+target_link_libraries(geditor_tests PRIVATE
+  geditor_options geditor_core geditor_win_logic pcre2_16 user32)
 
 add_test(NAME geditor_tests COMMAND geditor_tests)
 

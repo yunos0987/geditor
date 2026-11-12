@@ -14,6 +14,7 @@ namespace geditor {
 enum class FileKind { kNone, kFile, kDirectory, kError };
 enum class OpenChoice { kReplace, kNewWindow, kCancel };
 enum class SaveChoice { kSave, kDontSave, kCancel };
+enum class ClipboardRead { kOk, kNoText, kFailed };
 
 struct DirEntry {
   std::wstring name;  // file name only, without "." and ".."
@@ -33,9 +34,10 @@ class Host {
   virtual std::wstring current_directory() = 0;
 
   // Clipboard text uses "\n" line ends; converting to and from CRLF is the
-  // host's job. get_clipboard returns false when there is no text;
-  // set_clipboard returns false when the clipboard cannot be written.
-  virtual bool get_clipboard(std::wstring& text) = 0;
+  // host's job. get_clipboard tells "no text" (kNoText) from "the clipboard
+  // cannot be opened or read" (kFailed); set_clipboard returns false when the
+  // clipboard cannot be written.
+  virtual ClipboardRead get_clipboard(std::wstring& text) = 0;
   virtual bool set_clipboard(const std::wstring& text) = 0;
 
   // "Open in this window (replace)" / "Open in a new window" / "Cancel".

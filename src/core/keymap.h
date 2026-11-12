@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "key.h"
 
@@ -40,6 +41,25 @@ class Keymap {
   };
   std::map<uint64_t, Entry> entries_;
 };
+
+// Emacs shift translation: when `keys` is undefined and its last key has S-,
+// looks the sequence up again without S-. When that succeeds, the last key
+// of `keys` is replaced by the unshifted key. A binding of the S- key itself
+// always wins. `lookup` maps a KeySequence to a Keymap::Lookup.
+template <typename LookupFn>
+Keymap::Lookup lookup_shift_translated(KeySequence& keys, LookupFn&& lookup) {
+  const Keymap::Lookup shifted = lookup(keys);
+  if (shifted.result != Keymap::Result::kUndefined || keys.empty() ||
+      (keys.back().mods & kModShift) == 0) {
+    return shifted;
+  }
+  KeySequence unshifted = keys;
+  unshifted.back().mods = static_cast<uint8_t>(unshifted.back().mods & ~kModShift);
+  const Keymap::Lookup r = lookup(unshifted);
+  if (r.result == Keymap::Result::kUndefined) return shifted;
+  keys = std::move(unshifted);
+  return r;
+}
 
 struct DefaultBinding {
   const wchar_t* keys;

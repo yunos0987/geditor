@@ -1,0 +1,4 @@
+# clangd reads the compile flags (C++20, include paths) of the release build.
+# Run `cmake --preset release` once to create build/release/compile_commands.json.
+CompileFlags:
+  CompilationDatabase: build/release

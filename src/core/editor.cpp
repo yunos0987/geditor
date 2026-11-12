@@ -76,9 +76,11 @@ void Editor::handle_key(const Key& key) {
   pending_display_ += key_to_string(key);
   pending_.push_back(k);
 
-  const Keymap::Lookup r = lookup(pending_);
+  const Keymap::Lookup r =
+      lookup_shift_translated(pending_, [this](const KeySequence& s) { return lookup(s); });
   if (r.result == Keymap::Result::kPrefix) return;
 
+  k = pending_.back();  // without S- when shift translation applied
   const size_t length = pending_.size();
   const std::wstring display = std::move(pending_display_);
   pending_.clear();
@@ -94,6 +96,16 @@ void Editor::handle_key(const Key& key) {
   }
   message_ = key == kCtrlG ? std::wstring(L"Quit") : display + L" is undefined";
   note_non_command();
+}
+
+bool Editor::key_is_bound(const Key& key) const {
+  if (quoted_insert_pending_) return true;
+  Key k = key;
+  if (meta_pending_) k.mods |= kModMeta;
+  KeySequence keys = pending_;
+  keys.push_back(k);
+  return lookup_shift_translated(keys, [this](const KeySequence& s) { return lookup(s); }).result !=
+         Keymap::Result::kUndefined;
 }
 
 void Editor::execute_command(std::string_view name) {

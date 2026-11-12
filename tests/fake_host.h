@@ -35,6 +35,7 @@ class FakeHost : public geditor::Host {
   bool fail_writes = false;
   bool fail_launch = false;
   bool fail_clipboard = false;
+  bool fail_clipboard_read = false;  // get_clipboard reports kFailed
   // Paths (any case) for which file_kind reports FileKind::kError.
   std::set<std::wstring> error_paths;
 
@@ -57,7 +58,7 @@ class FakeHost : public geditor::Host {
   geditor::FileKind file_kind(const std::wstring& path) override;
   bool list_directory(const std::wstring& dir, std::vector<geditor::DirEntry>& entries) override;
   std::wstring current_directory() override { return cwd; }
-  bool get_clipboard(std::wstring& text) override;
+  geditor::ClipboardRead get_clipboard(std::wstring& text) override;
   bool set_clipboard(const std::wstring& text) override;
   void add_error_path(const std::wstring& path);
   geditor::OpenChoice ask_open_choice(const std::wstring& path) override;

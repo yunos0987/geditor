@@ -46,6 +46,10 @@ class Editor {
   std::wstring echo_area_text() const;
   // Pending prefix keys for the host to echo, such as "C-x-" ("" when none).
   std::wstring pending_keys_text() const;
+  // True when `key`, typed now, would run a command or continue a prefix
+  // (after shift translation). The host passes unbound system keys such as
+  // M-<f4> on to Windows.
+  bool key_is_bound(const Key& key) const;
   // "-** name  UTF-8 LF  L12 C5".
   std::wstring mode_line() const;
   size_t top_line() const { return top_line_; }
@@ -108,6 +112,11 @@ class Editor {
   void save_buffer();
   void write_file();
   void quit();
+  // Windows is ending the session (log off, shutdown): asks to save a
+  // modified buffer like quit. Returns true when the session may end (saved,
+  // "Don't Save" or unmodified); false on Cancel, a failed save, or an
+  // untitled buffer whose file name is now asked in the minibuffer.
+  bool confirm_session_end();
   std::wstring buffer_name() const;
 
  private:

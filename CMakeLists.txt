@@ -43,8 +43,32 @@ add_library(geditor_core STATIC
 target_include_directories(geditor_core PUBLIC src/core)
 target_link_libraries(geditor_core PRIVATE geditor_options)
 
-add_executable(geditor WIN32 src/win/main.cpp)
-target_link_libraries(geditor PRIVATE geditor_options d2d1 dwrite)
+# Pure logic of the Win32 layer (key translation, command line, clipboard
+# text, file access, process start): shared by the app and the unit tests.
+add_library(geditor_win_logic STATIC
+  src/win/clipboard.cpp
+  src/win/command_line.cpp
+  src/win/echo_text.cpp
+  src/win/file_io.cpp
+  src/win/input.cpp
+  src/win/process.cpp)
+target_include_directories(geditor_win_logic PUBLIC src/win)
+target_link_libraries(geditor_win_logic PUBLIC geditor_core PRIVATE geditor_options)
+
+add_executable(geditor WIN32
+  src/win/dialogs.cpp
+  src/win/ime.cpp
+  src/win/main.cpp
+  src/win/measure.cpp
+  src/win/renderer.cpp
+  src/win/text_measurer.cpp
+  src/win/window.cpp
+  src/win/geditor.manifest)
+target_link_libraries(geditor PRIVATE
+  geditor_options geditor_win_logic geditor_core d2d1 dwrite imm32 comctl32 shell32 delayimp)
+# comctl32 (TaskDialog) and shell32 (drag and drop) load on first use only, so
+# that they do not cost startup time.
+target_link_options(geditor PRIVATE /DELAYLOAD:comctl32.dll /DELAYLOAD:shell32.dll)
 
 enable_testing()
 add_subdirectory(tests)

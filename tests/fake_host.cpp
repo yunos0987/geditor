@@ -131,10 +131,11 @@ bool FakeHost::list_directory(const std::wstring& dir, std::vector<geditor::DirE
   return true;
 }
 
-bool FakeHost::get_clipboard(std::wstring& text) {
-  if (!clipboard_has_text) return false;
+geditor::ClipboardRead FakeHost::get_clipboard(std::wstring& text) {
+  if (fail_clipboard_read) return geditor::ClipboardRead::kFailed;
+  if (!clipboard_has_text) return geditor::ClipboardRead::kNoText;
   text = clipboard;
-  return true;
+  return geditor::ClipboardRead::kOk;
 }
 
 bool FakeHost::set_clipboard(const std::wstring& text) {

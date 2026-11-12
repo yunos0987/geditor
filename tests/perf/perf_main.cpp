@@ -104,7 +104,9 @@ class PerfHost : public geditor::Host {
   }
   bool list_directory(const std::wstring&, std::vector<geditor::DirEntry>&) override { return false; }
   std::wstring current_directory() override { return L"C:\\perf"; }
-  bool get_clipboard(std::wstring&) override { return false; }
+  geditor::ClipboardRead get_clipboard(std::wstring&) override {
+    return geditor::ClipboardRead::kNoText;
+  }
   bool set_clipboard(const std::wstring&) override { return false; }
   geditor::OpenChoice ask_open_choice(const std::wstring&) override { return geditor::OpenChoice::kCancel; }
   geditor::SaveChoice ask_save_changes(const std::wstring&) override { return geditor::SaveChoice::kCancel; }

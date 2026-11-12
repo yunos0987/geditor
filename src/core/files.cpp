@@ -236,6 +236,27 @@ void Editor::run_after_save() {
   }
 }
 
+bool Editor::confirm_session_end() {
+  if (!main_.modified()) return true;
+  switch (host_.ask_save_changes(buffer_name())) {
+    case SaveChoice::kSave:
+      if (main_.path.empty()) {
+        // The file name is read in the minibuffer, which cannot finish while
+        // Windows waits: keep the session and let the user save, then quit.
+        if (minibuffer_active()) abort_minibuffer();
+        start_minibuffer(MinibufferPurpose::kWriteFile, L"Write file: ", default_directory());
+        after_save_ = AfterSave::kQuit;
+        return false;
+      }
+      return save_to(main_.path);
+    case SaveChoice::kDontSave:
+      return true;
+    case SaveChoice::kCancel:
+      return false;
+  }
+  return false;
+}
+
 void Editor::quit() {
   if (!main_.modified()) {
     host_.quit();

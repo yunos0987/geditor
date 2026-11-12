@@ -362,7 +362,12 @@ void kill_ring_save(Editor& ed) {
 void yank(Editor& ed) {
   Buffer& b = ed.current();
   std::wstring text;
-  if (!ed.host().get_clipboard(text) || text.empty()) {
+  const ClipboardRead read = ed.host().get_clipboard(text);
+  if (read == ClipboardRead::kFailed) {
+    ed.set_message(L"Cannot read the clipboard");
+    return;
+  }
+  if (read == ClipboardRead::kNoText || text.empty()) {
     ed.set_message(L"Clipboard is empty");
     return;
   }

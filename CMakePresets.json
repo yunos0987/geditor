@@ -13,7 +13,8 @@
         "CMAKE_CXX_COMPILER": "clang-cl",
         "CMAKE_LINKER": "lld-link",
         "CMAKE_RC_COMPILER": "llvm-rc",
-        "CMAKE_MT": "llvm-mt"
+        "CMAKE_MT": "llvm-mt",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
     {
