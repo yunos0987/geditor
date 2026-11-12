@@ -296,6 +296,9 @@ def run_checks(exe: pathlib.Path, out: pathlib.Path):
                   bool(new) and titles[0] == "other.txt - geditor", f"titles={titles}")
             for h in new or []:
                 d.user32.PostMessageW(h, d.WM_CLOSE, 0, 0)  # unmodified: closes
+            # The new window took the foreground; SendInput needs it back.
+            d.wait_for(lambda: not any(d.user32.IsWindow(h) for h in new or []), 5.0)
+            app.refocus()
 
         # Failed save on a read-only file keeps the buffer modified.
         app.keys("C-x C-f")
@@ -444,6 +447,8 @@ def run_retry1_checks(exe: pathlib.Path, out: pathlib.Path):
               f"titles={titles}")
         for h in new:
             d.user32.PostMessageW(h, d.WM_CLOSE, 0, 0)
+        d.wait_for(lambda: not any(d.user32.IsWindow(h) for h in new), 5.0)
+        app.refocus()
 
         # [S3b] A failed save in a long directory keeps the reason readable.
         app.keys("C-x C-w")

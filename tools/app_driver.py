@@ -99,6 +99,7 @@ user32.SendMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 user32.SendMessageW.restype = ctypes.c_ssize_t
 user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
 user32.GetForegroundWindow.restype = wt.HWND
+user32.IsWindow.argtypes = [wt.HWND]
 user32.SendInput.argtypes = [wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
 user32.GetDC.restype = wt.HDC
 gdi32.CreateCompatibleDC.restype = wt.HDC
@@ -252,6 +253,12 @@ class App:
         return self.mode
 
     mode = "post"
+
+    def refocus(self):
+        """Brings the window back to the foreground after another window
+        (such as a second geditor) took it; nothing to do in "post" mode."""
+        if self.mode == "sendinput":
+            self.focus()
 
     def _require_foreground(self):
         if user32.GetForegroundWindow() != self.hwnd:
