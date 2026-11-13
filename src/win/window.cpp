@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 
 #include "clipboard.h"
 #include "dialogs.h"
@@ -24,6 +25,9 @@ constexpr wchar_t kAppName[] = L"geditor";
 constexpr wchar_t kFontFamily[] = L"Consolas";
 constexpr float kFontSizePt = 12.0f;
 constexpr UINT kMsgDestroy = WM_APP + 1;     // Host::quit, after the current call
+// From the settings watcher: wParam 0 = the file changed; 1 = watching
+// stopped (lParam: new std::wstring with the reason).
+constexpr UINT kMsgSettingsChanged = WM_APP + 2;
 constexpr UINT_PTR kPendingKeysTimer = 1;   // echo prefix keys after 1 second
 constexpr UINT kPendingKeysDelayMs = 1000;
 constexpr DWORD kToUnicodeNoStateChange = 0x4;  // Windows 10 1607 and later
@@ -45,6 +49,15 @@ char32_t layout_char(void*, unsigned vk, unsigned scan_code, bool shift) {
     return combine_surrogates(buffer[0], buffer[1]);
   }
   return 0;
+}
+
+std::wstring environment_variable(const wchar_t* name) {
+  const DWORD n = GetEnvironmentVariableW(name, nullptr, 0);
+  if (n == 0) return std::wstring();
+  std::wstring value(n, L'\0');
+  const DWORD written = GetEnvironmentVariableW(name, value.data(), n);
+  value.resize(written < n ? written : 0);
+  return value;
 }
 
 double ms_between(const LARGE_INTEGER& from, const LARGE_INTEGER& to) {
@@ -89,6 +102,12 @@ bool MainWindow::create(HINSTANCE instance, bool measure_startup, bool measure_i
 }
 
 void MainWindow::apply_command_line(const CommandLine& command_line) {
+  // The settings path is known before the file opens: a missing settings
+  // file opened from the command line gets its template.
+  const std::wstring settings_path = settings_path_for(
+      command_line, win::current_directory(), environment_variable(L"USERPROFILE"));
+  if (!command_line.settings.empty()) settings_argument_ = settings_path;
+  editor_.set_settings_path(settings_path);
   if (!command_line.file.empty()) {
     LARGE_INTEGER start{}, end{};
     QueryPerformanceCounter(&start);
@@ -101,6 +120,12 @@ void MainWindow::apply_command_line(const CommandLine& command_line) {
     const size_t line = std::min(command_line.line - 1, text.line_count() - 1);
     editor_.set_point(text.line_start(line));
   }
+  // Read synchronously before the first frame (PLAN 4.1); errors replace the
+  // message of opening the file. The state is taken before the read: a
+  // change made before the watcher starts is caught by comparing it then.
+  if (!settings_path.empty()) settings_state_ = file_state(settings_path);
+  editor_.reload_settings();
+  mark_stage("settings");
   if (!command_line.errors.empty()) {
     std::wstring message;
     for (const std::wstring& e : command_line.errors) {
@@ -182,7 +207,7 @@ bool MainWindow::ask_yes_no(const std::wstring& question) {
 }
 
 bool MainWindow::launch_new_window(const std::wstring& path, std::wstring& error) {
-  return launch_editor(own_executable_path(), path, error);
+  return launch_editor(own_executable_path(), path, settings_argument_, error);
 }
 
 void MainWindow::quit() {
@@ -198,7 +223,9 @@ int MainWindow::visible_lines() {
     if (last_rows_ > 0) return last_rows_;
   }
   const float scale = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
-  const int rows = renderer_.text_rows(static_cast<float>(rc.bottom - rc.top) / scale);
+  // An expanded echo area (settings errors) leaves fewer text rows.
+  const float height = static_cast<float>(rc.bottom - rc.top) / scale;
+  const int rows = renderer_.text_rows(height, renderer_.echo_rows(height, editor_));
   if (!IsIconic(hwnd_) && rc.bottom > rc.top && rc.right > rc.left) last_rows_ = rows;
   return rows;
 }
@@ -321,10 +348,20 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wparam, LPARAM lparam) {
         ShutdownBlockReasonDestroy(hwnd_);
       }
       return 0;
+    case kMsgSettingsChanged:
+      if (wparam == 1) {
+        std::unique_ptr<std::wstring> reason(reinterpret_cast<std::wstring*>(lparam));
+        append_message(L"Stopped watching the settings file: " + (reason ? *reason : std::wstring()));
+      } else {
+        editor_.reload_settings();
+      }
+      after_input();
+      return 0;
     case kMsgDestroy:
       DestroyWindow(hwnd_);
       return 0;
     case WM_DESTROY:
+      settings_watcher_.stop();
       PostQuitMessage(0);
       return 0;
     default:
@@ -368,6 +405,8 @@ void MainWindow::paint() {
       std::snprintf(line, sizeof(line), "hwnd=0x%llx open_ms=%.3f\n",
                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(hwnd_)), open_ms_);
       write_stderr(line);
+    } else {
+      start_settings_watcher();
     }
   }
   if (measure_input_ && input_pending_ && SUCCEEDED(result)) {
@@ -426,6 +465,28 @@ bool MainWindow::capture_to_bmp(const std::wstring& path) {
   if (bitmap != nullptr) DeleteObject(bitmap);
   if (dc != nullptr) DeleteDC(dc);
   return ok;
+}
+
+void MainWindow::start_settings_watcher() {
+  if (editor_.settings_path().empty()) return;
+  std::wstring error;
+  if (settings_watcher_.start(hwnd_, kMsgSettingsChanged, editor_.settings_path(), error)) {
+    // The file may have changed between the startup read and now; the
+    // watcher only sees later changes.
+    if (file_state(editor_.settings_path()) != settings_state_) {
+      editor_.reload_settings();
+      after_input();
+    }
+    return;
+  }
+  // Decision D12: shown once; editing goes on without live reload.
+  append_message(L"Cannot watch the settings file: " + error);
+  after_input();
+}
+
+void MainWindow::append_message(const std::wstring& text) {
+  const std::wstring& current = editor_.message();
+  editor_.set_message(current.empty() ? text : current + L"; " + text);
 }
 
 void MainWindow::start_input_measure() {

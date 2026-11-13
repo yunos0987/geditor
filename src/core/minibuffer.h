@@ -12,7 +12,9 @@
 
 namespace geditor {
 
-enum class MinibufferPurpose { kNone, kFindFile, kWriteFile };
+// kExtendedCommand: M-x reads a command name. kCommandArgument: an argument
+// of a command run without its arguments.
+enum class MinibufferPurpose { kNone, kFindFile, kWriteFile, kExtendedCommand, kCommandArgument };
 
 struct FileCompletion {
   std::wstring text;     // new minibuffer contents (unchanged when nothing to add)
@@ -28,6 +30,10 @@ constexpr size_t kMaxCandidateListChars = 1000;
 // (case-insensitive). A directory completes with a trailing backslash. When
 // the input cannot be extended, the candidates are listed in `message`.
 FileCompletion complete_file_name(std::wstring_view input, Host& host);
+
+// Completes `input` against `names` (command names for M-x, the choices of a
+// command argument) with the same rules as a file name in one directory.
+FileCompletion complete_name(std::wstring_view input, std::vector<std::wstring> names);
 
 // Input history, newest last. Navigation positions: -1 is the input being
 // edited, 0 the newest entry, size() - 1 the oldest.

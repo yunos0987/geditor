@@ -87,11 +87,17 @@ void Renderer::release() {
   safe_release(d2d_factory_);
 }
 
-int Renderer::text_rows(float height_dip) const {
+int Renderer::text_rows(float height_dip, int echo_rows) const {
   const float lh = measurer_.line_height();
   if (lh <= 0) return 1;
-  const float text_height = height_dip - 2 * lh;
+  const float text_height = height_dip - static_cast<float>(1 + std::max(1, echo_rows)) * lh;
   return std::max(1, static_cast<int>(std::floor(text_height / lh)));
+}
+
+int Renderer::echo_rows(float height_dip, const Editor& editor) const {
+  const float lh = measurer_.line_height();
+  const int total = lh > 0 ? static_cast<int>(std::floor(height_dip / lh)) : 3;
+  return editor.echo_line_count(max_echo_rows(total));
 }
 
 bool Renderer::ensure_target(HWND hwnd) {
@@ -176,11 +182,12 @@ HRESULT Renderer::draw_frame(const Editor& editor, ViewState& view) {
   target_->Clear(rgb(kBackground));
   const D2D1_SIZE_F size = target_->GetSize();
   const float lh = measurer_.line_height();
-  const float echo_y = size.height - lh;
+  const int rows = echo_rows(size.height, editor);
+  const float echo_y = size.height - static_cast<float>(rows) * lh;
   const float mode_y = echo_y - lh;
   draw_text_area(editor, view, size.width, std::max(0.0f, mode_y));
   draw_mode_line(editor, mode_y, size.width);
-  draw_echo_area(editor, view, echo_y, size.width);
+  draw_echo_area(editor, view, echo_y, size.width, rows);
   mark_stage("draw_calls");
   const HRESULT hr = target_->EndDraw();
   mark_stage("end_draw");
@@ -272,35 +279,51 @@ void Renderer::draw_mode_line(const Editor& editor, float y, float width) {
   draw_cells(kMarginDip, y, rgb(kModeLineForeground));
 }
 
-void Renderer::draw_echo_area(const Editor& editor, ViewState& view, float y, float width) {
-  // The echo line counts TAB as one cell, like fit_message / fit_minibuffer.
-  constexpr int kEchoTabWidth = 1;
+void Renderer::draw_echo_area(const Editor& editor, ViewState& view, float y, float width, int rows) {
   const float cw = measurer_.cell_width();
+  const float lh = measurer_.line_height();
   const int columns = std::max(1, static_cast<int>(std::floor((width - kMarginDip) / cw)));
+  const bool multi_line = editor.message_is_multi_line();
+  if (multi_line) {
+    // Settings errors, one per line (as many as `rows` allows); the
+    // minibuffer line (if any) below.
+    const int message_rows = rows - (editor.minibuffer_active() ? 1 : 0);
+    for (const std::wstring& line : editor.message_lines(message_rows)) {
+      draw_echo_line(fit_message(line, columns), y, columns);
+      y += lh;
+    }
+  }
   std::wstring text;
   int cursor_column = -1;
   if (editor.minibuffer_active()) {
     // The prompt stays visible; the input is abbreviated on the left.
     const Buffer& mb = editor.minibuffer_buffer();
     const MinibufferLine line = fit_minibuffer(editor.minibuffer_prompt(), mb.text.text(), mb.point,
-                                               editor.message(), columns);
+                                               multi_line ? std::wstring() : editor.message(), columns);
     text = line.text;
     cursor_column = line.cursor_column;
+  } else if (multi_line) {
+    return;
   } else if (view.show_pending_keys && !editor.pending_keys_text().empty()) {
     text = fit_message(editor.pending_keys_text(), columns);
   } else {
     text = fit_message(editor.message(), columns);
   }
-  collect_string(text, 0, columns + 1, kEchoTabWidth);
-  draw_cells(kMarginDip, y, rgb(kForeground));
+  draw_echo_line(text, y, columns);
   if (cursor_column >= 0) {
-    const float lh = measurer_.line_height();
     const float x = kMarginDip + static_cast<float>(cursor_column) * cw;
     fill(x, y, x + kCursorWidthDip, y + lh, rgb(kCursor));
     view.caret_x = x;
     view.caret_y = y;
     view.caret_height = lh;
   }
+}
+
+void Renderer::draw_echo_line(std::wstring_view text, float y, int columns) {
+  // The echo line counts TAB as one cell, like fit_message / fit_minibuffer.
+  constexpr int kEchoTabWidth = 1;
+  collect_string(text, 0, columns + 1, kEchoTabWidth);
+  draw_cells(kMarginDip, y, rgb(kForeground));
 }
 
 bool Renderer::collect_line(const PieceTree& text, size_t line, int left, int columns,

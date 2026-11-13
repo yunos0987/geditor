@@ -32,29 +32,76 @@ class MarkFollower final : public EditListener {
 
 constexpr Key kCtrlG{U'g', kModCtrl};
 constexpr Key kEscape{kKeyEscape, 0};
+constexpr int kMaxPrefixValue = 100000000;  // digits beyond this are ignored
+constexpr int kMaxPrefixMultiplier = 1 << 28;
+constexpr size_t kEchoLines = 10;  // PLAN 2 "settings errors": up to 10 lines
+// Most repeats of a command sequence (C-u N on a sequence).
+constexpr size_t kMaxSequenceRepeat = 1'000'000;
+
+// Command names are ASCII; false for anything else.
+bool narrow_name(std::wstring_view s, std::string* out) {
+  out->clear();
+  for (const wchar_t c : s) {
+    if (c <= 0 || c >= 0x80) return false;
+    out->push_back(static_cast<char>(c));
+  }
+  return true;
+}
+
+void add_prefix_digit(PrefixArg& p, int digit) {
+  if (!p.digits) {
+    p.digits = true;
+    p.value = 0;
+    p.multiplier = 1;
+  }
+  if (p.value < kMaxPrefixValue) p.value = p.value * 10 + digit;
+}
+
+std::wstring join_display(const std::wstring& a, const std::wstring& b) {
+  if (a.empty()) return b;
+  if (b.empty()) return a;
+  return a + L" " + b;
+}
 
 }  // namespace
 
-Editor::Editor(Host& host)
-    : host_(host),
-      global_map_(make_keymap(default_global_bindings())),
-      minibuffer_map_(make_keymap(default_minibuffer_bindings())) {}
+int PrefixArg::count() const {
+  if (!active) return 1;
+  if (digits) return negative ? -value : value;
+  if (negative) return -1;
+  return multiplier;
+}
+
+Editor::Editor(Host& host) : host_(host) {
+  rebuild_keymaps(config_, nullptr);
+}
 
 // ---- Key dispatch ----
 
 Keymap::Lookup Editor::lookup(const KeySequence& keys) const {
   if (minibuffer_active()) {
-    const Keymap::Lookup r = minibuffer_map_.lookup(keys);
+    // An explicit null in minibuffer_keys does not fall through to global.
+    const Keymap::Lookup r = keymap(KeymapKind::kMinibuffer).lookup(keys);
     if (r.result != Keymap::Result::kUndefined) return r;
   }
-  return global_map_.lookup(keys);
+  return keymap(KeymapKind::kGlobal).lookup(keys);
 }
 
 void Editor::handle_key(const Key& key) {
   message_.clear();
+  message_is_settings_ = false;
   if (quoted_insert_pending_) {
     quoted_insert_pending_ = false;
     handle_quoted_insert(key);
+    return;
+  }
+  // C-g typed in the middle of a key sequence (after prefix keys, ESC or a
+  // prefix argument) quits, as in Emacs, whatever ESC C-g (= C-M-g) or the
+  // prefix + C-g would be bound to. A real Ctrl+Alt+G is not affected.
+  if (key == kCtrlG && (meta_pending_ || !pending_.empty() || prefix_.active)) {
+    cancel_pending_input();
+    message_ = L"Quit";
+    note_non_command();
     return;
   }
   Key k = key;
@@ -72,6 +119,20 @@ void Editor::handle_key(const Key& key) {
       return;
     }
   }
+  // Digits and "-" continue a prefix argument (C-u 1 2, C-u -).
+  if (prefix_.active && pending_.empty() && k.mods == 0) {
+    if (k.code >= U'0' && k.code <= U'9') {
+      add_prefix_digit(prefix_, static_cast<int>(k.code - U'0'));
+      prefix_display_ = join_display(prefix_display_, key_to_string(k));
+      return;
+    }
+    if (k.code == U'-' && !prefix_.digits && !prefix_.negative) {
+      prefix_.negative = true;
+      prefix_.multiplier = 1;
+      prefix_display_ = join_display(prefix_display_, L"-");
+      return;
+    }
+  }
   if (!pending_display_.empty()) pending_display_ += L' ';
   pending_display_ += key_to_string(key);
   pending_.push_back(k);
@@ -82,19 +143,26 @@ void Editor::handle_key(const Key& key) {
 
   k = pending_.back();  // without S- when shift translation applied
   const size_t length = pending_.size();
-  const std::wstring display = std::move(pending_display_);
+  std::wstring display = std::move(pending_display_);
   pending_.clear();
   pending_display_.clear();
   last_key_ = k;
   if (r.result == Keymap::Result::kCommand) {
-    run_command(r.command, false);
+    // A copy: the keymaps may be rebuilt (settings reload) while it runs.
+    const Binding binding = *r.binding;
+    key_display_ = std::move(display);
+    dispatch(binding, false);
     return;
   }
-  if (length == 1 && is_self_insert_key(k)) {
-    run_command("self-insert-command", true);
+  if (r.result == Keymap::Result::kUndefined && length == 1 && is_self_insert_key(k)) {
+    key_display_ = std::move(display);
+    dispatch(command_binding("self-insert-command"), true);
     return;
   }
-  message_ = key == kCtrlG ? std::wstring(L"Quit") : display + L" is undefined";
+  prefix_ = PrefixArg();
+  prefix_display_.clear();
+  message_ = key == kCtrlG && r.result == Keymap::Result::kUndefined ? std::wstring(L"Quit")
+                                                                     : display + L" is undefined";
   note_non_command();
 }
 
@@ -104,33 +172,346 @@ bool Editor::key_is_bound(const Key& key) const {
   if (meta_pending_) k.mods |= kModMeta;
   KeySequence keys = pending_;
   keys.push_back(k);
-  return lookup_shift_translated(keys, [this](const KeySequence& s) { return lookup(s); }).result !=
-         Keymap::Result::kUndefined;
+  const Keymap::Result r =
+      lookup_shift_translated(keys, [this](const KeySequence& s) { return lookup(s); }).result;
+  return r == Keymap::Result::kPrefix || r == Keymap::Result::kCommand;
 }
 
 void Editor::execute_command(std::string_view name) {
   message_.clear();
+  message_is_settings_ = false;
+  cancel_pending_input();
+  key_display_.clear();
+  dispatch(command_binding(std::string(name)), false);
+}
+
+void Editor::cancel_pending_input() {
   pending_.clear();
   pending_display_.clear();
   meta_pending_ = false;
-  run_command(name, false);
+  prefix_ = PrefixArg();
+  prefix_display_.clear();
 }
 
-void Editor::run_command(std::string_view name, bool typing) {
-  const CommandInfo* info = find_command(name);
-  if (info == nullptr) {
-    message_ = L"Unknown command: " + widen(name);
+PrefixArg Editor::take_prefix() {
+  const PrefixArg p = prefix_;
+  command_prefix_display_ = std::move(prefix_display_);
+  prefix_ = PrefixArg();
+  prefix_display_.clear();
+  return p;
+}
+
+bool Editor::dispatch(const Binding& binding, bool typing) {
+  const bool ok = run_binding(binding, typing);
+  // A command chosen in the minibuffer (M-x, or the last argument read)
+  // runs after the command that closed the minibuffer, as its own command.
+  while (deferred_call_) {
+    const std::pair<CommandCall, PrefixArg> next = std::move(*deferred_call_);
+    deferred_call_.reset();
+    key_display_.clear();
+    command_prefix_display_.clear();
+    run_call(next.first, next.second, false, true);
+  }
+  return ok;
+}
+
+bool Editor::run_binding(const Binding& binding, bool typing) {
+  const PrefixArg prefix = take_prefix();
+  if (!binding.sequence) return run_call(binding.calls.front(), prefix, typing, true);
+  // A command sequence (decision D7): the prefix argument repeats the whole
+  // sequence; all repeats are one undo group; the first failure stops it and
+  // keeps the edits made before it.
+  const int count = prefix.count();
+  if (count <= 0) {
+    message_ = L"Repeat count must be positive";
     note_non_command();
-    return;
+    return false;
+  }
+  // A huge count must not freeze the editor: refuse before running when the
+  // text the sequence inserts (known from its calls) times the count is too
+  // much, or when the count alone is beyond any sensible repeat.
+  size_t inserted_per_run = 0;
+  for (const CommandCall& call : binding.calls) {
+    if (call.name == "insert-text" && !call.args.empty()) {
+      inserted_per_run += call.args.front().text.size();
+    } else if (call.name == "self-insert-command" || call.name == "newline" ||
+               call.name == "open-line" || call.name == "insert-tab") {
+      inserted_per_run += 1;
+    }
+  }
+  if (static_cast<size_t>(count) > kMaxSequenceRepeat ||
+      (inserted_per_run > 0 && static_cast<size_t>(count) > kMaxRepeatedInsert / inserted_per_run)) {
+    message_ = L"Repeat count too large";
+    note_non_command();
+    return false;
+  }
+  main_.undo.begin_command(main_.point, false);
+  mini_.undo.begin_command(mini_.point, false);
+  bool ok = true;
+  for (int i = 0; ok && i < count; ++i) {
+    for (const CommandCall& call : binding.calls) {
+      if (!run_call(call, PrefixArg(), false, false)) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  main_.undo.end_command(main_.point);
+  mini_.undo.end_command(mini_.point);
+  return ok;
+}
+
+bool Editor::run_call(const CommandCall& call, const PrefixArg& prefix, bool typing, bool own_group) {
+  const CommandInfo* info = find_command(call.name);
+  if (info == nullptr || info->fn == nullptr) {
+    message_ = info == nullptr ? L"Unknown command: " + widen(call.name)
+                               : widen(call.name) + L" is not implemented yet";
+    if (own_group) note_non_command();
+    return false;
+  }
+  if (!info->params.empty() && call.args.empty()) {
+    // Run without its arguments: ask for them in the minibuffer.
+    failed_ = false;
+    start_reading_arguments(*info, prefix);
+    const bool ok = !failed_;
+    failed_ = false;
+    if (own_group) note_non_command();
+    return ok;
   }
   this_command_ = info->name;
+  command_prefix_ = prefix;
+  command_args_ = call.args;
+  failed_ = false;
+  const std::string previous_command = last_command_;
   Buffer& b = current();
   main_.edited_in_command = false;
   mini_.edited_in_command = false;
-  b.undo.begin_command(b.point, typing);
+  if (own_group) b.undo.begin_command(b.point, typing);
   info->fn(*this);
-  b.undo.end_command(b.point);
+  if (own_group) b.undo.end_command(b.point);
   finish_command(b);
+  // The prefix argument commands are transparent for last-command checks
+  // (C-n C-u 3 C-n keeps the goal column).
+  if (info->prefix_argument) last_command_ = previous_command;
+  const bool ok = !failed_;
+  command_prefix_ = PrefixArg();
+  command_args_.clear();
+  failed_ = false;
+  return ok;
+}
+
+// ---- Prefix argument ----
+
+void Editor::universal_argument() {
+  PrefixArg p = command_prefix_;
+  if (p.active && !p.digits && !p.negative) {
+    if (p.multiplier < kMaxPrefixMultiplier) p.multiplier *= 4;
+    prefix_display_ = join_display(command_prefix_display_, key_display_);
+  } else {
+    p = PrefixArg();
+    p.active = true;
+    p.multiplier = 4;
+    prefix_display_ = key_display_;
+  }
+  prefix_ = p;
+}
+
+void Editor::digit_argument() {
+  PrefixArg p = command_prefix_;
+  prefix_display_ = p.active ? join_display(command_prefix_display_, key_display_) : key_display_;
+  p.active = true;
+  const char32_t c = last_key_.code;
+  add_prefix_digit(p, c >= U'0' && c <= U'9' ? static_cast<int>(c - U'0') : 0);
+  prefix_ = p;
+}
+
+void Editor::negative_argument() {
+  PrefixArg p = command_prefix_;
+  prefix_display_ = p.active ? join_display(command_prefix_display_, key_display_) : key_display_;
+  p.active = true;
+  p.negative = !p.negative;
+  p.multiplier = 1;
+  prefix_ = p;
+}
+
+// ---- M-x and command arguments ----
+
+void Editor::execute_extended_command() {
+  if (minibuffer_active()) {
+    fail(kRecursiveMinibufferMessage);
+    return;
+  }
+  minibuffer_prefix_ = command_prefix_;
+  start_minibuffer(MinibufferPurpose::kExtendedCommand, L"M-x ", L"");
+}
+
+void Editor::start_reading_arguments(const CommandInfo& info, const PrefixArg& prefix) {
+  if (minibuffer_active()) {
+    fail(kRecursiveMinibufferMessage);
+    return;
+  }
+  reading_call_ = CommandCall{info.name, {}};
+  minibuffer_prefix_ = prefix;
+  start_minibuffer(MinibufferPurpose::kCommandArgument, info.params.front().prompt, L"");
+}
+
+void Editor::finish_command_name(const std::wstring& input) {
+  std::string name;
+  if (!narrow_name(input, &name) || find_command(name) == nullptr) {
+    message_ = L"[No match]";  // the minibuffer stays for another try
+    return;
+  }
+  command_history_.add(input);
+  const PrefixArg prefix = minibuffer_prefix_;
+  abort_minibuffer();
+  deferred_call_.emplace(CommandCall{name, {}}, prefix);
+}
+
+void Editor::finish_argument(const std::wstring& input) {
+  const CommandInfo* info = find_command(reading_call_.name);
+  if (info == nullptr || reading_call_.args.size() >= info->params.size()) {
+    abort_minibuffer();
+    return;
+  }
+  const Param& param = info->params[reading_call_.args.size()];
+  CommandArg arg;
+  switch (param.type) {
+    case ParamType::kText:
+      arg.text = input;
+      break;
+    case ParamType::kInteger: {
+      size_t i = input.size() > 0 && input[0] == L'-' ? 1 : 0;
+      const bool ok = i < input.size() && input.size() - i <= 18 &&
+                      std::all_of(input.begin() + static_cast<std::ptrdiff_t>(i), input.end(),
+                                  [](wchar_t c) { return c >= L'0' && c <= L'9'; });
+      if (!ok) {
+        message_ = L"[Please enter a whole number]";
+        return;
+      }
+      int64_t value = 0;
+      for (; i < input.size(); ++i) value = value * 10 + (input[i] - L'0');
+      arg.type = CommandArg::Type::kInteger;
+      arg.integer = input[0] == L'-' ? -value : value;
+      break;
+    }
+    case ParamType::kChoice: {
+      const bool ok = std::any_of(param.choices.begin(), param.choices.end(),
+                                  [&](const wchar_t* c) { return input == c; });
+      if (!ok) {
+        message_ = L"[No match]";
+        return;
+      }
+      arg.text = input;
+      break;
+    }
+  }
+  argument_history_.add(input);
+  reading_call_.args.push_back(std::move(arg));
+  if (reading_call_.args.size() < info->params.size()) {
+    CommandCall call = std::move(reading_call_);
+    const PrefixArg prefix = minibuffer_prefix_;
+    start_minibuffer(MinibufferPurpose::kCommandArgument, info->params[call.args.size()].prompt, L"");
+    reading_call_ = std::move(call);
+    minibuffer_prefix_ = prefix;
+    return;
+  }
+  CommandCall call = std::move(reading_call_);
+  const PrefixArg prefix = minibuffer_prefix_;
+  abort_minibuffer();
+  deferred_call_.emplace(std::move(call), prefix);
+}
+
+History& Editor::history_for(MinibufferPurpose purpose) {
+  switch (purpose) {
+    case MinibufferPurpose::kExtendedCommand: return command_history_;
+    case MinibufferPurpose::kCommandArgument: return argument_history_;
+    default: return file_history_;
+  }
+}
+
+// ---- Settings ----
+
+void Editor::rebuild_keymaps(const Config& config, std::vector<Diagnostic>* errors) {
+  for (int i = 0; i < kKeymapCount; ++i) {
+    const auto kind = static_cast<KeymapKind>(i);
+    maps_[i] = build_keymap(emacs_layer(kind), compat_layer(kind), config.keys[static_cast<size_t>(i)],
+                            errors);
+  }
+}
+
+bool Editor::apply_settings_text(std::string_view utf8) {
+  cancel_pending_input();
+  ConfigParse parsed = parse_config(utf8);
+  std::vector<Diagnostic> errors = std::move(parsed.errors);
+  if (parsed.syntax_ok) {
+    rebuild_keymaps(parsed.config, &errors);
+    config_ = std::move(parsed.config);
+  }
+  std::stable_sort(errors.begin(), errors.end(), [](const Diagnostic& a, const Diagnostic& b) {
+    return a.pos.line != b.pos.line ? a.pos.line < b.pos.line : a.pos.column < b.pos.column;
+  });
+  settings_errors_ = std::move(errors);
+  show_settings_errors();
+  return parsed.syntax_ok;
+}
+
+void Editor::show_settings_errors() {
+  if (settings_errors_.empty()) {
+    // A corrected file clears the errors shown for the previous one.
+    if (message_is_settings_) message_.clear();
+    message_is_settings_ = false;
+    ensure_point_visible();
+    return;
+  }
+  const std::wstring name = settings_path_.empty() ? std::wstring(L"settings") : file_name_of(settings_path_);
+  // With the minibuffer active its line counts as one of the 10.
+  const std::vector<std::wstring> lines =
+      format_diagnostics(settings_errors_, name, minibuffer_active() ? kEchoLines - 1 : kEchoLines);
+  message_.clear();
+  for (const std::wstring& line : lines) {
+    if (!message_.empty()) message_ += L'\n';
+    message_ += line;
+  }
+  message_is_settings_ = true;
+  ensure_point_visible();  // the echo area grew: keep point on screen
+}
+
+void Editor::reload_settings() {
+  cancel_pending_input();
+  if (settings_path_.empty()) return;
+  const std::wstring& path = settings_path_;
+  auto show = [this](std::wstring text) {
+    message_ = std::move(text);
+    message_is_settings_ = true;
+    ensure_point_visible();
+  };
+  switch (host_.file_kind(path)) {
+    case FileKind::kNone:
+      if (settings_file_seen_) {
+        settings_file_seen_ = false;
+        config_ = Config();
+        settings_errors_.clear();
+        rebuild_keymaps(config_, nullptr);
+        show(L"Settings file removed; using defaults");
+      }
+      return;
+    case FileKind::kError:
+      show(L"Cannot access " + path + L" (settings kept)");
+      return;
+    case FileKind::kDirectory:
+      show(path + L" is a directory (settings kept)");
+      return;
+    case FileKind::kFile:
+      break;
+  }
+  std::string bytes;
+  std::wstring error;
+  if (!host_.read_file(path, bytes, error)) {
+    show((error.empty() ? L"Cannot read " + path : error) + L" (settings kept)");
+    return;
+  }
+  settings_file_seen_ = true;
+  apply_settings_text(bytes);
 }
 
 void Editor::finish_command(Buffer&) {
@@ -198,9 +579,8 @@ void Editor::handle_quoted_insert(const Key& key) {
 
 void Editor::insert_text(std::wstring_view text) {
   message_.clear();
-  pending_.clear();
-  pending_display_.clear();
-  meta_pending_ = false;
+  message_is_settings_ = false;
+  cancel_pending_input();
   quoted_insert_pending_ = false;
   if (text.empty()) return;
   this_command_ = "insert-text";
@@ -224,10 +604,43 @@ std::wstring Editor::echo_area_text() const {
   return message_;
 }
 
+std::vector<std::wstring> Editor::message_lines(int max_lines) const {
+  std::vector<std::wstring> lines;
+  if (max_lines <= 0) return lines;
+  size_t start = 0;
+  for (;;) {
+    const size_t end = message_.find(L'\n', start);
+    lines.push_back(message_.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
+    if (end == std::wstring::npos) break;
+    start = end + 1;
+  }
+  const size_t max = static_cast<size_t>(max_lines);
+  if (lines.size() <= max) return lines;
+  if (message_is_settings_ && !settings_errors_.empty()) {
+    // Re-format so that "... and N more" counts every hidden error.
+    const std::wstring name = settings_path_.empty() ? std::wstring(L"settings") : file_name_of(settings_path_);
+    return format_diagnostics(settings_errors_, name, max);
+  }
+  const size_t hidden = lines.size() - (max - 1);
+  lines.resize(max - 1);
+  lines.push_back(L"... and " + std::to_wstring(hidden) + L" more");
+  return lines;
+}
+
+int Editor::echo_line_count(int max_rows) const {
+  if (!message_is_multi_line()) return 1;
+  const int minibuffer = minibuffer_active() ? 1 : 0;
+  const int lines = static_cast<int>(std::count(message_.begin(), message_.end(), L'\n')) + 1;
+  const int shown = std::min(lines, std::max(0, max_rows - minibuffer));
+  return std::max(1, shown + minibuffer);
+}
+
 std::wstring Editor::pending_keys_text() const {
   if (quoted_insert_pending_) return L"C-q-";
-  if (pending_display_.empty()) return std::wstring();
-  return pending_display_ + L"-";
+  // The prefix argument being typed ("C-u 1 2") and the prefix keys.
+  const std::wstring keys = join_display(prefix_display_, pending_display_);
+  if (keys.empty()) return std::wstring();
+  return keys + L"-";
 }
 
 std::wstring Editor::buffer_name() const {
@@ -294,7 +707,7 @@ void Editor::ensure_point_visible() {
 
 bool Editor::check_writable(Buffer& b) {
   if (!b.read_only) return true;
-  message_ = L"Buffer is read-only";
+  fail(L"Buffer is read-only");
   return false;
 }
 
@@ -390,7 +803,7 @@ void Editor::start_minibuffer(MinibufferPurpose purpose, std::wstring prompt, st
   mini_.point = initial.size();
   purpose_ = purpose;
   prompt_ = std::move(prompt);
-  file_history_.reset_position();
+  history_for(purpose).reset_position();
 }
 
 void Editor::abort_minibuffer() {
@@ -398,11 +811,21 @@ void Editor::abort_minibuffer() {
   prompt_.clear();
   mini_.reset();
   after_save_ = AfterSave::kNone;
+  reading_call_ = CommandCall();
+  minibuffer_prefix_ = PrefixArg();
 }
 
 void Editor::exit_minibuffer() {
   const std::wstring input = mini_.text.text();
   const MinibufferPurpose purpose = purpose_;
+  if (purpose == MinibufferPurpose::kExtendedCommand) {
+    finish_command_name(input);
+    return;
+  }
+  if (purpose == MinibufferPurpose::kCommandArgument) {
+    finish_argument(input);
+    return;
+  }
   file_history_.add(input);
   purpose_ = MinibufferPurpose::kNone;
   prompt_.clear();
@@ -416,7 +839,25 @@ void Editor::exit_minibuffer() {
 
 void Editor::complete_minibuffer() {
   const std::wstring input = mini_.text.text();
-  const FileCompletion r = complete_file_name(input, host_);
+  FileCompletion r;
+  if (purpose_ == MinibufferPurpose::kExtendedCommand) {
+    // Every registered command, implemented or not (decision D8).
+    std::vector<std::wstring> names;
+    for (const CommandInfo& c : all_commands()) names.push_back(widen(c.name));
+    r = complete_name(input, std::move(names));
+  } else if (purpose_ == MinibufferPurpose::kCommandArgument) {
+    const CommandInfo* info = find_command(reading_call_.name);
+    if (info == nullptr || reading_call_.args.size() >= info->params.size() ||
+        info->params[reading_call_.args.size()].type != ParamType::kChoice) {
+      message_ = L"[No completions]";
+      return;
+    }
+    std::vector<std::wstring> names;
+    for (const wchar_t* c : info->params[reading_call_.args.size()].choices) names.emplace_back(c);
+    r = complete_name(input, std::move(names));
+  } else {
+    r = complete_file_name(input, host_);
+  }
   if (r.text != input) set_minibuffer_text(r.text);
   message_ = r.message;
 }
@@ -429,8 +870,8 @@ void Editor::set_minibuffer_text(std::wstring_view text) {
 
 void Editor::minibuffer_history_previous() {
   std::wstring text;
-  if (!file_history_.previous(mini_.text.text(), &text)) {
-    message_ = L"Beginning of history; no preceding item";
+  if (!history_for(purpose_).previous(mini_.text.text(), &text)) {
+    fail(L"Beginning of history; no preceding item");
     return;
   }
   set_minibuffer_text(text);
@@ -438,8 +879,8 @@ void Editor::minibuffer_history_previous() {
 
 void Editor::minibuffer_history_next() {
   std::wstring text;
-  if (!file_history_.next(&text)) {
-    message_ = L"End of history; no default available";
+  if (!history_for(purpose_).next(&text)) {
+    fail(L"End of history; no default available");
     return;
   }
   set_minibuffer_text(text);

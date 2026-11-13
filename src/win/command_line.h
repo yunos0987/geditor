@@ -1,5 +1,6 @@
-// Command line of geditor.exe: [+LINE] [file] (docs/PLAN.md 2 "startup
-// arguments"; --encoding arrives in M4), plus the measurement flags.
+// Command line of geditor.exe: [--settings=PATH] [+LINE] [file]
+// (docs/PLAN.md 2 "startup arguments"; --encoding arrives in M4), plus the
+// measurement flags.
 #pragma once
 
 #include <cstddef>
@@ -12,6 +13,7 @@ namespace geditor::win {
 struct CommandLine {
   std::wstring file;           // empty when no file is given
   size_t line = 0;             // 1-based line from +LINE; 0 when not given
+  std::wstring settings;       // PATH of --settings=PATH as written; empty when not given
   bool measure_startup = false;  // --measure-startup
   bool measure_input = false;    // --measure-input (tools/measure_input.py)
   std::vector<std::wstring> errors;  // messages for the echo area
@@ -29,5 +31,10 @@ CommandLine parse_command_line(std::wstring_view command_line);
 
 // Quotes one argument so that split_command_line returns it unchanged.
 std::wstring quote_argument(std::wstring_view argument);
+
+// The settings file: --settings=PATH (a relative PATH is resolved against
+// `current_dir`), else "<user_profile>\.geditor.json", else "" (no profile).
+std::wstring settings_path_for(const CommandLine& command_line, std::wstring_view current_dir,
+                               std::wstring_view user_profile);
 
 }  // namespace geditor::win

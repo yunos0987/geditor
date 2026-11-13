@@ -9,24 +9,65 @@ Keymap::~Keymap() = default;
 Keymap::Keymap(Keymap&&) noexcept = default;
 Keymap& Keymap::operator=(Keymap&&) noexcept = default;
 
-bool Keymap::bind(const KeySequence& keys, std::string command) {
-  if (keys.empty()) return false;
+Binding command_binding(std::string command) {
+  Binding b;
+  b.calls.push_back(CommandCall{std::move(command), {}});
+  return b;
+}
+
+bool Keymap::path_is_free(const KeySequence& keys) const {
+  const Keymap* map = this;
+  for (size_t i = 0; i + 1 < keys.size(); ++i) {
+    const auto it = map->entries_.find(keys[i].id());
+    if (it == map->entries_.end()) return true;
+    const Entry& e = it->second;
+    if (e.binding) return false;
+    if (!e.prefix) return true;
+    map = e.prefix.get();
+  }
+  return true;
+}
+
+Keymap* Keymap::prefix_map_for(const KeySequence& keys) {
   Keymap* map = this;
   for (size_t i = 0; i + 1 < keys.size(); ++i) {
     Entry& e = map->entries_[keys[i].id()];
-    if (!e.command.empty()) return false;
+    e.unbound = false;  // an unbound key becomes a prefix again
     if (!e.prefix) e.prefix = std::make_unique<Keymap>();
     map = e.prefix.get();
   }
-  Entry& last = map->entries_[keys.back().id()];
-  if (last.prefix) return false;
-  last.command = std::move(command);
+  return map;
+}
+
+bool Keymap::bind(const KeySequence& keys, Binding binding) {
+  if (keys.empty() || binding.calls.empty() || !path_is_free(keys)) return false;
+  // A binding on an existing prefix key conflicts with the keys under it.
+  {
+    const Lookup existing = lookup(keys);
+    if (existing.result == Result::kPrefix) return false;
+  }
+  Entry& last = prefix_map_for(keys)->entries_[keys.back().id()];
+  last.binding = std::make_unique<Binding>(std::move(binding));
+  last.unbound = false;
   return true;
+}
+
+bool Keymap::bind(const KeySequence& keys, std::string command) {
+  return bind(keys, command_binding(std::move(command)));
 }
 
 bool Keymap::bind(std::wstring_view notation, std::string command) {
   const std::optional<KeySequence> keys = parse_key_sequence(notation);
   return keys && bind(*keys, std::move(command));
+}
+
+bool Keymap::unbind(const KeySequence& keys) {
+  if (keys.empty() || !path_is_free(keys)) return false;
+  Entry& last = prefix_map_for(keys)->entries_[keys.back().id()];
+  last.binding.reset();
+  last.prefix.reset();
+  last.unbound = true;
+  return true;
 }
 
 Keymap::Lookup Keymap::lookup(const KeySequence& keys) const {
@@ -39,9 +80,12 @@ Keymap::Lookup Keymap::lookup(const KeySequence& keys) const {
     if (i + 1 == keys.size()) {
       if (e.prefix) {
         result.result = Result::kPrefix;
-      } else if (!e.command.empty()) {
+      } else if (e.binding) {
         result.result = Result::kCommand;
-        result.command = e.command;
+        result.command = e.binding->calls.front().name;
+        result.binding = e.binding.get();
+      } else if (e.unbound) {
+        result.result = Result::kUnbound;
       }
       return result;
     }
@@ -104,6 +148,45 @@ constexpr DefaultBinding kGlobalBindings[] = {
     {L"C-x C-w", "write-file"},
     {L"C-x C-q", "read-only-mode"},
     {L"C-x C-c", "quit"},
+    // Search and replace (M5)
+    {L"C-s", "isearch-forward"},
+    {L"C-r", "isearch-backward"},
+    {L"M-%", "query-replace"},
+    {L"C-M-%", "query-replace-regexp"},
+    {L"M-g g", "goto-line"},
+    {L"M-g M-g", "goto-line"},
+    // Encodings and line ends (M4)
+    {L"C-x RET f", "set-buffer-file-coding-system"},
+    {L"C-x RET r", "revert-buffer-with-coding-system"},
+    {L"C-x RET c", "find-file-with-encoding"},
+    {L"C-x RET e", "set-eol"},
+    // View (M3)
+    {L"C-x C-+", "text-scale-increase"},
+    {L"C-x C-=", "text-scale-increase"},
+    {L"C-x C--", "text-scale-decrease"},
+    {L"C-x C-0", "text-scale-reset"},
+    {L"<f10>", "menu-bar-open"},
+    // Prefix argument
+    {L"C-u", "universal-argument"},
+    {L"M-0", "digit-argument"},
+    {L"M-1", "digit-argument"},
+    {L"M-2", "digit-argument"},
+    {L"M-3", "digit-argument"},
+    {L"M-4", "digit-argument"},
+    {L"M-5", "digit-argument"},
+    {L"M-6", "digit-argument"},
+    {L"M-7", "digit-argument"},
+    {L"M-8", "digit-argument"},
+    {L"M-9", "digit-argument"},
+    {L"M--", "negative-argument"},
+    // Keyboard macros (M6). <f4> ends the macro while recording, else runs it.
+    {L"C-x (", "kmacro-start-macro"},
+    {L"<f3>", "kmacro-start-macro"},
+    {L"C-x )", "kmacro-end-macro"},
+    {L"C-x e", "kmacro-end-and-call-macro"},
+    {L"<f4>", "kmacro-end-and-call-macro"},
+    // Other
+    {L"M-x", "execute-extended-command"},
     // Windows editing keys that do not conflict with Emacs
     {L"<left>", "backward-char"},
     {L"<right>", "forward-char"},
@@ -128,14 +211,66 @@ constexpr DefaultBinding kMinibufferBindings[] = {
     {L"M-n", "next-history-element"},
 };
 
+// PLAN 4.4 "Windows compatible keys" (12 keys; C-M-h and C-M-r share a row).
+constexpr DefaultBinding kCompatBindings[] = {
+    {L"C-M-a", "select-all"},
+    {L"C-M-c", "copy"},
+    {L"C-M-x", "cut"},
+    {L"C-M-v", "paste"},
+    {L"C-M-z", "undo"},
+    {L"C-M-y", "redo"},
+    {L"C-M-s", "save-buffer"},
+    {L"C-M-w", "quit"},
+    {L"C-M-f", "isearch-forward"},
+    {L"C-M-h", "query-replace"},
+    {L"C-M-r", "query-replace"},
+    {L"C-M-g", "goto-line"},
+};
+
+// PLAN 4.4 "during isearch".
+constexpr DefaultBinding kIsearchBindings[] = {
+    {L"C-s", "isearch-repeat-forward"},
+    {L"C-r", "isearch-repeat-backward"},
+    {L"DEL", "isearch-delete-char"},
+    {L"RET", "isearch-exit"},
+    {L"C-g", "isearch-abort"},
+    {L"M-r", "isearch-toggle-regexp"},
+    {L"M-c", "isearch-toggle-case-fold"},
+    {L"M-%", "isearch-query-replace"},
+};
+
+// PLAN 4.4 "during query-replace".
+constexpr DefaultBinding kQueryReplaceBindings[] = {
+    {L"y", "query-replace-act"},
+    {L"SPC", "query-replace-act"},
+    {L"n", "query-replace-skip"},
+    {L"DEL", "query-replace-skip"},
+    {L"!", "query-replace-all"},
+    {L".", "query-replace-act-and-exit"},
+    {L"q", "query-replace-exit"},
+    {L"RET", "query-replace-exit"},
+};
+
 }  // namespace
 
 std::span<const DefaultBinding> default_global_bindings() {
   return kGlobalBindings;
 }
 
+std::span<const DefaultBinding> default_compat_bindings() {
+  return kCompatBindings;
+}
+
 std::span<const DefaultBinding> default_minibuffer_bindings() {
   return kMinibufferBindings;
+}
+
+std::span<const DefaultBinding> default_isearch_bindings() {
+  return kIsearchBindings;
+}
+
+std::span<const DefaultBinding> default_query_replace_bindings() {
+  return kQueryReplaceBindings;
 }
 
 Keymap make_keymap(std::span<const DefaultBinding> bindings) {

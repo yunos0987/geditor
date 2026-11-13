@@ -63,6 +63,41 @@ constexpr Expected kExpectedGlobal[] = {
     {L"C-x C-w", "write-file"},
     {L"C-x C-q", "read-only-mode"},
     {L"C-x C-c", "quit"},
+    // M2: the keys of PLAN 4.4 whose commands arrive in later milestones
+    // (registered as not implemented), the prefix argument and M-x.
+    {L"C-s", "isearch-forward"},
+    {L"C-r", "isearch-backward"},
+    {L"M-%", "query-replace"},
+    {L"C-M-%", "query-replace-regexp"},
+    {L"M-g g", "goto-line"},
+    {L"M-g M-g", "goto-line"},
+    {L"C-x RET f", "set-buffer-file-coding-system"},
+    {L"C-x RET r", "revert-buffer-with-coding-system"},
+    {L"C-x RET c", "find-file-with-encoding"},
+    {L"C-x RET e", "set-eol"},
+    {L"C-x C-+", "text-scale-increase"},
+    {L"C-x C-=", "text-scale-increase"},
+    {L"C-x C--", "text-scale-decrease"},
+    {L"C-x C-0", "text-scale-reset"},
+    {L"<f10>", "menu-bar-open"},
+    {L"C-u", "universal-argument"},
+    {L"M-0", "digit-argument"},
+    {L"M-1", "digit-argument"},
+    {L"M-2", "digit-argument"},
+    {L"M-3", "digit-argument"},
+    {L"M-4", "digit-argument"},
+    {L"M-5", "digit-argument"},
+    {L"M-6", "digit-argument"},
+    {L"M-7", "digit-argument"},
+    {L"M-8", "digit-argument"},
+    {L"M-9", "digit-argument"},
+    {L"M--", "negative-argument"},
+    {L"C-x (", "kmacro-start-macro"},
+    {L"<f3>", "kmacro-start-macro"},
+    {L"C-x )", "kmacro-end-macro"},
+    {L"C-x e", "kmacro-end-and-call-macro"},
+    {L"<f4>", "kmacro-end-and-call-macro"},
+    {L"M-x", "execute-extended-command"},
     {L"<left>", "backward-char"},
     {L"<right>", "forward-char"},
     {L"<up>", "previous-line"},
@@ -130,10 +165,12 @@ TEST(keymap_default_bindings_name_registered_commands) {
   CHECK(geditor::find_command("paste") != nullptr);
 }
 
-TEST(keymap_c_x_is_prefix_and_m_g_is_not_bound) {
+// M2: M-g became a prefix (M-g g / M-g M-g goto-line of PLAN 4.4).
+TEST(keymap_c_x_and_m_g_are_prefixes) {
   const Keymap map = geditor::make_keymap(geditor::default_global_bindings());
   CHECK(map.lookup(*geditor::parse_key_sequence(L"C-x")).result == Keymap::Result::kPrefix);
-  CHECK(map.lookup(*geditor::parse_key_sequence(L"M-g")).result == Keymap::Result::kUndefined);
+  CHECK(map.lookup(*geditor::parse_key_sequence(L"M-g")).result == Keymap::Result::kPrefix);
+  CHECK(map.lookup(*geditor::parse_key_sequence(L"M-j")).result == Keymap::Result::kUndefined);
   CHECK(map.lookup(*geditor::parse_key_sequence(L"C-x C-z")).result == Keymap::Result::kUndefined);
 }
 
@@ -155,8 +192,8 @@ TEST(dispatch_undefined_key_shows_message_and_changes_nothing) {
   CHECK_EQ(s.message(), std::wstring(L"C-x C-z is undefined"));
   CHECK_EQ(s.text(), std::wstring(L"abc"));
   CHECK_EQ(s.point(), size_t{0});
-  s.keys(L"M-g");
-  CHECK_EQ(s.message(), std::wstring(L"M-g is undefined"));
+  s.keys(L"M-j");  // M1 used M-g, which is a prefix since M2 (M-g g)
+  CHECK_EQ(s.message(), std::wstring(L"M-j is undefined"));
   s.keys(L"<f5>");
   CHECK_EQ(s.message(), std::wstring(L"<f5> is undefined"));
   CHECK(!s.modified());

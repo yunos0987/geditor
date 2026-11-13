@@ -6,21 +6,13 @@
 #include "unicode.h"
 
 namespace geditor {
+namespace {
 
-FileCompletion complete_file_name(std::wstring_view input, Host& host) {
+// Completes `name` (the text after `dir_part` in `input`) against `entries`.
+FileCompletion complete_entries(std::wstring_view input, const std::wstring& dir_part,
+                                const std::wstring& name, std::vector<DirEntry>& entries) {
   FileCompletion result;
   result.text = input;
-  const size_t sep = input.find_last_of(L"\\/");
-  const std::wstring dir_part(sep == std::wstring_view::npos ? std::wstring_view() : input.substr(0, sep + 1));
-  const std::wstring name(sep == std::wstring_view::npos ? input : input.substr(sep + 1));
-  const std::wstring cwd = host.current_directory();
-  const std::wstring list_dir = dir_part.empty() ? cwd : normalize_path(dir_part, cwd);
-
-  std::vector<DirEntry> entries;
-  if (!host.list_directory(list_dir, entries)) {
-    result.message = L"[No match]";
-    return result;
-  }
   std::vector<DirEntry> matches;
   for (DirEntry& e : entries) {
     if (e.name == L"." || e.name == L"..") continue;
@@ -76,6 +68,32 @@ FileCompletion complete_file_name(std::wstring_view input, Host& host) {
   list += L'}';
   result.message = list;
   return result;
+}
+
+}  // namespace
+
+FileCompletion complete_file_name(std::wstring_view input, Host& host) {
+  const size_t sep = input.find_last_of(L"\\/");
+  const std::wstring dir_part(sep == std::wstring_view::npos ? std::wstring_view() : input.substr(0, sep + 1));
+  const std::wstring name(sep == std::wstring_view::npos ? input : input.substr(sep + 1));
+  const std::wstring cwd = host.current_directory();
+  const std::wstring list_dir = dir_part.empty() ? cwd : normalize_path(dir_part, cwd);
+
+  std::vector<DirEntry> entries;
+  if (!host.list_directory(list_dir, entries)) {
+    FileCompletion result;
+    result.text = input;
+    result.message = L"[No match]";
+    return result;
+  }
+  return complete_entries(input, dir_part, name, entries);
+}
+
+FileCompletion complete_name(std::wstring_view input, std::vector<std::wstring> names) {
+  std::vector<DirEntry> entries;
+  entries.reserve(names.size());
+  for (std::wstring& n : names) entries.push_back(DirEntry{std::move(n), false});
+  return complete_entries(input, std::wstring(), std::wstring(input), entries);
 }
 
 void History::add(std::wstring_view entry) {

@@ -24,6 +24,18 @@ std::wstring extended_length_path(const std::wstring& path);
 // Short English text for a Win32 error code ("Access is denied").
 std::wstring error_text(unsigned long error);
 
+// What tells two versions of a file apart without reading it: existence,
+// size and last-write time (all zero when the file is missing or cannot be
+// inspected).
+struct FileState {
+  bool exists = false;
+  unsigned long long size = 0;
+  unsigned long long write_time = 0;
+
+  bool operator==(const FileState&) const = default;
+};
+FileState file_state(const std::wstring& path);
+
 bool read_file(const std::wstring& path, std::string& bytes, std::wstring& error);
 // `error` receives the reason only ("Access is denied").
 bool write_file(const std::wstring& path, std::string_view bytes, std::wstring& error);

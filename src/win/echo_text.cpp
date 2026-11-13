@@ -170,6 +170,10 @@ bool is_invisible_format_char(char32_t c) {
          c == 0xFEFF;
 }
 
+int max_echo_rows(int total_rows) {
+  return std::max(1, total_rows - 2);
+}
+
 std::wstring dropped_files_note(unsigned count) {
   if (count <= 1) return std::wstring();
   return L"Opened only the first of " + std::to_wstring(count) + L" dropped files";

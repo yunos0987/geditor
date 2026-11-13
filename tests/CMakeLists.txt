@@ -8,17 +8,24 @@ add_executable(geditor_tests
   test_commands_move.cpp
   test_encoding.cpp
   test_files.cpp
+  test_jsonc.cpp
   test_key.cpp
   test_keymap.cpp
   test_minibuffer.cpp
+  test_mx.cpp
   test_piece_tree.cpp
+  test_prefix_arg.cpp
+  test_quit_keys.cpp
+  test_retry1.cpp
   test_review_fixes.cpp
   test_session_clipboard.cpp
+  test_settings.cpp
   test_shift_translation.cpp
   test_undo.cpp
   test_win_echo.cpp
   test_win_input.cpp
-  test_win_logic.cpp)
+  test_win_logic.cpp
+  test_win_settings.cpp)
 target_link_libraries(geditor_tests PRIVATE
   geditor_options geditor_core geditor_win_logic pcre2_16 user32)
 

@@ -1,5 +1,7 @@
 #include "command_line.h"
 
+#include "path.h"
+
 namespace geditor::win {
 namespace {
 
@@ -97,6 +99,15 @@ CommandLine parse_command_line(std::wstring_view command_line) {
         result.measure_input = true;
         continue;
       }
+      if (a.rfind(L"--settings", 0) == 0) {
+        constexpr size_t kPrefix = sizeof("--settings=") - 1;
+        if (a.size() > kPrefix && a[kPrefix - 1] == L'=') {
+          result.settings = a.substr(kPrefix);
+        } else {
+          result.errors.push_back(L"Invalid option: " + a + L" (use --settings=PATH)");
+        }
+        continue;
+      }
       if (a.size() > 1 && a[0] == L'+') {
         if (!parse_line_number(std::wstring_view(a).substr(1), &result.line)) {
           result.errors.push_back(L"Invalid line number: " + a);
@@ -137,6 +148,13 @@ std::wstring quote_argument(std::wstring_view argument) {
   out.append(backslashes * 2, L'\\');
   out += L'"';
   return out;
+}
+
+std::wstring settings_path_for(const CommandLine& command_line, std::wstring_view current_dir,
+                               std::wstring_view user_profile) {
+  if (!command_line.settings.empty()) return normalize_path(command_line.settings, current_dir);
+  if (user_profile.empty()) return std::wstring();
+  return with_trailing_separator(user_profile) + L".geditor.json";
 }
 
 }  // namespace geditor::win

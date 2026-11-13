@@ -38,6 +38,11 @@ class FakeHost : public geditor::Host {
   bool fail_clipboard_read = false;  // get_clipboard reports kFailed
   // Paths (any case) for which file_kind reports FileKind::kError.
   std::set<std::wstring> error_paths;
+  // Paths (any case) that exist but cannot be read ("Access is denied").
+  std::set<std::wstring> unreadable_paths;
+  // When set, visible_lines() shrinks by the extra echo area rows of this
+  // editor, as the window does (decision D10).
+  const geditor::Editor* echo_editor = nullptr;
 
   int open_dialogs = 0;
   int save_dialogs = 0;
@@ -66,8 +71,11 @@ class FakeHost : public geditor::Host {
   bool ask_yes_no(const std::wstring& question) override;
   bool launch_new_window(const std::wstring& path, std::wstring& error) override;
   void quit() override { ++quit_calls; }
-  int visible_lines() override { return lines; }
+  int visible_lines() override;
 };
+
+// The settings file of Session::settings.
+inline constexpr wchar_t kSettingsPath[] = L"C:\\work\\.geditor.json";
 
 // A host plus an editor, with helpers to feed keys.
 struct Session {
@@ -82,6 +90,9 @@ struct Session {
   // `path`) so that the buffer starts with no undo history.
   void load(const std::wstring& content, const std::wstring& path = L"C:\\work\\t.txt");
   void set_point(size_t offset) { ed.set_point(offset); }
+  // Writes `text` (UTF-8) to kSettingsPath, makes it the settings file and
+  // reloads it, as after saving the file.
+  void settings(const std::string& text);
 
   std::wstring text() const { return ed.buffer().text.text(); }
   size_t point() const { return ed.buffer().point; }

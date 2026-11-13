@@ -2,8 +2,10 @@
 
 Generates (once, under --data-dir) a 100 MB UTF-8 file of about 80
 characters per line (ASCII mixed with Japanese) and a 10 MB file holding a
-single line. For each file it starts `geditor.exe --measure-input <file>`,
-which prints to stderr:
+single line. For each file it starts `geditor.exe --measure-input
+--settings=<data-dir>/settings.json <file>` (a "{}" settings file of its own,
+so the user's .geditor.json in %USERPROFILE% is never read), which prints to
+stderr:
 
   hwnd=0x... open_ms=...   after the first frame (open_ms: request_open time)
   input_ms=...             for each keyboard message: message received ->
@@ -157,9 +159,14 @@ def main() -> int:
     try:
         ensure_file(big, 100 * MB, generate_lines)
         ensure_file(single, 10 * MB, generate_single_line)
+        # A settings file of its own ("{}"): the measurement never depends on
+        # (or reads) the user's %USERPROFILE%\.geditor.json.
+        settings = args.data_dir / "settings.json"
+        settings.write_bytes(b"{}\n")
+        settings_arg = f"--settings={settings.resolve()}"
         # Type in the middle of the 100 MB file.
-        lines = run(args.exe, big, ["+500000"], args.chars, press_end=False)
-        one = run(args.exe, single, [], args.chars, press_end=True)
+        lines = run(args.exe, big, [settings_arg, "+500000"], args.chars, press_end=False)
+        one = run(args.exe, single, [settings_arg], args.chars, press_end=True)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

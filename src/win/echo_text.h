@@ -28,6 +28,10 @@ struct MinibufferLine {
 MinibufferLine fit_minibuffer(std::wstring_view prompt, std::wstring_view input, size_t cursor,
                               std::wstring_view message, int columns);
 
+// Most echo area rows in a window of `total_rows` rows: the mode line and at
+// least one text row stay visible (at least 1).
+int max_echo_rows(int total_rows);
+
 // "" for one file; "Opened only the first of N dropped files" for N > 1.
 std::wstring dropped_files_note(unsigned count);
 

@@ -178,10 +178,15 @@ def wait_for(predicate, timeout_s: float = 10.0, interval_s: float = 0.05):
 
 
 class App:
-    """A geditor process started by this driver (stopped by its own handle)."""
+    """A geditor process started by this driver (stopped by its own handle).
+
+    `settings` is passed as --settings=PATH so that checks never touch the
+    user's %USERPROFILE%\\.geditor.json (the file need not exist)."""
 
     def __init__(self, exe: pathlib.Path, args: list[str], cwd: pathlib.Path | None = None,
-                 width: int = 900, height: int = 500):
+                 width: int = 900, height: int = 500, settings: pathlib.Path | None = None):
+        if settings is not None:
+            args = [f"--settings={settings}", *args]
         self.proc = subprocess.Popen([str(exe), *args], cwd=cwd)
         windows = wait_for(lambda: windows_of(self.proc.pid, "geditor.main"), 15.0)
         if not windows:

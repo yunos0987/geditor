@@ -9,7 +9,9 @@
 #include <shellapi.h>
 
 #include "command_line.h"
+#include "config_watcher.h"
 #include "editor.h"
+#include "file_io.h"
 #include "host.h"
 #include "input.h"
 #include "renderer.h"
@@ -25,8 +27,9 @@ class MainWindow final : public Host {
 
   // Creates the renderer and the (hidden) window.
   bool create(HINSTANCE instance, bool measure_startup, bool measure_input);
-  // Opens the file of the command line, goes to +LINE and shows argument
-  // errors in the echo area.
+  // Reads the settings file (--settings=PATH or %USERPROFILE%\.geditor.json),
+  // opens the file of the command line, goes to +LINE and shows argument and
+  // settings errors in the echo area.
   void apply_command_line(const CommandLine& command_line);
   void show(int show_command);
   // Keyboard messages are translated here, before TranslateMessage, so that a
@@ -62,6 +65,10 @@ class MainWindow final : public Host {
   void keep_point_visible();
   void place_ime();
   void start_input_measure();
+  // After the first frame: watch the settings file (failures are shown once).
+  void start_settings_watcher();
+  // Adds `text` to the echo area message after the current one.
+  void append_message(const std::wstring& text);
   // Draws the current frame into a 32-bit BMP file (WM_COPYDATA request).
   bool capture_to_bmp(const std::wstring& path);
 
@@ -70,6 +77,9 @@ class MainWindow final : public Host {
   Editor editor_;
   ViewState view_;
   CharAssembler chars_;
+  ConfigWatcher settings_watcher_;
+  std::wstring settings_argument_;  // --settings, passed on to new windows
+  FileState settings_state_;        // the settings file as read at startup
   std::wstring title_;
   bool measure_startup_ = false;
   bool measure_input_ = false;

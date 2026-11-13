@@ -91,10 +91,11 @@ kill ring と M-y、構文ハイライト、複数バッファ・画面分割・
 | 保存状態の追跡 | undo で保存時点に戻ると未変更表示に戻る | |
 | undo 履歴の保持 | piece の参照で持ち、テキストを複製しない。上限なし | 大きな削除でもメモリを食わない |
 | 外部での変更 | 保存時に更新日時を確かめ、変わっていれば確認 | 上書き事故を防ぐ |
-| 起動引数 | `geditor.exe [--encoding=NAME] [+LINE] [file]`。存在しないファイル名なら新規として開く。`--encoding` は指定できる文字コード名で、自動判定の代わりに使う | Emacs と同じ。`--encoding` は「新しいウィンドウで開く」で文字コードを引き継ぐため |
+| 起動引数 | `geditor.exe [--encoding=NAME] [--settings=PATH] [+LINE] [file]`。存在しないファイル名なら新規として開く。`--encoding` は指定できる文字コード名で、自動判定の代わりに使う。`--settings` は設定ファイルの場所を変える（テストと実機確認で利用者の設定に触れないため。新しいウィンドウにも引き継ぐ） | Emacs と同じ。`--encoding` は「新しいウィンドウで開く」で文字コードを引き継ぐため |
 | 高 DPI | Per-Monitor V2 | モニター間移動で滲まない |
 | 設定ファイルの監視 | 初回描画の後に別スレッドで `ReadDirectoryChangesW` を開始。通知から 200ms 待って読み、共有違反なら 3 回まで再試行 | 起動時間に含めない。保存途中の中身を読まない |
-| 設定の誤り | 構文の誤り（JSONC として読めない）はファイル全体を採用せず直前の設定を保つ。意味の誤り（未知のコマンド・不正なキー表記・引数の型違い・プレフィックス衝突・未知の設定項目・不正な色）はその項目だけ無視して残りを反映する。どちらも行・桁付きで全件表示 | 1 か所の誤りで全設定が消えない |
+| 設定の誤り | 構文の誤り（JSONC として読めない）はファイル全体を採用せず直前の設定を保つ。意味の誤り（未知のコマンド・不正なキー表記・引数の型違い・プレフィックス衝突・未知の設定項目・不正な色）はその項目だけ無視して残りを反映する。どちらも行・桁付きで全件表示する。表示は最下行のエコー領域を最大 10 行まで広げて行い（11 件目以降は `... and N more`）、次のキーで 1 行に戻す | 1 か所の誤りで全設定が消えない。表示方法は 2026-11-12 にユーザーが確定 |
+| 設定ファイルを開く | `find-user-init-file`（M-x で実行。既定キーなし。M3 で File メニューにも載せる）で `.geditor.json` を開く。開き方の確認は find-file と同じ。ファイルが無ければ、書き方の例をコメントで入れた新規バッファとして開く（保存するまでディスクに作らない。例の挿入は編集として扱うので未保存の表示になる） | 標準の Emacs には組み込みが無く、利用者が自分で定義するときの慣習名に合わせた。2026-11-12 にユーザーが確定 |
 | テスト | 自作の小さなテストハーネス + CTest | 外部依存を増やさない |
 
 ## 3. 構成
@@ -340,7 +341,7 @@ mode line: 変更有無（`**`）・読取専用（`%%`）・ファイル名・�
 
 | メニュー | 項目（コマンド） |
 |---|---|
-| File | Open... (`find-file`), Open with Encoding... (`find-file-with-encoding`), Reopen with Encoding... (`revert-buffer-with-coding-system`), ─, Save (`save-buffer`), Save As... (`write-file`), ─, Encoding for Saving ▶ 13 種（ラジオ, `set-buffer-file-coding-system`）, Line Endings ▶ LF / CRLF / CR（ラジオ。混在ファイルでは既定に印, `set-eol`）, ─, Read Only（チェック, `read-only-mode`）, Exit (`quit`) |
+| File | Open... (`find-file`), Open with Encoding... (`find-file-with-encoding`), Reopen with Encoding... (`revert-buffer-with-coding-system`), ─, Save (`save-buffer`), Save As... (`write-file`), ─, Encoding for Saving ▶ 13 種（ラジオ, `set-buffer-file-coding-system`）, Line Endings ▶ LF / CRLF / CR（ラジオ。混在ファイルでは既定に印, `set-eol`）, ─, Read Only（チェック, `read-only-mode`）, ─, Settings (`find-user-init-file`), Exit (`quit`) |
 | Edit | Undo (`undo`), Redo (`redo`), ─, Cut (`cut`), Copy (`copy`), Paste (`paste`), Select All (`select-all`), ─, Find... (`isearch-forward`), Replace... (`query-replace`), Go to Line... (`goto-line`) |
 | View | Line Numbers（チェック, `toggle-line-numbers`）, Line Ending Marks（チェック, `toggle-eol-marks`）, Whitespace Marks（チェック, `toggle-whitespace-marks`）, Wrap ▶ None / Window / Fixed / Max（ラジオ, `set-wrap-mode`）, ─, Zoom In (`text-scale-increase`), Zoom Out (`text-scale-decrease`), Reset Zoom (`text-scale-reset`) |
 
@@ -378,7 +379,7 @@ mode line: 変更有無（`**`）・読取専用（`%%`）・ファイル名・�
 
 - JSONC パーサー、`%USERPROFILE%\.geditor.json` の読込と既定値への重ね合わせ
 - キー表記のパーサー、4 形の割り当て、割当解除、プレフィックス衝突の検出、4 つのキーマップ
-- Windows 互換キー（4.4）、保存検知での再読込、エラー表示、M-x
+- Windows 互換キー（4.4）、保存検知での再読込、エラー表示（エコー領域を広げる）、M-x、`find-user-init-file`、`--settings` 起動引数
 - 前置引数（C-u、C-u C-u、数字、負数）。キー解決の一部なのでここで作る
 - 後の段階で作るコマンド（検索・置換・goto-line・マクロなど）は、名前だけ登録した「未実装」コマンドとして置き、実行すると `<command> is not implemented yet` と表示する（メニューでは灰色）
 - 受入条件
@@ -388,6 +389,7 @@ mode line: 変更有無（`**`）・読取専用（`%%`）・ファイル名・�
   - [M2-4] 4.4 の Windows 互換キー 12 個すべてが既定で期待するコマンド名に解決され、対応する `C-M-` の Emacs 操作より優先されることをテストで確かめる（コマンドの動作は各段階で確かめる）
   - [M2-5] 起動中に設定ファイルを保存すると 1 秒以内に反映され、構文誤りなら直前の設定が残る（手動確認）
   - [M2-6] 前置引数が移動・削除・挿入・コマンド列に効くことをテストで確かめる
+  - [M2-7] 誤りが 1 件・10 件・11 件以上のときのエコー領域の行数と `... and N more`、次のキーで 1 行に戻ることをテストで確かめる。`find-user-init-file` が、ファイルのある場合は開く確認を経て開き、無い場合は例を入れた未保存の新規バッファになり、保存した内容がそのまま設定として読めることをテストで確かめる
 
 ### M3: 表示
 

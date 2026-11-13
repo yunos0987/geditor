@@ -78,6 +78,19 @@ std::wstring error_text(unsigned long error) {
   }
 }
 
+FileState file_state(const std::wstring& path) {
+  FileState state;
+  WIN32_FILE_ATTRIBUTE_DATA data{};
+  if (!GetFileAttributesExW(extended_length_path(path).c_str(), GetFileExInfoStandard, &data)) {
+    return state;
+  }
+  state.exists = true;
+  state.size = (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+  state.write_time = (static_cast<unsigned long long>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                     data.ftLastWriteTime.dwLowDateTime;
+  return state;
+}
+
 bool read_file(const std::wstring& path, std::string& bytes, std::wstring& error) {
   bytes.clear();
   Handle file(CreateFileW(extended_length_path(path).c_str(), GENERIC_READ,

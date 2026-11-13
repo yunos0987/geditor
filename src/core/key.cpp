@@ -81,21 +81,20 @@ std::optional<Key> parse_key(std::wstring_view s) {
 }
 
 std::optional<KeySequence> parse_key_sequence(std::wstring_view s) {
+  // Keys are separated by exactly one space; no space at either end.
   KeySequence keys;
+  if (s.empty()) return std::nullopt;
   size_t i = 0;
-  while (i < s.size()) {
-    if (s[i] == L' ') {
-      ++i;
-      continue;
-    }
+  for (;;) {
     size_t j = i;
     while (j < s.size() && s[j] != L' ') ++j;
     const std::optional<Key> key = parse_key(s.substr(i, j - i));
     if (!key) return std::nullopt;
     keys.push_back(*key);
-    i = j;
+    if (j == s.size()) break;
+    i = j + 1;
+    if (i == s.size()) return std::nullopt;  // trailing space
   }
-  if (keys.empty()) return std::nullopt;
   return keys;
 }
 

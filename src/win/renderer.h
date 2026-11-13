@@ -1,6 +1,7 @@
 // Direct2D drawing of the editor (docs/PLAN.md 4.6 / 4.7): the text area on
-// a cell grid, the mode line and the echo area / minibuffer line. No line
-// numbers, wrapping or menu bar in M1; long lines scroll horizontally.
+// a cell grid, the mode line and the echo area / minibuffer line (several
+// lines while settings errors are shown). No line numbers, wrapping or menu
+// bar yet; long lines scroll horizontally.
 #pragma once
 
 #include <cstddef>
@@ -48,8 +49,12 @@ class Renderer {
   void set_dpi(float dpi);
   void discard_target();
 
-  // Full text rows that fit in a client area `height_dip` high.
-  int text_rows(float height_dip) const;
+  // Full text rows that fit in a client area `height_dip` high with an echo
+  // area of `echo_rows` lines.
+  int text_rows(float height_dip, int echo_rows) const;
+  // Rows of the echo area for `editor` in a client area `height_dip` high,
+  // capped so that the mode line and one text row stay visible.
+  int echo_rows(float height_dip, const Editor& editor) const;
   float line_height() const { return measurer_.line_height(); }
   float em() const { return measurer_.em(); }
   const wchar_t* font_family() const { return measurer_.family(); }
@@ -67,7 +72,10 @@ class Renderer {
   HRESULT draw_frame(const Editor& editor, ViewState& view);
   void draw_text_area(const Editor& editor, ViewState& view, float width, float height);
   void draw_mode_line(const Editor& editor, float y, float width);
-  void draw_echo_area(const Editor& editor, ViewState& view, float y, float width);
+  // The echo area from `y` down: one line, or the lines of a multi-line
+  // message (settings errors) followed by the minibuffer line when active.
+  void draw_echo_area(const Editor& editor, ViewState& view, float y, float width, int rows);
+  void draw_echo_line(std::wstring_view text, float y, int columns);
   // Collect the cells of columns [left, left + columns) into cells_.
   // collect_line returns true when it reached the end of the line; then
   // `end_column` is the column after its last character (relative to left).

@@ -1,5 +1,8 @@
 // Key notation of docs/PLAN.md 4.2: parse and print back.
 
+#include <cstdio>
+#include <string>
+
 #include "key.h"
 #include "test_harness.h"
 
@@ -109,4 +112,43 @@ TEST(key_notation_invalid_forms_are_rejected) {
   CHECK(rejected(L""));
   CHECK(rejected(L"   "));
   CHECK(rejected(L"C-x C-"));
+}
+
+// [M2-2]: every notation of the PLAN 4.2 table (and the extra ones of the M2
+// packet) parses and prints back to the same text.
+TEST(key_notation_plan_table_round_trips) {
+  constexpr const wchar_t* kNotations[] = {
+      // C- / M- / S-
+      L"C-a", L"M-a", L"S-a",
+      // C-M-a, C-S-a
+      L"C-M-a", L"C-S-a",
+      // C-?, M-<, M-%
+      L"C-?", L"M-<", L"M-%",
+      // RET TAB SPC ESC DEL
+      L"RET", L"TAB", L"SPC", L"ESC", L"DEL",
+      // <delete> <insert> <home> <end> <prior> <next>
+      L"<delete>", L"<insert>", L"<home>", L"<end>", L"<prior>", L"<next>",
+      // <left> <right> <up> <down> <f1>..<f24>
+      L"<left>", L"<right>", L"<up>", L"<down>", L"<f1>", L"<f24>",
+      // C-x C-s
+      L"C-x C-s",
+  };
+  for (const wchar_t* n : kNotations) {
+    if (!round_trips(n)) std::printf("  notation %s\n", test::to_display(n).c_str());
+    CHECK(round_trips(n));
+  }
+  for (int i = 1; i <= 24; ++i) {
+    const std::wstring f = L"<f" + std::to_wstring(i) + L">";
+    CHECK(round_trips(f.c_str()));
+  }
+}
+
+TEST(key_notation_malformed_sequences_are_rejected) {
+  CHECK(rejected(L"C-"));
+  CHECK(rejected(L"X-a"));
+  CHECK(rejected(L"<f25>"));
+  CHECK(rejected(L"C-x  C-s"));  // two spaces
+  CHECK(rejected(L" C-x"));      // leading space
+  CHECK(rejected(L"C-x "));      // trailing space
+  CHECK(rejected(L""));
 }

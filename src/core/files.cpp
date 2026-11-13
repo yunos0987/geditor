@@ -1,13 +1,12 @@
 // File flows of the editor: find-file / drag and drop, save-buffer,
 // write-file and quit (docs/PLAN.md 2 "open another file").
 
+#include "config.h"
 #include "editor.h"
 #include "path.h"
 
 namespace geditor {
 namespace {
-
-constexpr wchar_t kRecursiveMinibuffer[] = L"Command attempted to use minibuffer while in minibuffer";
 
 // A path written with a trailing separator names a directory.
 bool names_directory(std::wstring_view path) {
@@ -27,17 +26,23 @@ std::wstring Editor::default_directory() const {
 
 void Editor::find_file() {
   if (minibuffer_active()) {
-    message_ = kRecursiveMinibuffer;
+    fail(kRecursiveMinibufferMessage);
     return;
   }
   start_minibuffer(MinibufferPurpose::kFindFile, L"Find file: ", default_directory());
 }
 
+void Editor::find_user_init_file() {
+  if (settings_path_.empty()) {
+    fail(L"No settings file: the user profile folder is unknown");
+    return;
+  }
+  request_open(settings_path_);
+}
+
 void Editor::request_open(std::wstring_view raw_path) {
   if (minibuffer_active()) abort_minibuffer();
-  pending_.clear();
-  pending_display_.clear();
-  meta_pending_ = false;
+  cancel_pending_input();
   quoted_insert_pending_ = false;
 
   const std::wstring path = normalize_path(raw_path, host_.current_directory());
@@ -112,6 +117,11 @@ bool Editor::load_file(const std::wstring& path) {
     main_.path = path;
     top_line_ = 0;
     goal_column_ = 0;
+    if (!settings_path_.empty() && same_path(path, settings_path_)) {
+      // A new settings file starts with the commented example. Inserting it
+      // is an edit: the buffer is modified and nothing is written yet.
+      insert_at(main_, 0, settings_template());
+    }
     message_ = L"(New file)";
     return true;
   }
@@ -154,13 +164,13 @@ bool Editor::save_to(const std::wstring& path) {
   // Never write over something that cannot be inspected.
   const FileKind kind = host_.file_kind(path);
   if (kind == FileKind::kError || kind == FileKind::kDirectory) {
-    message_ = kind == FileKind::kError ? cannot_access(path) : path + L" is a directory";
+    fail(kind == FileKind::kError ? cannot_access(path) : path + L" is a directory");
     return false;
   }
   const std::string bytes = encode_utf8(main_.text, main_.format);
   std::wstring error;
   if (!host_.write_file(path, bytes, error)) {
-    message_ = L"Cannot write " + path + (error.empty() ? std::wstring() : L": " + error);
+    fail(L"Cannot write " + path + (error.empty() ? std::wstring() : L": " + error));
     return false;
   }
   main_.path = path;
@@ -183,7 +193,7 @@ void Editor::save_buffer() {
 
 void Editor::write_file() {
   if (minibuffer_active()) {
-    message_ = kRecursiveMinibuffer;
+    fail(kRecursiveMinibufferMessage);
     return;
   }
   start_minibuffer(MinibufferPurpose::kWriteFile, L"Write file: ", default_directory());

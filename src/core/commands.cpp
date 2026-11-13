@@ -68,8 +68,50 @@ void push_mark(Editor& ed, Buffer& b) {
 // Copies [from, to) to the clipboard; false (with a message) on failure.
 bool copy_range(Editor& ed, const Buffer& b, size_t from, size_t to) {
   if (ed.host().set_clipboard(b.text.substr(from, to - from))) return true;
-  ed.set_message(L"Cannot write to the clipboard");
+  ed.fail(L"Cannot write to the clipboard");
   return false;
+}
+
+// The prefix argument as a count and a direction: `n` steps forward, or
+// backward when negative (decision D6). Capped so that loops stay sane.
+int signed_count(const Editor& ed) {
+  return std::clamp(ed.prefix_count(), -1000000000, 1000000000);
+}
+
+// Calls `step` |count| times (`back` for a negative count), stopping at the
+// first step that returns false (the step shows its own message).
+template <typename Step, typename Back>
+void repeat_steps(Editor& ed, Step step, Back back) {
+  const int n = signed_count(ed);
+  const int times = n < 0 ? -n : n;
+  for (int i = 0; i < times; ++i) {
+    if (!(n < 0 ? back(ed) : step(ed))) return;
+  }
+}
+
+// Count for commands that insert N copies; false (with a message) when the
+// count is not positive.
+// `unit_length`: characters inserted per copy; the whole insertion may not
+// exceed kMaxRepeatedInsert characters (a huge C-u count would freeze the
+// editor and exhaust memory).
+bool insert_count(Editor& ed, int* count, size_t unit_length = 0) {
+  *count = signed_count(ed);
+  if (*count <= 0) {
+    ed.fail(L"Repeat count must be positive");
+    return false;
+  }
+  if (unit_length > 0 && static_cast<size_t>(*count) > kMaxRepeatedInsert / unit_length) {
+    ed.fail(L"Repeat count too large");
+    return false;
+  }
+  return true;
+}
+
+std::wstring repeated(std::wstring_view s, int count) {
+  std::wstring out;
+  out.reserve(s.size() * static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) out += s;
+  return out;
 }
 
 // Copies [from, to) to the clipboard and deletes it unless read-only or the
@@ -83,7 +125,7 @@ void kill_range(Editor& ed, Buffer& b, size_t from, size_t to) {
 
 bool require_mark(Editor& ed, const Buffer& b) {
   if (b.has_mark) return true;
-  ed.set_message(L"The mark is not set now, so there is no region");
+  ed.fail(L"The mark is not set now, so there is no region");
   return false;
 }
 
@@ -92,54 +134,74 @@ bool require_mark(Editor& ed, const Buffer& b) {
 bool require_region(Editor& ed, const Buffer& b) {
   if (!require_mark(ed, b)) return false;
   if (b.mark != b.point) return true;
-  ed.set_message(L"Region is empty");
+  ed.fail(L"Region is empty");
   return false;
 }
 
 // ---- Movement ----
 
-void forward_char(Editor& ed) {
+bool step_forward_char(Editor& ed) {
   Buffer& b = ed.current();
   if (b.point >= b.text.length()) {
-    ed.set_message(L"End of buffer");
-    return;
+    ed.fail(L"End of buffer");
+    return false;
   }
   b.point = next_char_offset(b.text, b.point);
+  return true;
+}
+
+bool step_backward_char(Editor& ed) {
+  Buffer& b = ed.current();
+  if (b.point == 0) {
+    ed.fail(L"Beginning of buffer");
+    return false;
+  }
+  b.point = prev_char_offset(b.text, b.point);
+  return true;
+}
+
+void forward_char(Editor& ed) {
+  repeat_steps(ed, step_forward_char, step_backward_char);
 }
 
 void backward_char(Editor& ed) {
-  Buffer& b = ed.current();
-  if (b.point == 0) {
-    ed.set_message(L"Beginning of buffer");
-    return;
-  }
-  b.point = prev_char_offset(b.text, b.point);
+  repeat_steps(ed, step_backward_char, step_forward_char);
 }
 
-void vertical_move(Editor& ed, bool down) {
+// One line down or up at the goal column; false at the end (point goes to
+// the end / start of the buffer, as in Emacs).
+bool vertical_step(Editor& ed, bool down) {
   Buffer& b = ed.current();
   const PieceTree& t = b.text;
-  const std::string& last = ed.last_command();
-  if (last != "next-line" && last != "previous-line") {
-    ed.set_goal_column(column_at(t, b.point, ed.tab_width()));
-  }
   size_t line = t.line_of(b.point);
   if (down) {
     if (line + 1 >= t.line_count()) {
       b.point = t.length();
-      ed.set_message(L"End of buffer");
-      return;
+      ed.fail(L"End of buffer");
+      return false;
     }
     ++line;
   } else {
     if (line == 0) {
       b.point = 0;
-      ed.set_message(L"Beginning of buffer");
-      return;
+      ed.fail(L"Beginning of buffer");
+      return false;
     }
     --line;
   }
   b.point = offset_at_column(t, line, ed.goal_column(), ed.tab_width());
+  return true;
+}
+
+void vertical_move(Editor& ed, bool down) {
+  Buffer& b = ed.current();
+  const std::string& last = ed.last_command();
+  if (last != "next-line" && last != "previous-line") {
+    ed.set_goal_column(column_at(b.text, b.point, ed.tab_width()));
+  }
+  repeat_steps(
+      ed, [down](Editor& e) { return vertical_step(e, down); },
+      [down](Editor& e) { return vertical_step(e, !down); });
 }
 
 void next_line(Editor& ed) {
@@ -160,14 +222,29 @@ void end_of_line(Editor& ed) {
   b.point = b.text.line_end(b.text.line_of(b.point));
 }
 
-void forward_word(Editor& ed) {
+// Word steps stop quietly at the ends of the buffer (as Emacs forward-word).
+bool step_forward_word(Editor& ed) {
   Buffer& b = ed.current();
-  b.point = forward_word_end(b.text, b.point);
+  const size_t p = forward_word_end(b.text, b.point);
+  if (p == b.point) return false;
+  b.point = p;
+  return true;
+}
+
+bool step_backward_word(Editor& ed) {
+  Buffer& b = ed.current();
+  const size_t p = backward_word_start(b.text, b.point);
+  if (p == b.point) return false;
+  b.point = p;
+  return true;
+}
+
+void forward_word(Editor& ed) {
+  repeat_steps(ed, step_forward_word, step_backward_word);
 }
 
 void backward_word(Editor& ed) {
-  Buffer& b = ed.current();
-  b.point = backward_word_start(b.text, b.point);
+  repeat_steps(ed, step_backward_word, step_forward_word);
 }
 
 void beginning_of_buffer(Editor& ed) {
@@ -189,38 +266,58 @@ size_t scroll_amount(Editor& ed) {
 
 // Emacs C-v with scroll-error-top-bottom nil: when the last line is already
 // visible, nothing moves and "End of buffer" is shown. Otherwise the window
-// scrolls by visible - 2 lines, but never past the top at which the last line
-// sits on the bottom row. Point moves to the new top line only when it would
-// leave the window.
-void scroll_up_command(Editor& ed) {
+// scrolls by `amount` lines (visible - 2 without a prefix argument), but never
+// past the top at which the last line sits on the bottom row. Point moves to
+// the new top line only when it would leave the window.
+void scroll_up_by(Editor& ed, size_t amount) {
   Buffer& b = ed.main_buffer();
   const size_t lines = b.text.line_count();
   const size_t visible = static_cast<size_t>(ed.visible_lines());
   const size_t max_top = lines > visible ? lines - visible : 0;
   const size_t top = ed.top_line();
   if (top >= max_top) {
-    ed.set_message(L"End of buffer");
+    ed.fail(L"End of buffer");
     return;
   }
-  const size_t new_top = std::min(top + scroll_amount(ed), max_top);
+  const size_t new_top = std::min(top + amount, max_top);
   ed.set_top_line(new_top);
   if (b.text.line_of(b.point) < new_top) b.point = b.text.line_start(new_top);
 }
 
-// Mirror of scroll_up_command: at top 0 nothing moves and "Beginning of
-// buffer" is shown.
-void scroll_down_command(Editor& ed) {
+// Mirror of scroll_up_by: at top 0 nothing moves and "Beginning of buffer"
+// is shown.
+void scroll_down_by(Editor& ed, size_t amount) {
   Buffer& b = ed.main_buffer();
   const size_t top = ed.top_line();
   if (top == 0) {
-    ed.set_message(L"Beginning of buffer");
+    ed.fail(L"Beginning of buffer");
     return;
   }
-  const size_t amount = scroll_amount(ed);
   const size_t new_top = top > amount ? top - amount : 0;
   ed.set_top_line(new_top);
   const size_t bottom = new_top + static_cast<size_t>(ed.visible_lines()) - 1;
   if (b.text.line_of(b.point) > bottom) b.point = b.text.line_start(bottom);
+}
+
+// With a prefix argument N, C-v / M-v scroll by N lines (the other way for a
+// negative N), as in Emacs.
+void scroll_command(Editor& ed, bool up) {
+  if (!ed.has_prefix_arg()) {
+    up ? scroll_up_by(ed, scroll_amount(ed)) : scroll_down_by(ed, scroll_amount(ed));
+    return;
+  }
+  const int n = signed_count(ed);
+  if (n == 0) return;
+  const size_t amount = static_cast<size_t>(n < 0 ? -static_cast<int64_t>(n) : n);
+  ((n > 0) == up) ? scroll_up_by(ed, amount) : scroll_down_by(ed, amount);
+}
+
+void scroll_up_command(Editor& ed) {
+  scroll_command(ed, true);
+}
+
+void scroll_down_command(Editor& ed) {
+  scroll_command(ed, false);
 }
 
 void recenter_top_bottom(Editor& ed) {
@@ -258,7 +355,7 @@ void set_mark_command(Editor& ed) {
 void exchange_point_and_mark(Editor& ed) {
   Buffer& b = ed.current();
   if (!b.has_mark) {
-    ed.set_message(L"No mark set in this buffer");
+    ed.fail(L"No mark set in this buffer");
     return;
   }
   std::swap(b.point, b.mark);
@@ -286,64 +383,121 @@ void keyboard_quit(Editor& ed) {
   if (ed.minibuffer_active()) ed.abort_minibuffer();
   ed.main_buffer().mark_active = false;
   ed.minibuffer().mark_active = false;
-  ed.set_message(L"Quit");
+  ed.fail(L"Quit");
 }
 
 // ---- Delete and kill ----
 
+// The offset `n` characters away from `p` (backward for a negative n), or
+// npos when the buffer ends first.
+size_t chars_away(const PieceTree& t, size_t p, int n) {
+  for (int i = 0; i < n; ++i) {
+    if (p >= t.length()) return std::wstring::npos;
+    p = next_char_offset(t, p);
+  }
+  for (int i = 0; i > n; --i) {
+    if (p == 0) return std::wstring::npos;
+    p = prev_char_offset(t, p);
+  }
+  return p;
+}
+
+// Deletes `n` characters after point (before it for a negative n). Like
+// Emacs, nothing is deleted when the buffer ends first.
+void delete_chars(Editor& ed, int n) {
+  Buffer& b = ed.current();
+  if (n == 0) return;
+  const size_t other = chars_away(b.text, b.point, n);
+  if (other == std::wstring::npos) {
+    ed.fail(n > 0 ? L"End of buffer" : L"Beginning of buffer");
+    return;
+  }
+  ed.erase(b, std::min(b.point, other), std::max(b.point, other));
+}
+
 void delete_char(Editor& ed) {
   Buffer& b = ed.current();
-  if (region_active(b)) {
+  if (region_active(b) && !ed.has_prefix_arg()) {
     ed.erase(b, std::min(b.point, b.mark), std::max(b.point, b.mark));
     return;
   }
-  if (b.point >= b.text.length()) {
-    ed.set_message(L"End of buffer");
-    return;
-  }
-  ed.erase(b, b.point, next_char_offset(b.text, b.point));
+  delete_chars(ed, signed_count(ed));
 }
 
 void delete_backward_char(Editor& ed) {
   Buffer& b = ed.current();
-  if (region_active(b)) {
+  if (region_active(b) && !ed.has_prefix_arg()) {
     ed.erase(b, std::min(b.point, b.mark), std::max(b.point, b.mark));
     return;
   }
-  if (b.point == 0) {
-    ed.set_message(L"Beginning of buffer");
-    return;
-  }
-  ed.erase(b, prev_char_offset(b.text, b.point), b.point);
+  delete_chars(ed, -signed_count(ed));
 }
 
+// Without a prefix argument: to the end of the line, or the line end alone.
+// With N: N whole lines forward (from point to the start of the Nth next
+// line), 0: back to the start of the line, -N: back over N line starts.
 void kill_line(Editor& ed) {
   Buffer& b = ed.current();
-  if (b.point >= b.text.length()) {
-    ed.set_message(L"End of buffer");
+  const PieceTree& t = b.text;
+  const size_t line = t.line_of(b.point);
+  if (!ed.has_prefix_arg()) {
+    if (b.point >= t.length()) {
+      ed.fail(L"End of buffer");
+      return;
+    }
+    size_t end = t.line_end(line);
+    if (end == b.point) end = b.point + 1;
+    kill_range(ed, b, b.point, end);
     return;
   }
-  size_t end = b.text.line_end(b.text.line_of(b.point));
-  if (end == b.point) end = b.point + 1;
-  kill_range(ed, b, b.point, end);
+  const int n = signed_count(ed);
+  if (n > 0) {
+    if (b.point >= t.length()) {
+      ed.fail(L"End of buffer");
+      return;
+    }
+    const size_t target = line + static_cast<size_t>(n);
+    const size_t end = target < t.line_count() ? t.line_start(target) : t.length();
+    kill_range(ed, b, b.point, end);
+    return;
+  }
+  if (n < 0 && b.point == 0) {
+    ed.fail(L"Beginning of buffer");
+    return;
+  }
+  const size_t back = static_cast<size_t>(-static_cast<int64_t>(n));
+  const size_t start = t.line_start(line > back ? line - back : 0);
+  kill_range(ed, b, start, b.point);
+}
+
+// End of the |n|th word from p (start of a word for a negative n).
+size_t words_away(const PieceTree& t, size_t p, int n) {
+  for (int i = 0; i < n && p < t.length(); ++i) p = forward_word_end(t, p);
+  for (int i = 0; i > n && p > 0; --i) p = backward_word_start(t, p);
+  return p;
+}
+
+void kill_words(Editor& ed, int n) {
+  Buffer& b = ed.current();
+  if (n == 0) return;
+  if (n > 0 && b.point >= b.text.length()) {
+    ed.fail(L"End of buffer");
+    return;
+  }
+  if (n < 0 && b.point == 0) {
+    ed.fail(L"Beginning of buffer");
+    return;
+  }
+  const size_t other = words_away(b.text, b.point, n);
+  kill_range(ed, b, std::min(b.point, other), std::max(b.point, other));
 }
 
 void kill_word(Editor& ed) {
-  Buffer& b = ed.current();
-  if (b.point >= b.text.length()) {
-    ed.set_message(L"End of buffer");
-    return;
-  }
-  kill_range(ed, b, b.point, forward_word_end(b.text, b.point));
+  kill_words(ed, signed_count(ed));
 }
 
 void backward_kill_word(Editor& ed) {
-  Buffer& b = ed.current();
-  if (b.point == 0) {
-    ed.set_message(L"Beginning of buffer");
-    return;
-  }
-  kill_range(ed, b, backward_word_start(b.text, b.point), b.point);
+  kill_words(ed, -signed_count(ed));
 }
 
 void kill_region(Editor& ed) {
@@ -364,11 +518,11 @@ void yank(Editor& ed) {
   std::wstring text;
   const ClipboardRead read = ed.host().get_clipboard(text);
   if (read == ClipboardRead::kFailed) {
-    ed.set_message(L"Cannot read the clipboard");
+    ed.fail(L"Cannot read the clipboard");
     return;
   }
   if (read == ClipboardRead::kNoText || text.empty()) {
-    ed.set_message(L"Clipboard is empty");
+    ed.fail(L"Clipboard is empty");
     return;
   }
   if (!ed.check_writable(b)) return;
@@ -379,34 +533,101 @@ void yank(Editor& ed) {
 
 // ---- Input ----
 
+// The character a key inserts: a Unicode scalar value that is not a control
+// character, typed without Ctrl or Meta (Shift is allowed; S-<letter> gives
+// the capital letter). Special keys (<f1>, <left>, RET, ...) have none.
+bool key_character(const Key& key, char32_t* c) {
+  if (!key.is_char() || key.ctrl() || key.meta()) return false;
+  const char32_t code = key.code;
+  if (code >= 0xD800 && code <= 0xDFFF) return false;
+  if (code < 0x20 || code == 0x7F || (code >= 0x80 && code < 0xA0)) return false;
+  *c = (key.mods & kModShift) != 0 ? to_upper(code) : code;
+  return true;
+}
+
 void self_insert_command(Editor& ed) {
-  Buffer& b = ed.current();
-  ed.insert(b, to_utf16(ed.last_key().code));
+  char32_t c = 0;
+  if (!key_character(ed.last_key(), &c)) {
+    ed.fail(key_to_string(ed.last_key()) + L" is not a character key");
+    return;
+  }
+  const std::wstring unit = to_utf16(c);
+  int count = 0;
+  if (!insert_count(ed, &count, unit.size())) return;
+  ed.insert(ed.current(), repeated(unit, count));
 }
 
 void newline(Editor& ed) {
-  ed.insert(ed.current(), L"\n");
+  int count = 0;
+  if (!insert_count(ed, &count, 1)) return;
+  ed.insert(ed.current(), repeated(L"\n", count));
 }
 
 void open_line(Editor& ed) {
+  int count = 0;
+  if (!insert_count(ed, &count, 1)) return;
   Buffer& b = ed.current();
-  ed.insert_at(b, b.point, L"\n");
+  ed.insert_at(b, b.point, repeated(L"\n", count));
 }
 
 void insert_tab(Editor& ed) {
-  ed.insert(ed.current(), L"\t");
+  int count = 0;
+  if (!insert_count(ed, &count, 1)) return;
+  ed.insert(ed.current(), repeated(L"\t", count));
+}
+
+// insert-text: inserts its argument ("\r\n" and "\r" become "\n").
+void insert_text(Editor& ed) {
+  const std::vector<CommandArg>& args = ed.command_args();
+  if (args.empty()) return;
+  ed.insert(ed.current(), normalize_line_ends(args.front().text));
 }
 
 void quoted_insert(Editor& ed) {
   ed.start_quoted_insert();
 }
 
+// With a prefix argument N: the character before point moves N characters
+// forward (backward for a negative N), as Emacs transpose-chars with an
+// argument. Nothing changes when the buffer ends first.
+void transpose_chars_n(Editor& ed, int n) {
+  Buffer& b = ed.current();
+  const PieceTree& t = b.text;
+  const size_t p = b.point;
+  if (n == 0) return;
+  if (p == 0) {
+    ed.fail(L"Beginning of buffer");
+    return;
+  }
+  const size_t a = prev_char_offset(t, p);
+  const size_t other = chars_away(t, n > 0 ? p : a, n);
+  if (other == std::wstring::npos) {
+    ed.fail(n > 0 ? L"End of buffer" : L"Beginning of buffer");
+    return;
+  }
+  if (!ed.check_writable(b)) return;
+  const std::wstring moved = t.substr(a, p - a);
+  if (n > 0) {
+    const std::wstring over = t.substr(p, other - p);
+    ed.replace(b, a, other, over + moved);
+    b.point = other;
+  } else {
+    const std::wstring over = t.substr(other, a - other);
+    ed.replace(b, other, p, moved + over);
+    b.point = other + moved.size();
+  }
+}
+
 void transpose_chars(Editor& ed) {
+  if (ed.has_prefix_arg()) {
+    transpose_chars_n(ed, signed_count(ed));
+    return;
+  }
   Buffer& b = ed.current();
   const PieceTree& t = b.text;
   const size_t p = b.point;
   if (p == 0) {
-    ed.set_message(L"Beginning of buffer");
+    ed.fail(L"Beginning of buffer");
     return;
   }
   const bool at_eol = p >= t.length() || t.char_at(p) == L'\n';
@@ -416,7 +637,7 @@ void transpose_chars(Editor& ed) {
   if (at_eol) {
     mid = prev_char_offset(t, p);
     if (mid == 0) {
-      ed.set_message(L"Beginning of buffer");
+      ed.fail(L"Beginning of buffer");
       return;
     }
     a = prev_char_offset(t, mid);
@@ -483,16 +704,28 @@ void capitalize_word(Editor& ed) {
 
 // ---- Undo ----
 
-void undo(Editor& ed) {
+// Undo / redo N steps (the prefix argument); stops with the message when the
+// history ends first.
+void undo_steps(Editor& ed, bool redo) {
   Buffer& b = ed.current();
   if (!ed.check_writable(b)) return;
-  ed.set_message(ed.undo(b) ? L"Undo" : L"No further undo information");
+  int count = 0;
+  if (!insert_count(ed, &count)) return;
+  for (int i = 0; i < count; ++i) {
+    if (!(redo ? ed.redo(b) : ed.undo(b))) {
+      ed.fail(redo ? L"No further redo information" : L"No further undo information");
+      return;
+    }
+  }
+  ed.set_message(redo ? L"Redo" : L"Undo");
+}
+
+void undo(Editor& ed) {
+  undo_steps(ed, false);
 }
 
 void redo(Editor& ed) {
-  Buffer& b = ed.current();
-  if (!ed.check_writable(b)) return;
-  ed.set_message(ed.redo(b) ? L"Redo" : L"No further redo information");
+  undo_steps(ed, true);
 }
 
 // ---- Files ----
@@ -519,11 +752,33 @@ void quit(Editor& ed) {
   ed.quit();
 }
 
+void find_user_init_file(Editor& ed) {
+  ed.find_user_init_file();
+}
+
+// ---- Prefix argument and M-x ----
+
+void universal_argument(Editor& ed) {
+  ed.universal_argument();
+}
+
+void digit_argument(Editor& ed) {
+  ed.digit_argument();
+}
+
+void negative_argument(Editor& ed) {
+  ed.negative_argument();
+}
+
+void execute_extended_command(Editor& ed) {
+  ed.execute_extended_command();
+}
+
 // ---- Minibuffer ----
 
 bool require_minibuffer(Editor& ed) {
   if (ed.minibuffer_active()) return true;
-  ed.set_message(L"Not in the minibuffer");
+  ed.fail(L"Not in the minibuffer");
   return false;
 }
 
@@ -543,6 +798,27 @@ void next_history_element(Editor& ed) {
   if (require_minibuffer(ed)) ed.minibuffer_history_next();
 }
 
+// ---- Parameters ----
+
+constexpr const wchar_t* kEncodingNames[] = {
+    L"utf-8",       L"utf-8-bom",    L"utf-16le", L"utf-16le-bom", L"utf-16be",
+    L"utf-16be-bom", L"shift_jis",   L"euc-jp",   L"iso-2022-jp",  L"windows-1252",
+    L"gb18030",     L"big5",         L"euc-kr",
+};
+constexpr const wchar_t* kEolChoices[] = {L"lf", L"crlf", L"cr"};
+constexpr const wchar_t* kWrapChoices[] = {L"none", L"window", L"fixed", L"max"};
+
+constexpr Param kTextParams[] = {{L"Text: ", ParamType::kText, {}}};
+constexpr Param kLineParams[] = {{L"Goto line: ", ParamType::kInteger, {}}};
+constexpr Param kEncodingParams[] = {{L"Coding system: ", ParamType::kChoice, kEncodingNames}};
+constexpr Param kFileEncodingParams[] = {{L"Find file: ", ParamType::kText, {}},
+                                         {L"Coding system: ", ParamType::kChoice, kEncodingNames}};
+constexpr Param kEolParams[] = {{L"Line ending (lf, crlf, cr): ", ParamType::kChoice, kEolChoices}};
+constexpr Param kWrapParams[] = {{L"Wrap mode (none, window, fixed, max): ", ParamType::kChoice, kWrapChoices}};
+
+// Commands with a null function are registered for later milestones
+// (decision D9): they can be bound, completed in M-x and run, which shows
+// "<command> is not implemented yet".
 constexpr CommandInfo kCommands[] = {
     {"backward-char", &backward_char},
     {"backward-kill-word", &backward_kill_word},
@@ -554,22 +830,43 @@ constexpr CommandInfo kCommands[] = {
     {"cut", &kill_region},
     {"delete-backward-char", &delete_backward_char},
     {"delete-char", &delete_char},
+    {"digit-argument", &digit_argument, {}, true},
     {"downcase-word", &downcase_word},
     {"end-of-buffer", &end_of_buffer},
     {"end-of-line", &end_of_line},
     {"exchange-point-and-mark", &exchange_point_and_mark},
+    {"execute-extended-command", &execute_extended_command},
     {"exit-minibuffer", &exit_minibuffer},
     {"find-file", &find_file},
+    {"find-file-with-encoding", nullptr, kFileEncodingParams},
+    {"find-user-init-file", &find_user_init_file},
     {"forward-char", &forward_char},
     {"forward-word", &forward_word},
+    {"goto-line", nullptr, kLineParams},
     {"insert-tab", &insert_tab},
+    {"insert-text", &insert_text, kTextParams},
+    {"isearch-abort", nullptr},
+    {"isearch-backward", nullptr},
+    {"isearch-delete-char", nullptr},
+    {"isearch-exit", nullptr},
+    {"isearch-forward", nullptr},
+    {"isearch-query-replace", nullptr},
+    {"isearch-repeat-backward", nullptr},
+    {"isearch-repeat-forward", nullptr},
+    {"isearch-toggle-case-fold", nullptr},
+    {"isearch-toggle-regexp", nullptr},
     {"keyboard-quit", &keyboard_quit},
     {"kill-line", &kill_line},
     {"kill-region", &kill_region},
     {"kill-ring-save", &kill_ring_save},
     {"kill-word", &kill_word},
+    {"kmacro-end-and-call-macro", nullptr},
+    {"kmacro-end-macro", nullptr},
+    {"kmacro-start-macro", nullptr},
     {"mark-whole-buffer", &mark_whole_buffer},
+    {"menu-bar-open", nullptr},
     {"minibuffer-complete", &minibuffer_complete},
+    {"negative-argument", &negative_argument, {}, true},
     {"newline", &newline},
     {"next-history-element", &next_history_element},
     {"next-line", &next_line},
@@ -577,19 +874,37 @@ constexpr CommandInfo kCommands[] = {
     {"paste", &yank},
     {"previous-history-element", &previous_history_element},
     {"previous-line", &previous_line},
+    {"query-replace", nullptr},
+    {"query-replace-act", nullptr},
+    {"query-replace-act-and-exit", nullptr},
+    {"query-replace-all", nullptr},
+    {"query-replace-exit", nullptr},
+    {"query-replace-regexp", nullptr},
+    {"query-replace-skip", nullptr},
     {"quit", &quit},
     {"quoted-insert", &quoted_insert},
     {"read-only-mode", &read_only_mode},
     {"recenter-top-bottom", &recenter_top_bottom},
     {"redo", &redo},
+    {"revert-buffer-with-coding-system", nullptr, kEncodingParams},
     {"save-buffer", &save_buffer},
     {"scroll-down-command", &scroll_down_command},
     {"scroll-up-command", &scroll_up_command},
     {"select-all", &select_all},
     {"self-insert-command", &self_insert_command},
+    {"set-buffer-file-coding-system", nullptr, kEncodingParams},
+    {"set-eol", nullptr, kEolParams},
     {"set-mark-command", &set_mark_command},
+    {"set-wrap-mode", nullptr, kWrapParams},
+    {"text-scale-decrease", nullptr},
+    {"text-scale-increase", nullptr},
+    {"text-scale-reset", nullptr},
+    {"toggle-eol-marks", nullptr},
+    {"toggle-line-numbers", nullptr},
+    {"toggle-whitespace-marks", nullptr},
     {"transpose-chars", &transpose_chars},
     {"undo", &undo},
+    {"universal-argument", &universal_argument, {}, true},
     {"upcase-word", &upcase_word},
     {"write-file", &write_file},
     {"yank", &yank},
@@ -599,6 +914,10 @@ constexpr CommandInfo kCommands[] = {
 
 std::span<const CommandInfo> all_commands() {
   return kCommands;
+}
+
+std::span<const wchar_t* const> encoding_names() {
+  return kEncodingNames;
 }
 
 const CommandInfo* find_command(std::string_view name) {

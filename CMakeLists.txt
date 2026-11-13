@@ -29,9 +29,11 @@ target_compile_options(geditor_options INTERFACE /W4 /utf-8)
 add_library(geditor_core STATIC
   src/core/char_width.cpp
   src/core/commands.cpp
+  src/core/config.cpp
   src/core/editor.cpp
   src/core/encoding.cpp
   src/core/files.cpp
+  src/core/jsonc.cpp
   src/core/key.cpp
   src/core/keymap.cpp
   src/core/layout.cpp
@@ -56,6 +58,7 @@ target_include_directories(geditor_win_logic PUBLIC src/win)
 target_link_libraries(geditor_win_logic PUBLIC geditor_core PRIVATE geditor_options)
 
 add_executable(geditor WIN32
+  src/win/config_watcher.cpp
   src/win/dialogs.cpp
   src/win/ime.cpp
   src/win/main.cpp

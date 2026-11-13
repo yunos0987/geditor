@@ -3,16 +3,37 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "buffer.h"
+#include "commands.h"
+#include "config.h"
 #include "host.h"
 #include "key.h"
 #include "keymap.h"
 #include "minibuffer.h"
 
 namespace geditor {
+
+// Shown when a command needs the minibuffer while it is already active.
+inline constexpr wchar_t kRecursiveMinibufferMessage[] =
+    L"Command attempted to use minibuffer while in minibuffer";
+
+// The prefix argument (docs/PLAN.md 4.4, decision D6): C-u = 4, C-u C-u =
+// 16, C-u with digits, C-u - = -1, M-0..M-9, M--.
+struct PrefixArg {
+  bool active = false;
+  bool digits = false;    // digits were typed
+  bool negative = false;  // "-" was typed
+  int value = 0;          // the typed digits
+  int multiplier = 1;     // 4 for each C-u (without digits)
+
+  // The numeric value; 1 when not active.
+  int count() const;
+};
 
 class Editor {
  public:
@@ -30,8 +51,29 @@ class Editor {
   // command line.
   void request_open(std::wstring_view path);
   // Runs a command by name as if its key had been pressed (for commands
-  // without a default key; M-x in M2). Unknown names show a message.
+  // without a default key, and the window's close button). Unknown names
+  // show a message.
   void execute_command(std::string_view name);
+
+  // ---- Settings (docs/PLAN.md 2 "settings errors", 4.3, 4.5) ----
+  // The settings file; empty when there is none.
+  void set_settings_path(std::wstring path) { settings_path_ = std::move(path); }
+  const std::wstring& settings_path() const { return settings_path_; }
+  // Reads the settings file through the host and applies it (startup and
+  // every change). No file: the built-in defaults, with "Settings file
+  // removed; using defaults" when it existed at the last read. A file that
+  // cannot be read keeps the previous settings and shows the reason. Pending
+  // prefix keys and a pending prefix argument are cancelled; the minibuffer
+  // stays.
+  void reload_settings();
+  // Applies settings text (UTF-8 JSONC). A syntax error keeps the previous
+  // settings; semantic errors drop only their items. Every error is shown in
+  // the echo area with its line and column. Returns false on a syntax error.
+  bool apply_settings_text(std::string_view utf8);
+  const Config& config() const { return config_; }
+  // Errors of the last settings text, sorted by position.
+  const std::vector<Diagnostic>& settings_errors() const { return settings_errors_; }
+  const Keymap& keymap(KeymapKind kind) const { return maps_[static_cast<int>(kind)]; }
 
   // ---- State for drawing ----
   const Buffer& buffer() const { return main_; }
@@ -44,6 +86,17 @@ class Editor {
   // Echo area line: the minibuffer prompt and input (with the message in
   // braces after it), or the message.
   std::wstring echo_area_text() const;
+  // True when the message has several lines (settings errors).
+  bool message_is_multi_line() const { return message_.find(L'\n') != std::wstring::npos; }
+  // Lines of the message, at most `max_lines`: settings errors use several
+  // lines ("\n" in the message), everything else one. When fewer lines fit
+  // than there are, the last shown line is "... and N more", N counting every
+  // hidden error.
+  std::vector<std::wstring> message_lines(int max_lines = 10) const;
+  // Rows of the echo area when at most `max_rows` fit (the window keeps the
+  // mode line and one text line): 1, or the lines of a multi-line message
+  // plus the minibuffer line when it is active. The next key returns it to 1.
+  int echo_line_count(int max_rows = 10) const;
   // Pending prefix keys for the host to echo, such as "C-x-" ("" when none).
   std::wstring pending_keys_text() const;
   // True when `key`, typed now, would run a command or continue a prefix
@@ -68,6 +121,18 @@ class Editor {
   // The buffer that keys edit: the minibuffer while it is active.
   Buffer& current() { return minibuffer_active() ? mini_ : main_; }
   void set_message(std::wstring text) { message_ = std::move(text); }
+  // The running command failed: shows `text`; a command sequence stops here.
+  void fail(std::wstring text) {
+    message_ = std::move(text);
+    failed_ = true;
+  }
+  // The prefix argument of the running command (1 without one) and whether
+  // one was given.
+  int prefix_count() const { return command_prefix_.count(); }
+  bool has_prefix_arg() const { return command_prefix_.active; }
+  // Arguments of the running command (from its binding, M-x or the
+  // minibuffer).
+  const std::vector<CommandArg>& command_args() const { return command_args_; }
   const std::string& last_command() const { return last_command_; }
   const std::string& this_command() const { return this_command_; }
   Key last_key() const { return last_key_; }
@@ -107,8 +172,19 @@ class Editor {
   void minibuffer_history_next();
   void set_minibuffer_text(std::wstring_view text);
 
+  // Prefix argument commands (C-u, M-<digit>, M--).
+  void universal_argument();
+  void digit_argument();
+  void negative_argument();
+  // M-x: reads a command name (Tab completes all registered names, M-p/M-n
+  // history) and runs it with the prefix argument typed before M-x.
+  void execute_extended_command();
+
   // File commands
   void find_file();
+  // Opens the settings file like find-file; a missing file opens as a new
+  // buffer holding the commented template (written only when saved).
+  void find_user_init_file();
   void save_buffer();
   void write_file();
   void quit();
@@ -123,7 +199,23 @@ class Editor {
   enum class AfterSave { kNone, kQuit, kOpen };
 
   Keymap::Lookup lookup(const KeySequence& keys) const;
-  void run_command(std::string_view name, bool typing);
+  // Runs a key's binding with the pending prefix argument; then a command
+  // chosen in the minibuffer (M-x), if any. False when a command failed.
+  bool dispatch(const Binding& binding, bool typing);
+  bool run_binding(const Binding& binding, bool typing);
+  // Runs one call. `own_group`: the call is its own undo group (false inside
+  // a command sequence, which is one group).
+  bool run_call(const CommandCall& call, const PrefixArg& prefix, bool typing, bool own_group);
+  // Takes the prefix argument being typed for the next command.
+  PrefixArg take_prefix();
+  // Drops pending prefix keys, ESC and the prefix argument being typed.
+  void cancel_pending_input();
+  void start_reading_arguments(const CommandInfo& info, const PrefixArg& prefix);
+  void finish_command_name(const std::wstring& input);
+  void finish_argument(const std::wstring& input);
+  History& history_for(MinibufferPurpose purpose);
+  void rebuild_keymaps(const Config& config, std::vector<Diagnostic>* errors);
+  void show_settings_errors();
   void finish_command(Buffer& b);
   void note_non_command();
   void handle_quoted_insert(const Key& key);
@@ -140,8 +232,31 @@ class Editor {
   Host& host_;
   Buffer main_;
   Buffer mini_;
-  Keymap global_map_;
-  Keymap minibuffer_map_;
+  // global, minibuffer, isearch, query_replace (KeymapKind order).
+  Keymap maps_[kKeymapCount];
+
+  // Settings
+  std::wstring settings_path_;
+  bool settings_file_seen_ = false;  // the file existed at the last read
+  Config config_;
+  std::vector<Diagnostic> settings_errors_;
+  bool message_is_settings_ = false;  // message_ shows settings errors
+
+  // Prefix argument: the one being typed, and the one of the running command.
+  PrefixArg prefix_;
+  std::wstring prefix_display_;  // "C-u 1 2"
+  PrefixArg command_prefix_;
+  std::wstring command_prefix_display_;
+  std::wstring key_display_;  // the keys of the running command
+  std::vector<CommandArg> command_args_;
+  bool failed_ = false;
+
+  // M-x and arguments read in the minibuffer.
+  PrefixArg minibuffer_prefix_;  // prefix argument for the command being read
+  CommandCall reading_call_;     // command whose arguments are being read
+  std::optional<std::pair<CommandCall, PrefixArg>> deferred_call_;
+  History command_history_;
+  History argument_history_;
 
   KeySequence pending_;
   std::wstring pending_display_;

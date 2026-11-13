@@ -238,10 +238,10 @@ TEST(win_read_missing_file_fails_with_message) {
 
 TEST(win_launch_failure_reports_error) {
   std::wstring error;
-  CHECK(!geditor::win::launch_editor(L"C:\\no\\such\\geditor.exe", L"C:\\a b.txt", error));
+  CHECK(!geditor::win::launch_editor(L"C:\\no\\such\\geditor.exe", L"C:\\a b.txt", L"", error));
   CHECK(error.find(L"Cannot start a new window: ") == 0);
   error.clear();
-  CHECK(!geditor::win::launch_editor(L"", L"C:\\a.txt", error));
+  CHECK(!geditor::win::launch_editor(L"", L"C:\\a.txt", L"", error));
   CHECK(!error.empty());
 }
 

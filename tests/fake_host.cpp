@@ -1,5 +1,6 @@
 #include "fake_host.h"
 
+#include <algorithm>
 #include <cstdio>
 
 #include "key.h"
@@ -75,6 +76,10 @@ std::string FakeHost::file(const std::wstring& path) const {
 
 bool FakeHost::read_file(const std::wstring& path, std::string& bytes, std::wstring& error) {
   const auto it = files.find(key_of(path));
+  if (unreadable_paths.count(key_of(path)) != 0) {
+    error = L"Cannot read " + path + L": Access is denied";
+    return false;
+  }
   if (it == files.end() || it->second.is_directory) {
     error = L"Cannot read " + path;
     return false;
@@ -176,6 +181,17 @@ bool FakeHost::launch_new_window(const std::wstring& path, std::wstring& error) 
   }
   launched.push_back(path);
   return true;
+}
+
+int FakeHost::visible_lines() {
+  if (echo_editor == nullptr) return lines;
+  return std::max(1, lines - (echo_editor->echo_line_count() - 1));
+}
+
+void Session::settings(const std::string& text) {
+  host.add_file(kSettingsPath, text);
+  ed.set_settings_path(kSettingsPath);
+  ed.reload_settings();
 }
 
 void Session::keys(const wchar_t* notation) {

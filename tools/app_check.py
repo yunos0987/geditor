@@ -1,9 +1,15 @@
-"""Real-app checks of geditor M1 (run by hand; Windows only).
+"""Real-app checks of geditor M1 and M2 (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
 window title. Every step prints PASS / FAIL / INFO with its evidence and the
 screenshot path; look at the PNG files for the visual checks.
+
+Every geditor started here gets --settings=PATH with a file under the output
+folder, so the user's %USERPROFILE%\\.geditor.json is never read or written.
+The M2 checks rewrite that file while geditor runs (live reload, syntax
+error, expanded echo area, removal, a locked file, find-user-init-file) and
+start geditor with a settings file in a missing folder (watcher failure).
 
 Keys go through SendInput when the desktop is unlocked (the geditor window is
 brought to the foreground first; nothing is sent while another window is in
@@ -153,7 +159,8 @@ def run_checks(exe: pathlib.Path, out: pathlib.Path):
     os.chmod(ro, stat.S_IREAD)
 
     shots = out / "shots"
-    app = d.App(exe, [str(a)], cwd=work)
+    settings = no_settings(out)
+    app = d.App(exe, [str(a)], cwd=work, settings=settings)
     try:
         mode = app.use_input()
         record("INFO", "input mode", mode)
@@ -334,7 +341,7 @@ def run_checks(exe: pathlib.Path, out: pathlib.Path):
         os.chmod(ro, stat.S_IREAD | stat.S_IWRITE)
 
     # Horizontal scrolling of a long line, Alt alone, M-<f4>.
-    app = d.App(exe, [str(work / "long.txt")], cwd=work)
+    app = d.App(exe, [str(work / "long.txt")], cwd=work, settings=settings)
     try:
         app.use_input()
         app.keys("C-e")
@@ -409,7 +416,8 @@ def run_retry1_checks(exe: pathlib.Path, out: pathlib.Path):
     pathlib.Path(long_path(ro_file)).write_bytes(b"read only\n")
     os.chmod(long_path(ro_file), stat.S_IREAD)
     record("INFO", "long path", f"{len(str(deep_file))} characters")
-    app = d.App(exe, [str(deep_file)], cwd=work)
+    settings = no_settings(out)
+    app = d.App(exe, [str(deep_file)], cwd=work, settings=settings)
     try:
         app.use_input()
         shot = app.capture(shots / "20_long_path_open.png")
@@ -477,7 +485,7 @@ def run_retry1_checks(exe: pathlib.Path, out: pathlib.Path):
     # [S2] Minimise / restore keeps the view.
     lines_file = work / "lines200.txt"
     lines_file.write_bytes("".join(f"line {i:03d}\n" for i in range(1, 201)).encode())
-    app = d.App(exe, ["+50", str(lines_file)], cwd=work)
+    app = d.App(exe, ["+50", str(lines_file)], cwd=work, settings=settings)
     try:
         app.use_input()
         app.keys("C-p C-p C-p C-p C-p")
@@ -498,7 +506,7 @@ def run_retry1_checks(exe: pathlib.Path, out: pathlib.Path):
     marks = work / "marks.txt"
     marks.write_bytes("ab cd ef gh\na\u200bb c\ufeffd e\u2060f g\ufe0fh\nか\u3099 e\u0301 x\ufe0fy\n\n"
                       .encode("utf-8"))
-    app = d.App(exe, ["+4", str(marks)], cwd=work)
+    app = d.App(exe, ["+4", str(marks)], cwd=work, settings=settings)
     try:
         app.use_input()
         w, h, px = app.capture(shots / "26_marks.png")
@@ -515,7 +523,7 @@ def run_retry1_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
     # [S5] Session end asks to save; Cancel blocks, Don't Save allows.
-    app = d.App(exe, [str(lines_file)], cwd=work)
+    app = d.App(exe, [str(lines_file)], cwd=work, settings=settings)
     try:
         app.use_input()
         app.type("Z")
@@ -539,6 +547,235 @@ def run_retry1_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
 
+def no_settings(out: pathlib.Path) -> pathlib.Path:
+    """A settings path under `out` whose file does not exist (built-in
+    defaults); its folder exists so that geditor can watch it."""
+    folder = out / "settings"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / "none.json"
+
+
+# ---- M2: settings ----
+
+GENERIC_WRITE = 0x40000000
+CREATE_ALWAYS = 2
+INVALID_HANDLE = ctypes.c_void_p(-1).value
+kernel32.CreateFileW.restype = wt.HANDLE
+kernel32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD,
+                                 wt.DWORD, wt.HANDLE]
+kernel32.WriteFile.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD),
+                               ctypes.c_void_p]
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+
+
+def write_locked(path: pathlib.Path, data: bytes):
+    """Writes `data` to `path` through a handle that shares nothing and
+    returns the open handle (other programs get a sharing violation until
+    it is closed)."""
+    handle = kernel32.CreateFileW(str(path), GENERIC_WRITE, 0, None, CREATE_ALWAYS, 0x80, None)
+    if handle == INVALID_HANDLE or handle is None:
+        raise d.DriverError(f"cannot open {path} exclusively (error {ctypes.get_last_error()})")
+    written = wt.DWORD(0)
+    kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+    return handle
+
+
+def mode_line_rows(shot) -> tuple[int, int]:
+    """(top of the mode line, its height) in pixels."""
+    _, top, bottom = layout(shot)
+    return top, bottom - top
+
+
+def echo_pixels(shot) -> int:
+    return count(shot, 0xD4D4D4, "echo")
+
+
+def press_until_modified(app, key: str, timeout_s: float) -> tuple[bool, float, int]:
+    """Presses `key` until the title shows the modified marker; returns
+    (modified, seconds from the call, presses)."""
+    start = time.monotonic()
+    presses = 0
+    while time.monotonic() - start < timeout_s:
+        app.keys(key, pause_s=0.02)
+        presses += 1
+        time.sleep(0.03)
+        if app.title().endswith("* - geditor"):
+            return True, time.monotonic() - start, presses
+    return False, time.monotonic() - start, presses
+
+
+def run_m2_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C6], [C8] and [C14] of the M2 packet on the real app."""
+    work = out / "files_m2"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    settings.write_bytes(b"{}\n")
+    doc = work / "m2.txt"
+    doc.write_bytes(b"line one\nline two\n")
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings)
+    try:
+        record("INFO", "M2 input mode", app.use_input())
+        time.sleep(0.5)  # the watcher starts after the first frame
+        baseline = app.capture(shots / "m2_00_start.png")
+        top0, line_px = mode_line_rows(baseline)
+
+        # [C6] Rewriting the file binds <f5>; measure until the key works.
+        settings.write_bytes(b'{\n  "keys": { "<f5>": ["insert-text", "M2OK"] }\n}\n')
+        ok, elapsed, presses = press_until_modified(app, "<f5>", 3.0)
+        check("[C6] rewritten settings work within 1 s", ok and elapsed <= 1.0,
+              f"elapsed={elapsed:.3f}s from the write to the first effective <f5> ({presses} presses)")
+        app.keys("C-x C-s")
+        time.sleep(0.3)
+        data = doc.read_bytes()
+        check("[C6] the new binding inserted its text once", data == b"M2OKline one\nline two\n",
+              f"bytes={data!r}")
+
+        # [C6] A syntax error keeps the previous binding and shows the line.
+        settings.write_bytes(b'{\n  "keys": { "<f5>": ["insert-text", "BAD"] }\n'
+                             b'  "tab_width": 8\n}\n')
+        time.sleep(1.0)
+        shot = app.capture(shots / "m2_01_syntax_error.png")
+        check("[C6] syntax error is shown in the echo area", echo_pixels(shot) > 0,
+              f"echo text pixels={echo_pixels(shot)} (m2_01_syntax_error.png: "
+              "'settings.json:3:3: Expected ',' or '}', found '\"' (file not applied)')")
+        app.keys("<f5>")
+        app.keys("C-x C-s")
+        time.sleep(0.3)
+        data = doc.read_bytes()
+        check("[C6] syntax error keeps the previous binding", data == b"M2OKM2OKline one\nline two\n",
+              f"bytes={data!r}")
+
+        # [C8] Several semantic errors expand the echo area; the next key
+        # returns it to one line.
+        settings.write_bytes(b'{\n  "tab_widht": 4,\n  "colors": { "cursor": "red" },\n  "keys": {\n'
+                             b'    "C-c a": "no-such-command",\n    "C-x": "undo",\n'
+                             b'    "<f5>": ["insert-text", "M2OK"]\n  }\n}\n')
+        time.sleep(1.0)
+        shot = app.capture(shots / "m2_02_expanded_echo.png")
+        top1, _ = mode_line_rows(shot)
+        rows = round((top0 - top1) / line_px) + 1 if line_px else 0
+        check("[C8] 4 errors expand the echo area to 4 lines", rows == 4,
+              f"mode line top {top0}px -> {top1}px, line {line_px}px: {rows} echo rows "
+              "(m2_02_expanded_echo.png)")
+        app.keys("C-a")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m2_03_after_key.png")
+        top2, _ = mode_line_rows(shot)
+        check("[C8] the next key returns the echo area to one line", top2 == top0,
+              f"mode line top {top2}px (one-line layout {top0}px; m2_03_after_key.png)")
+
+        # D2: deleting the file reverts to the defaults.
+        app.keys("C-x C-s")  # unmodified before the next <f5>
+        time.sleep(0.3)
+        settings.unlink()
+        time.sleep(1.0)
+        shot = app.capture(shots / "m2_04_removed.png")
+        app.keys("<f5>")
+        time.sleep(0.3)
+        check("[C6] removing the file reverts to the defaults",
+              app.title() == "m2.txt - geditor" and echo_pixels(shot) > 0,
+              f"title after <f5>={app.title()!r} (m2_04_removed.png: "
+              "'Settings file removed; using defaults')")
+
+        # [C14] A file that stays locked cannot be read: the previous
+        # settings stay and the reason is shown.
+        settings.write_bytes(b'{ "keys": { "<f5>": ["insert-text", "M2OK"] } }\n')
+        ok, elapsed, _ = press_until_modified(app, "<f5>", 3.0)
+        app.keys("C-/")
+        time.sleep(0.2)
+        handle = write_locked(settings, b'{ "keys": { "<f5>": ["insert-text", "NEW"] } }\n')
+        try:
+            time.sleep(1.8)  # 200 ms + 3 retries of 200 ms, then the read fails
+            shot = app.capture(shots / "m2_05_locked.png")
+            app.keys("<f5>")
+            app.keys("C-x C-s")
+            time.sleep(0.3)
+        finally:
+            kernel32.CloseHandle(handle)
+        data = doc.read_bytes()
+        check("[C14] a locked settings file keeps the previous settings and says why",
+              ok and data.startswith(b"M2OKM2OKM2OK") and b"NEW" not in data and echo_pixels(shot) > 0,
+              f"bytes={data[:40]!r} (m2_05_locked.png: 'Cannot read ...settings.json: The file is used "
+              "by another process (settings kept)')")
+        time.sleep(1.0)  # the close is not a change; nothing to wait for
+
+        # [C8] find-user-init-file on a missing file: the template, unsaved.
+        settings.unlink()
+        time.sleep(1.0)
+        app.keys("M-x")
+        app.type("find-user-init-file")
+        app.keys("RET")
+        dialog = app.wait_dialog(3.0)
+        if dialog:
+            d.click_dialog_button(dialog, 101)  # Open in this window
+            time.sleep(0.5)
+        shot = app.capture(shots / "m2_06_init_file_template.png")
+        check("[C8] find-user-init-file opens the template unsaved",
+              app.title() == "settings.json* - geditor" and not settings.exists(),
+              f"title={app.title()!r} file exists={settings.exists()} (m2_06_init_file_template.png)")
+        app.keys("C-x C-s")
+        time.sleep(1.0)  # saved: the watcher reloads it
+        shot = app.capture(shots / "m2_07_template_saved.png")
+        data = settings.read_bytes() if settings.exists() else b""
+        check("[C8] the saved template loads without errors",
+              data.startswith(b"// geditor settings") and data.endswith(b"{\n}\n") and
+              mode_line_rows(shot)[0] == top0,
+              f"{len(data)} bytes, one-line echo area (m2_07_template_saved.png shows 'Wrote ...')")
+
+        # [R2] Another file in the folder written every 50 ms must not delay
+        # the reload of the settings file.
+        stop_noise = threading.Event()
+
+        def noise():
+            i = 0
+            while not stop_noise.is_set():
+                (work / "noise.log").write_text(str(i))
+                i += 1
+                time.sleep(0.05)
+
+        noise_thread = threading.Thread(target=noise)
+        noise_thread.start()
+        try:
+            time.sleep(0.3)
+            settings.write_bytes(b'{ "keys": { "<f5>": ["insert-text", "NOISE"] } }\n')
+            ok, elapsed, presses = press_until_modified(app, "<f5>", 3.0)
+        finally:
+            stop_noise.set()
+            noise_thread.join()
+        check("[R2] reload within 1 s while another file in the folder changes every 50 ms",
+              ok and elapsed <= 1.0, f"elapsed={elapsed:.3f}s ({presses} presses, noise.log rewritten every 50 ms)")
+
+        # [R4] A low window: the echo area leaves the mode line and one text
+        # row; the last echo line counts the hidden errors.
+        d.user32.MoveWindow(app.hwnd, 100, 100, 900, 200, True)
+        time.sleep(0.4)
+        settings.write_bytes(("{\n" + "".join(f'  "bad{i}": 1,\n' for i in range(12)) + "}\n").encode())
+        time.sleep(1.0)
+        shot = app.capture(shots / "m2_09_small_window.png")
+        top, line_px = mode_line_rows(shot)
+        height = shot[1]
+        echo_rows = round((height - (top + line_px)) / line_px) if line_px else 0
+        check("[R4] a low window keeps the mode line and one text row",
+              line_px > 0 and top >= line_px and echo_rows >= 1,
+              f"client height {height}px, mode line top {top}px, line {line_px}px, {echo_rows} echo rows "
+              f"(m2_09_small_window.png: the last echo line is '... and N more')")
+    finally:
+        app.kill()
+
+    # D12 / [C14]: a settings file in a missing folder cannot be watched.
+    missing = work / "no_such_folder" / "settings.json"
+    app = d.App(exe, [str(doc)], cwd=work, settings=missing)
+    try:
+        time.sleep(0.8)
+        shot = app.capture(shots / "m2_08_watch_failed.png")
+        check("[C14] watcher failure is shown once", echo_pixels(shot) > 0 and app.alive(),
+              f"echo text pixels={echo_pixels(shot)} (m2_08_watch_failed.png: "
+              "'Cannot watch the settings file: C:\\...\\no_such_folder: No such folder')")
+    finally:
+        app.kill()
+
+
 def clipboard_accessible() -> bool:
     if d.user32.OpenClipboard(None):
         d.user32.CloseClipboard()
@@ -554,13 +791,18 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="exit 1 when any check is SKIP")
     parser.add_argument("--only-retry1", action="store_true",
                         help="run only the checks added in retry 1 ([S1]-[S5])")
+    parser.add_argument("--only-m2", action="store_true",
+                        help="run only the M2 settings checks")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     saved = clipboard_text()
     try:
-        if not args.only_retry1:
+        if not args.only_retry1 and not args.only_m2:
             run_checks(args.exe.resolve(), args.out.resolve())
-        run_retry1_checks(args.exe.resolve(), args.out.resolve())
+        if not args.only_m2:
+            run_retry1_checks(args.exe.resolve(), args.out.resolve())
+        if not args.only_retry1:
+            run_m2_checks(args.exe.resolve(), args.out.resolve())
     except d.DriverError as exc:
         record("FAIL", "driver", str(exc))
     finally:
