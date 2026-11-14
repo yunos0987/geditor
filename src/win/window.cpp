@@ -1,12 +1,15 @@
 #include "window.h"
 
+#include <crtdbg.h>
 #include <imm.h>
 #include <shellapi.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cwchar>
 #include <memory>
+#include <vector>
 
 #include "clipboard.h"
 #include "dialogs.h"
@@ -42,13 +45,20 @@ constexpr DWORD kToUnicodeNoStateChange = 0x4;  // Windows 10 1607 and later
 constexpr ULONG_PTR kCopyDataCapture = 0x50414347;  // 'GCAP': WM_COPYDATA screenshot
 // 'GFLT': WM_COPYDATA from tools/app_check.py; the payload (UTF-16) "target"
 // or "font" makes the next render target / font creation fail ("shape": the
-// next shaping of a grapheme cluster).
+// next shaping of a grapheme cluster; "color": the next colour glyph).
 constexpr ULONG_PTR kCopyDataFault = 0x544C4647;
+// 'GRDW': WM_COPYDATA from tools/app_check.py; the payload (UTF-16) is a
+// number of frames to draw at once (M3d [C4]); their times go to the state.
+constexpr ULONG_PTR kCopyDataRedraw = 0x57445247;
+constexpr int kMaxRedrawFrames = 1000;
 // menu-bar-open queues a Down key for the menu loop so that the File menu
 // drops down (decision G7). Bit 29 (the context code) is never set in a real
 // WM_KEYDOWN, so the window can tell this one apart and drop it when no menu
 // loop took it.
 constexpr LPARAM kMenuDropDownLParam = 0x20000001;
+// The second Left / Right key of a wrap-around at the ends of the menu bar
+// (M3d decision D6), told apart the same way.
+constexpr LPARAM kMenuWrapLParam = 0x20000002;
 // --headless: the window starts this far right of the virtual screen (no
 // monitor shows it) with this size; the tools resize it in place.
 constexpr int kHeadlessGap = 200;
@@ -252,8 +262,13 @@ bool MainWindow::pre_translate(const MSG& msg) {
   if (msg.hwnd != hwnd_ || (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN)) {
     return false;
   }
-  // The Down key of enter_menu_bar that no menu loop took: dropped.
+  // The Down key of enter_menu_bar, or the second key of a menu bar
+  // wrap-around, that no menu loop took: dropped.
   if (msg.message == WM_KEYDOWN && msg.wParam == VK_DOWN && msg.lParam == kMenuDropDownLParam) return true;
+  if (msg.message == WM_KEYDOWN && (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT) &&
+      msg.lParam == kMenuWrapLParam) {
+    return true;
+  }
   // Another key before the release that would open the menu bar cancels it.
   if (menu_key_ != 0 && msg.wParam != menu_key_) menu_key_ = 0;
   ModifierState mods;
@@ -661,6 +676,11 @@ void MainWindow::paint() {
     ++frames_;
     reloads_drawn_ = settings_reloads_;
   }
+  if (renderer_.take_color_failure()) {
+    // M3d decision D3: said once; the glyphs are drawn in one colour.
+    append_message(L"Colour emoji are not available; drawn in one colour");
+    InvalidateRect(hwnd_, nullptr, FALSE);
+  }
   if (FAILED(result) && !measure_startup_) {
     if (draw_error_ == S_OK) draw_error_ = result;
     SetTimer(hwnd_, kRedrawTimer, kRedrawDelayMs, nullptr);
@@ -757,6 +777,57 @@ bool MainWindow::capture_to_bmp(const std::wstring& path) {
   return ok;
 }
 
+void MainWindow::run_redraw_benchmark(int frames) {
+  // The first frame may look up glyphs and colour layers; the others are the
+  // steady state (M3d decision D4) and are timed apart from it.
+  std::vector<double> times;
+  times.reserve(static_cast<size_t>(frames));
+  HRESULT error = S_OK;
+  long long alloc_bytes = -1;  // -1: not measured (release build)
+#ifdef _DEBUG
+  _CrtMemState before{};
+  _CrtMemState after{};
+#endif
+  for (int i = 0; i < frames; ++i) {
+#ifdef _DEBUG
+    if (i == 1) _CrtMemCheckpoint(&before);
+#endif
+    LARGE_INTEGER start{};
+    LARGE_INTEGER end{};
+    QueryPerformanceCounter(&start);
+    const HRESULT hr = renderer_.paint(hwnd_, editor_, view_);
+    QueryPerformanceCounter(&end);
+    if (FAILED(hr) && error == S_OK) error = hr;
+    times.push_back(ms_between(start, end));
+  }
+#ifdef _DEBUG
+  if (frames > 1) {
+    _CrtMemCheckpoint(&after);
+    alloc_bytes = static_cast<long long>(after.lTotalCount - before.lTotalCount);
+  }
+#endif
+  const double first = times.front();
+  std::vector<double> steady(times.begin() + (frames > 1 ? 1 : 0), times.end());
+  std::sort(steady.begin(), steady.end());
+  auto at = [&](double q) { return steady[std::min(steady.size() - 1, static_cast<size_t>(q * static_cast<double>(steady.size())))]; };
+  auto ms = [](double v) {
+    wchar_t buffer[32];
+    swprintf_s(buffer, L"%.3f", v);
+    return std::wstring(buffer);
+  };
+  redraw_result_ = state_line(L"redraw_frames", std::to_wstring(frames));
+  redraw_result_ += state_line(L"redraw_first_ms", ms(first));
+  redraw_result_ += state_line(L"redraw_median_ms", ms(at(0.5)));
+  redraw_result_ += state_line(L"redraw_p95_ms", ms(at(0.95)));
+  redraw_result_ += state_line(L"redraw_max_ms", ms(steady.back()));
+  redraw_result_ += state_line(L"redraw_alloc_bytes", std::to_wstring(alloc_bytes));
+  redraw_result_ += state_line(L"redraw_error", error == S_OK ? std::wstring(L"none") : hex_hresult(error));
+  if (FAILED(error)) {
+    if (error == D2DERR_RECREATE_TARGET) renderer_.discard_target();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+  }
+}
+
 LRESULT MainWindow::handle_copy_data(const COPYDATASTRUCT* data) {
   if (data == nullptr) {
     reject_request(L"WM_COPYDATA without data");
@@ -798,6 +869,11 @@ LRESULT MainWindow::handle_copy_data(const COPYDATASTRUCT* data) {
         renderer_.fail_next_shaping();
         return 1;
       }
+      if (*text == L"color") {
+        renderer_.fail_next_color();
+        InvalidateRect(hwnd_, nullptr, FALSE);  // the colour glyphs on screen are looked up again
+        return 1;
+      }
       if (headless_ && *text == L"clipboard-read") {
         fail_clipboard_read_ = true;
         return 1;
@@ -809,6 +885,16 @@ LRESULT MainWindow::handle_copy_data(const COPYDATASTRUCT* data) {
       reject_request(kind + L": unknown fault '" + *text + L"'" +
                      (headless_ ? L"" : L" (clipboard faults need --headless)"));
       return 0;
+    case kCopyDataRedraw: {
+      const int frames = static_cast<int>(std::wcstol(text->c_str(), nullptr, 10));
+      if (frames < 1 || frames > kMaxRedrawFrames) {
+        reject_request(kind + L": the number of frames must be 1.." + std::to_wstring(kMaxRedrawFrames) +
+                       L" ('" + *text + L"')");
+        return 0;
+      }
+      run_redraw_benchmark(frames);
+      return 1;
+    }
     case kCopyDataState:
       if (!text->empty() && write_state(*text)) return 1;
       reject_request(kind + L": cannot write the state '" + *text + L"'");
@@ -907,6 +993,10 @@ bool MainWindow::write_state(const std::wstring& path) {
   text += state_line(L"menu_popup", menu_popup_);
   text += state_line(L"menu_popups", menu_popups_);
   text += state_line(L"menu_key_waiting", menu_key_ != 0 ? L"1" : L"0");
+  // Colour glyphs (M3d): what the render target of the last colour glyph
+  // offered, and the last 'GRDW' benchmark.
+  text += state_line(L"color_support", renderer_.color_support());
+  text += redraw_result_;
   text += state_line(L"rejected", std::to_wstring(rejected_requests_));
   text += state_line(L"last_rejected", last_rejected_);
   text += question_ != nullptr ? question_state(*question_) : state_line(L"question", L"none");
@@ -1241,21 +1331,17 @@ void MainWindow::enter_menu_bar() {
 }
 
 void MainWindow::handle_next_menu(WPARAM key, MDINEXTMENU* next) {
-  // Left from the first drop-down / Right from the last one: the menu loop
-  // asks where to go next; the menu bar itself again (its last / first item)
-  // instead of the system menu. Alt+Space still opens the system menu, and
-  // a loop in the system menu keeps the default.
-  HMENU bar = GetMenu(hwnd_);
-  if (next == nullptr || bar == nullptr || (key != VK_LEFT && key != VK_RIGHT)) return;
-  if (next->hmenuIn != bar) {
-    bool in_bar = false;
-    for (int i = 0; i < GetMenuItemCount(bar); ++i) {
-      if (GetSubMenu(bar, i) == next->hmenuIn) in_bar = true;
-    }
-    if (!in_bar) return;
-  }
-  next->hmenuNext = bar;
-  next->hwndNext = hwnd_;
+  // Left from the first drop-down / Right from the last one (M3d decision
+  // D6): the menu loop asks where to go next. Answering the menu bar itself
+  // selected its first item again (Left from File stayed on File, M3c), so
+  // the answer stays the default, the system menu, and the same key is
+  // queued once more: from the system menu the loop moves on to the other
+  // end of the bar (View for Left, File for Right). A loop in the system
+  // menu (Alt+Space, or this second key) keeps the default.
+  if (next == nullptr) return;
+  const bool system_menu = (GetWindowLongPtrW(hwnd_, GWL_STYLE) & WS_SYSMENU) != 0;
+  if (!menu_bar_wraps(GetMenu(hwnd_), next->hmenuIn, key, system_menu)) return;
+  PostMessageW(hwnd_, WM_KEYDOWN, key, kMenuWrapLParam);
 }
 
 void MainWindow::note_menu_popup(HMENU menu, bool system_menu) {

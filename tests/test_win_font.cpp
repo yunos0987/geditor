@@ -214,6 +214,75 @@ TEST(win_font_cluster_shaping_failure_draws_the_first_character) {
   CHECK(m.cluster(L"a\x0301", false).shaped);
 }
 
+// ---- [M3d] Colour glyphs (decisions D1, D3) ----
+
+TEST(win_font_colour_path_is_chosen_for_emoji_only) {
+  // D1: a glyph gets colour layers exactly when its font has a colour
+  // representation for it: U+1F600 and U+2639 U+FE0F (the emoji font), not
+  // 'A' (Consolas) or U+6F22 (a Japanese font). COLR layers only here (the
+  // default formats; the renderer adds those of its target).
+  Factory f;
+  if (f.get() == nullptr) return;
+  TextMeasurer m;
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  const TextMeasurer::Glyph a = m.glyph(U'A');
+  const TextMeasurer::Glyph kanji = m.glyph(U'漢');
+  CHECK(m.color_glyph(a.face, a.index) == nullptr);
+  CHECK(m.color_glyph(kanji.face, kanji.index) == nullptr);
+  CHECK(!m.is_color_face(a.face));
+  // An emoji is shaped as a cluster with the emoji font (the renderer does
+  // so for every cluster the core shows as an emoji).
+  const struct {
+    const char* name;
+    std::wstring text;
+  } emoji[] = {{"U+1F600", L"\U0001F600"}, {"U+2639 U+FE0F", L"\x2639\xFE0F"}};
+  for (const auto& e : emoji) {
+    const TextMeasurer::ClusterGlyphs& g = m.cluster(e.text, true);
+    const TextMeasurer::ColorRun* run = m.color_cluster(g);
+    std::printf("  %s -> %s, %zu colour layer(s)\n", e.name,
+                test::to_display(m.family_of_cluster(e.text, true)).c_str(), run ? run->layers.size() : size_t{0});
+    CHECK(g.shaped);
+    CHECK(run != nullptr);
+    if (run == nullptr) continue;
+    CHECK(run->layers.size() > 1);
+    CHECK_EQ(run->glyphs.size(), run->advances.size());
+    CHECK_EQ(run->glyphs.size(), run->offsets.size());
+    bool coloured = false;
+    for (const TextMeasurer::ColorLayer& layer : run->layers) {
+      CHECK(layer.count > 0 && layer.first + layer.count <= run->glyphs.size());
+      if (!layer.foreground && (layer.color.r != layer.color.g || layer.color.g != layer.color.b)) coloured = true;
+    }
+    CHECK(coloured);  // at least one layer of a colour that is not grey
+  }
+  // The single glyph of U+1F600 in its font has colour too.
+  const TextMeasurer::Glyph face = m.glyph(U'\U0001F600');
+  CHECK(m.color_glyph(face.face, face.index) != nullptr);
+  // The text forms stay in one colour: "A" and U+6F22 as clusters.
+  CHECK(m.color_cluster(m.cluster(L"A\x0301", false)) == nullptr);
+  CHECK(m.color_cluster(m.cluster(L"\x6F22\xFE00", false)) == nullptr);
+  CHECK(!m.color_failed());
+}
+
+TEST(win_font_colour_failure_falls_back_to_one_colour) {
+  // D3: a failed translation draws the glyph in one colour from then on;
+  // a new font (init) tries colour again.
+  Factory f;
+  if (f.get() == nullptr) return;
+  TextMeasurer m;
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  const TextMeasurer::ClusterGlyphs& g = m.cluster(L"\U0001F600", true);
+  CHECK(m.color_cluster(g) != nullptr);
+  m.fail_next_color();
+  CHECK(m.color_cluster(g) == nullptr);  // looked up again, and it fails
+  CHECK(m.color_failed());
+  const TextMeasurer::ClusterGlyphs& other = m.cluster(L"\x2639\xFE0F", true);
+  CHECK(m.color_cluster(other) == nullptr);
+  CHECK(!other.glyphs.empty() && other.glyphs[0] != 0);  // the glyph itself is still there
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  CHECK(!m.color_failed());
+  CHECK(m.color_cluster(m.cluster(L"\U0001F600", true)) != nullptr);
+}
+
 TEST(win_font_text_scale_steps_change_the_cell_size) {
   // [C9]: each step is 1.2 times the size; Consolas cells scale with it.
   Factory f;

@@ -8,7 +8,11 @@
 //                 the next HMENU creation ("menu") or context menu
 //                 ("popup", as if TrackPopupMenu failed) fail (any mode),
 //                 or the next "clipboard-read" / "clipboard-write" of the
-//                 private clipboard fail (headless only)
+//                 private clipboard fail (headless only); "shape": the next
+//                 shaping of a cluster; "color": the next colour glyph (any
+//                 mode, M3d decision D3)
+//   'GRDW' count  draw `count` frames at once (1..1000) and put their times
+//                 into the state (redraw_* lines; any mode, M3d [C4])
 //   'GSTA' path   write the state (state_line lines, UTF-16LE) to a file
 //   'GCBW' text   put `text` (CRLF line ends, as on the real clipboard) into
 //                 the private clipboard (headless only)

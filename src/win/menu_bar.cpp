@@ -177,4 +177,14 @@ std::vector<MenuEntry> read_menu(HMENU menu, std::wstring_view prefix) {
   return out;
 }
 
+bool menu_bar_wraps(HMENU bar, HMENU in, WPARAM key, bool system_menu) {
+  if (bar == nullptr || in == nullptr || !system_menu || (key != VK_LEFT && key != VK_RIGHT)) return false;
+  if (in == bar) return true;
+  const int count = GetMenuItemCount(bar);
+  for (int i = 0; i < count; ++i) {
+    if (GetSubMenu(bar, i) == in) return true;
+  }
+  return false;
+}
+
 }  // namespace geditor::win

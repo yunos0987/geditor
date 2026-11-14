@@ -1,6 +1,14 @@
+// IDWriteFactory4 / IDWriteFactory8 and the glyph image formats (colour
+// glyphs, M3d) are declared for NTDDI versions newer than the project's
+// _WIN32_WINNT; they are asked for at run time (QueryInterface), so this
+// raises NTDDI_VERSION for this file only, before any header.
+#define NTDDI_VERSION 0x0A00000D  // NTDDI_WIN10_CU
+
 #include "text_measurer.h"
 
 #include <windows.h>
+
+#include <dwrite_3.h>
 
 #include <cmath>
 #include <cwchar>
@@ -192,6 +200,12 @@ void TextMeasurer::release() {
   safe_release(collection_);
   fallback_tried_ = false;
   fallback_families_.clear();
+  color_glyphs_.clear();
+  safe_release(color_factory8_);
+  safe_release(color_factory4_);
+  safe_release(color_factory2_);
+  color_factory_tried_ = false;
+  color_failed_ = false;
   factory_ = nullptr;
 }
 
@@ -522,10 +536,13 @@ bool TextMeasurer::shape_cluster(std::wstring_view text, bool emoji, ClusterGlyp
 }
 
 const TextMeasurer::ClusterGlyphs& TextMeasurer::cluster(std::wstring_view text, bool emoji) {
-  std::wstring key(text);
-  key.push_back(emoji ? L'1' : L'0');  // the presentation is part of the key
-  const auto it = clusters_.find(key);
+  // The key buffer is reused: a lookup of a known cluster allocates nothing
+  // (decision D4 of M3d).
+  cluster_key_.assign(text);
+  cluster_key_.push_back(emoji ? L'1' : L'0');  // the presentation is part of the key
+  const auto it = clusters_.find(cluster_key_);
   if (it != clusters_.end()) return it->second;
+  std::wstring key = cluster_key_;
   ClusterGlyphs run;
   if (!shape_cluster(text, emoji, &run)) {
     // Decision C8: the first code point's glyph (the missing-glyph box of
@@ -548,6 +565,198 @@ std::wstring TextMeasurer::family_of_cluster(std::wstring_view text, bool emoji)
   const ClusterGlyphs& run = cluster(text, emoji);
   if (run.face >= faces_.size()) return std::wstring();
   return faces_[run.face].family;
+}
+
+// ---- Colour glyphs (M3d decisions D1, D3, D4) ----
+
+bool TextMeasurer::is_color_face(uint16_t face) {
+  if (face >= faces_.size()) return false;
+  Face& f = faces_[face];
+  if (f.color < 0) {
+    f.color = 0;
+    IDWriteFontFace2* face2 = nullptr;
+    if (SUCCEEDED(f.face->QueryInterface(__uuidof(IDWriteFontFace2), reinterpret_cast<void**>(&face2)))) {
+      f.color = face2->IsColorFont() ? 1 : 0;
+      face2->Release();
+    }
+  }
+  return f.color == 1;
+}
+
+void TextMeasurer::drop_color_layers() {
+  color_glyphs_.clear();
+  for (auto& [key, run] : clusters_) {
+    run.color_state = 0;
+    run.color = ColorRun();
+  }
+}
+
+void TextMeasurer::set_color_formats(uint32_t formats, uint32_t paint_level) {
+  if (formats == color_formats_ && paint_level == paint_level_) return;
+  color_formats_ = formats;
+  paint_level_ = paint_level;
+  drop_color_layers();
+}
+
+void TextMeasurer::fail_next_color() {
+  fail_next_color_ = true;
+  drop_color_layers();
+}
+
+void TextMeasurer::create_color_factory() {
+  color_factory_tried_ = true;
+  if (factory_ == nullptr) return;
+  // The newest interface that the system has: IDWriteFactory8 translates
+  // the COLR paint tree, IDWriteFactory4 chooses among the image formats,
+  // IDWriteFactory2 gives COLR layers only.
+  if (FAILED(factory_->QueryInterface(__uuidof(IDWriteFactory8), reinterpret_cast<void**>(&color_factory8_)))) {
+    color_factory8_ = nullptr;
+  }
+  if (FAILED(factory_->QueryInterface(__uuidof(IDWriteFactory4), reinterpret_cast<void**>(&color_factory4_)))) {
+    color_factory4_ = nullptr;
+  }
+  if (FAILED(factory_->QueryInterface(__uuidof(IDWriteFactory2), reinterpret_cast<void**>(&color_factory2_)))) {
+    color_factory2_ = nullptr;
+  }
+}
+
+namespace {
+
+// Appends one layer of an enumerated colour run to `out`; false when the
+// layer is not of face `face` at size `em` (the caller draws the run in one
+// colour then).
+bool append_layer(const DWRITE_GLYPH_RUN& run, uint32_t format, float x, float y,
+                  const DWRITE_COLOR_F& color, UINT16 palette_index, IDWriteFontFace* face, float em,
+                  TextMeasurer::ColorRun* out) {
+  if (run.fontFace != face || run.fontEmSize != em || run.glyphCount == 0 || run.glyphIndices == nullptr) {
+    return false;
+  }
+  TextMeasurer::ColorLayer layer;
+  layer.format = format;
+  layer.x = x;
+  layer.y = y;
+  layer.color = color;
+  layer.foreground = palette_index == 0xFFFF;
+  layer.first = static_cast<uint32_t>(out->glyphs.size());
+  layer.count = run.glyphCount;
+  for (UINT32 i = 0; i < run.glyphCount; ++i) {
+    out->glyphs.push_back(run.glyphIndices[i]);
+    out->advances.push_back(run.glyphAdvances != nullptr ? run.glyphAdvances[i] : 0.0f);
+    out->offsets.push_back(run.glyphOffsets != nullptr ? run.glyphOffsets[i] : DWRITE_GLYPH_OFFSET{0, 0});
+  }
+  out->layers.push_back(layer);
+  return true;
+}
+
+}  // namespace
+
+bool TextMeasurer::translate_color(uint16_t face, const uint16_t* glyphs, const float* advances,
+                                   const DWRITE_GLYPH_OFFSET* offsets, uint32_t count, ColorRun* out) {
+  *out = ColorRun();
+  if (color_failed_ || count == 0 || face >= faces_.size() || !is_color_face(face)) return false;
+  if (!color_factory_tried_) create_color_factory();
+  if (fail_next_color_) {
+    fail_next_color_ = false;
+    color_failed_ = true;
+    return false;
+  }
+  if (color_factory2_ == nullptr) {
+    // No TranslateColorGlyphRun (DirectWrite before Windows 8.1).
+    color_failed_ = true;
+    return false;
+  }
+  IDWriteFontFace* font_face = faces_[face].face;
+  const float em = faces_[face].em;
+  DWRITE_GLYPH_RUN run{};
+  run.fontFace = font_face;
+  run.fontEmSize = em;
+  run.glyphCount = count;
+  run.glyphIndices = glyphs;
+  run.glyphAdvances = advances;
+  run.glyphOffsets = offsets;
+  const D2D1_POINT_2F origin{0, 0};
+  bool ok = true;
+  HRESULT hr = S_OK;
+  if (color_factory4_ != nullptr) {
+    IDWriteColorGlyphRunEnumerator1* runs = nullptr;
+    const bool paint_tree = color_factory8_ != nullptr && paint_level_ != 0 && (color_formats_ & kFormatPaintTree) != 0;
+    if (paint_tree) {
+      hr = color_factory8_->TranslateColorGlyphRun(origin, &run, nullptr,
+                                                   static_cast<DWRITE_GLYPH_IMAGE_FORMATS>(color_formats_),
+                                                   static_cast<DWRITE_PAINT_FEATURE_LEVEL>(paint_level_),
+                                                   DWRITE_MEASURING_MODE_NATURAL, nullptr, 0, &runs);
+    } else {
+      const auto formats = static_cast<DWRITE_GLYPH_IMAGE_FORMATS>(color_formats_ & ~kFormatPaintTree);
+      hr = color_factory4_->TranslateColorGlyphRun(origin, &run, nullptr, formats, DWRITE_MEASURING_MODE_NATURAL,
+                                                   nullptr, 0, &runs);
+    }
+    if (SUCCEEDED(hr)) {
+      BOOL more = FALSE;
+      while (ok && SUCCEEDED(hr = runs->MoveNext(&more)) && more) {
+        const DWRITE_COLOR_GLYPH_RUN1* layer = nullptr;
+        hr = runs->GetCurrentRun(&layer);
+        ok = SUCCEEDED(hr) && layer != nullptr &&
+             append_layer(layer->glyphRun, static_cast<uint32_t>(layer->glyphImageFormat), layer->baselineOriginX,
+                          layer->baselineOriginY,
+                          layer->runColor, layer->paletteIndex, font_face, em, out);
+      }
+      runs->Release();
+    }
+  } else {
+    IDWriteColorGlyphRunEnumerator* runs = nullptr;
+    hr = color_factory2_->TranslateColorGlyphRun(0, 0, &run, nullptr, DWRITE_MEASURING_MODE_NATURAL, nullptr, 0,
+                                                 &runs);
+    if (SUCCEEDED(hr)) {
+      BOOL more = FALSE;
+      while (ok && SUCCEEDED(hr = runs->MoveNext(&more)) && more) {
+        const DWRITE_COLOR_GLYPH_RUN* layer = nullptr;
+        hr = runs->GetCurrentRun(&layer);
+        ok = SUCCEEDED(hr) && layer != nullptr &&
+             append_layer(layer->glyphRun, kFormatColr, layer->baselineOriginX,
+                          layer->baselineOriginY, layer->runColor, layer->paletteIndex, font_face, em, out);
+      }
+      runs->Release();
+    }
+  }
+  if (hr == DWRITE_E_NOCOLOR) {
+    *out = ColorRun();
+    return false;  // no colour for these glyphs: drawn as before
+  }
+  if (FAILED(hr) || !ok || out->layers.empty()) {
+    *out = ColorRun();
+    color_failed_ = true;  // decision D3: one colour from now on
+    return false;
+  }
+  return true;
+}
+
+const TextMeasurer::ColorRun* TextMeasurer::color_glyph(uint16_t face, uint16_t index) {
+  if (color_failed_ || face >= faces_.size() || !is_color_face(face)) return nullptr;
+  const uint32_t key = (static_cast<uint32_t>(face) << 16) | index;
+  auto it = color_glyphs_.find(key);
+  if (it == color_glyphs_.end()) {
+    ColorRun run;
+    const float advance = advance_of(face, index);
+    const DWRITE_GLYPH_OFFSET offset{0, 0};
+    translate_color(face, &index, &advance, &offset, 1, &run);
+    if (color_failed_) return nullptr;
+    // A bound on the cache, as for clusters.
+    if (color_glyphs_.size() >= 4096) color_glyphs_.clear();
+    it = color_glyphs_.emplace(key, std::move(run)).first;
+  }
+  return it->second.layers.empty() ? nullptr : &it->second;
+}
+
+const TextMeasurer::ColorRun* TextMeasurer::color_cluster(const ClusterGlyphs& cluster) {
+  if (color_failed_ || cluster.glyphs.empty() || !is_color_face(cluster.face)) return nullptr;
+  if (cluster.color_state == 0) {
+    const bool color =
+        translate_color(cluster.face, cluster.glyphs.data(), cluster.advances.data(), cluster.offsets.data(),
+                        static_cast<uint32_t>(cluster.glyphs.size()), &cluster.color);
+    if (color_failed_) return nullptr;
+    cluster.color_state = color ? 2 : 1;
+  }
+  return cluster.color_state == 2 ? &cluster.color : nullptr;
 }
 
 }  // namespace geditor::win

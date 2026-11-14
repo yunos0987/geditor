@@ -51,4 +51,12 @@ struct MenuEntry {
 // Reads `menu` and its submenus depth first; `prefix` starts the paths.
 std::vector<MenuEntry> read_menu(HMENU menu, std::wstring_view prefix = {});
 
+// WM_NEXTMENU (M3d decision D6): true when `key` (VK_LEFT / VK_RIGHT) leaves
+// menu bar `bar` at one of its ends, `in` being the bar or one of its
+// drop-downs, and the window has a system menu to pass through
+// (`system_menu`): the menu loop then goes to the system menu, and one more
+// `key` takes it on to the other end of the bar. False for the system menu
+// itself, other keys, other menus and no bar.
+bool menu_bar_wraps(HMENU bar, HMENU in, WPARAM key, bool system_menu);
+
 }  // namespace geditor::win

@@ -276,3 +276,35 @@ TEST(win_menu_question_lists_items_and_takes_enabled_ones) {
   CHECK_EQ(geditor::win::question_button_id(mq, L"View > Wrap"), 0);
   DestroyMenu(bar);
 }
+
+TEST(win_menu_bar_wraps_at_its_ends_through_the_system_menu) {
+  // M3d D6: WM_NEXTMENU from the bar or one of its drop-downs with Left /
+  // Right queues one more key (through the system menu to the other end);
+  // the system menu itself, other keys, other menus, no bar and a window
+  // without a system menu do not.
+  using geditor::win::menu_bar_wraps;
+  Session s;
+  HMENU bar = geditor::win::create_menu_bar(s.ed);
+  CHECK(bar != nullptr);
+  if (bar == nullptr) return;
+  HMENU file = GetSubMenu(bar, 0);
+  HMENU view = GetSubMenu(bar, GetMenuItemCount(bar) - 1);
+  CHECK(file != nullptr && view != nullptr);
+  CHECK(menu_bar_wraps(bar, bar, VK_LEFT, true));
+  CHECK(menu_bar_wraps(bar, bar, VK_RIGHT, true));
+  CHECK(menu_bar_wraps(bar, file, VK_LEFT, true));
+  CHECK(menu_bar_wraps(bar, view, VK_RIGHT, true));
+  CHECK(!menu_bar_wraps(bar, file, VK_UP, true));
+  CHECK(!menu_bar_wraps(bar, file, VK_DOWN, true));
+  CHECK(!menu_bar_wraps(bar, file, VK_LEFT, false));
+  CHECK(!menu_bar_wraps(nullptr, file, VK_LEFT, true));
+  CHECK(!menu_bar_wraps(bar, nullptr, VK_LEFT, true));
+  HMENU other = CreatePopupMenu();
+  CHECK(!menu_bar_wraps(bar, other, VK_LEFT, true));  // e.g. the system menu
+  // A submenu of a drop-down (View > Wrap) is not the bar either.
+  HMENU wrap = nullptr;
+  for (int i = 0; i < GetMenuItemCount(view) && wrap == nullptr; ++i) wrap = GetSubMenu(view, i);
+  if (wrap != nullptr) CHECK(!menu_bar_wraps(bar, wrap, VK_LEFT, true));
+  DestroyMenu(other);
+  DestroyMenu(bar);
+}

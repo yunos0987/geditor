@@ -62,7 +62,7 @@ build/release/geditor.exe [--settings=PATH] [+LINE] [file]
 - 設定ファイルは起動時に同期で読み、初回描画の後に別スレッドで監視する。保存すると約 200ms 後に読み直す。構文の誤りはファイル全体を採用せず、意味の誤りはその項目だけ無視する。誤りは行・桁付きでエコー領域に出し、2 件以上ならエコー領域を最大 10 行まで広げる（ウィンドウが低いときはモードラインと本文 1 行が残る行数まで。収まらない分は最後の行の `... and N more` に数える。次のキーで 1 行に戻る）。`M-x find-user-init-file` で設定ファイルを開く（無ければ書き方の例を入れた未保存の新規バッファになる）
 - M3a までに反映する項目: キー設定（`keys` / `minibuffer_keys` / `isearch_keys` / `query_replace_keys`）と表示の項目（`font` / `colors` / `tab_width` / `line_numbers` / `wrap` / `whitespace` / `eol_marks`）。`colors` の `search_match` / `search_current` は検索（M5）まで、`eol_other` は改行コードの混在（M4）まで使わない。M3b で `menu_bar` も反映する（読み直すとその場でメニューバーを出し入れし、先頭の行は変えない）。ほかの項目は型と値を検査して保持し、後の段階で使う
 - 入っていないフォント名（`font.family` / `font.fallback`）はエコー領域に `Font not found: <name>` と出し、Consolas（とシステムの代替フォント）を使う。出すのは `font.family` / `font.fallback` の値が変わったときだけで、text-scale・DPI の変更・`font.size` だけの変更でフォントを作り直しても繰り返さない。`font.fallback` を書かなければシステムの代替フォントだけを使う
-- F10（`menu-bar-open`）は File メニューを下に開いた状態でメニューに入る。F10 を押している間は待ち、離したときに開く（離す操作でメニューから抜けないため）。左右キーはメニューバーの端で折り返し、システムメニューへは移らない（Alt+Space では開く）
+- F10（`menu-bar-open`）は File メニューを下に開いた状態でメニューに入る。F10 を押している間は待ち、離したときに開く（離す操作でメニューから抜けないため）。左右キーはメニューバーの端で折り返す（M3d）: File で ← を押すと View、View で → を押すと File に、1 回の打鍵で移る。メニューループは端でシステムメニューへ移ろうとする（`WM_NEXTMENU`）ので、geditor は既定の行き先（システムメニュー）のままにして同じキーをもう 1 回だけ送り、システムメニューから反対の端へ進ませる（途中でシステムメニューが一瞬開くことがある）。メニューバーそのものを行き先に答える作り（M3c）では File が選び直されるだけだった。送ったキーにはしるしの `lParam` を付け、メニューループが受け取らずに残ったときは捨てる。Alt+Space のシステムメニューと、そこからの左右キーは既定のまま
 - View のコマンド（`toggle-line-numbers` / `toggle-eol-marks` / `toggle-whitespace-marks` / `set-wrap-mode`）と text-scale（`C-x C-+` / `C-x C--` / `C-x C-0`、1 段 1.2 倍、6〜200 ピクセル）はそのウィンドウだけに効き、設定ファイルには書かない。設定を読み直しても、その項目のファイルの値が変わるまでは切り替えた値を保つ
 - メニュー（M3b、PLAN 4.9）: 中身はコアの `src/core/menu.*` にデータとして持ち、`src/win/menu_bar.*` がそれだけから `HMENU` を組み立てる。メニューバーは初回描画から出す。各項目の右には、今のキーマップでその項目のコマンド（と引数）にちょうど割り当たっているキー列のうち最も短いものを 1 つ出す（同じ長さなら設定ファイル > Windows 互換キー > Emacs の順で先に見つかったもの。例: Undo は `C-M-z`、Save は `C-M-s`。`C-c &` のようにキーに `&` があれば、メニューの文字列では `&&` と書いてアクセスキーにしない）。表示・灰色・チェックとラジオは `WM_INITMENUPOPUP` でそのつどコアに問い合わせる。灰色になるのは未実装のコマンドの項目と、ミニバッファの途中の全項目だけ（Cut / Copy はリージョンが無くても選べ、コマンドが理由を表示する）。File メニューのチェックとラジオは M4-9 まで付かない。F10（`menu-bar-open`）とマウスでメニューに入る。Alt+英字はキーマップのまま（`M-f` は `forward-word`）、Alt 単独ではメニューに入らない。アクセスキー（`&Undo` など）はメニューに入ってからだけ効く。`menu_bar: false` ではメニューバーが消え、F10 は `Menu bar is hidden` と出す
 - 右クリックの簡易メニュー（Undo / Redo / Cut / Copy / Paste / Select All）は Edit メニューの先頭の項目そのもの（同じ定義）から作る。マウスではその位置に、Apps キーと Shift+F10（`S-<f10>` に割り当てが無いとき）ではカーソルの位置に出す。右クリックではカーソルと選択範囲を動かさない。`menu_bar: false` でも出る
@@ -80,7 +80,7 @@ build/release/geditor.exe [--settings=PATH] [+LINE] [file]
 - メニューは画面に出さない（M3b）。F10（`menu-bar-open`）と `WM_CONTEXTMENU` は、メニューを開く代わりに確認と同じ形で待つ（`GSTA` の `question=menu_bar` / `context_menu`、組み立てた `HMENU` から読み戻した全項目の `menu_item=<経路>\t<キー>\t<状態>`、位置の `menu_x` / `menu_y`）。`GANS` で項目の経路（`Edit > Undo`、右クリックでは `Undo`）か `Cancel` を答えると、本物のメニューと同じ `WM_COMMAND` が送られる。無い項目と灰色の項目は断り、メニューは待ったまま。`SC_KEYMENU` / `SC_MOUSEMENU`（Alt+Space のシステムメニューを含む）は握りつぶして、回数と最後の値を `GSTA` の `keymenu_count` / `last_keymenu` に出す。メニューループに入った回数は `menu_loops`
 - マウスは `PostMessage` の `WM_LBUTTONDOWN` / `WM_MOUSEMOVE` / `WM_LBUTTONUP` / `WM_LBUTTONDBLCLK` / `WM_MOUSEWHEEL` / `WM_RBUTTONUP`（クライアント座標と `MK_*`）で受ける。どの升目がどこにあるかは `GSTA` の `line_height` / `cell_width` / `text_left` / `mode_line_top` / `text_rows`（物理ピクセル）から求める（`App.cell_point`）
 - 設定ファイルを書き換える確認（app_check の `apply_settings` / `write_settings`）は、決まった時間だけ待つのではなく、その設定ファイルで起動した geditor の `GSTA` の `settings_reloads`（監視スレッドからの読み直しを反映した回数）が増え、`reloads_drawn`（描き終えた画面に反映済みの読み直しの回数）が追いつくまで待ち、さらに 0.3 秒その回数が変わらないことを確かめる（1 回の保存で 2 回読み直すことがあるため）。`frames` は描き終えた画面の数
-- ツールとのやり取りは `WM_COPYDATA`（`src/win/headless.h` に一覧）。`GSTA`（状態をファイルに書く: ヘッドレスか・設定ファイル・タイトル・エコー領域のメッセージ・変更の有無・文字数・クリップボードの中身・カーソルとマークと先頭の行・本文（64K 文字まで）・升目の位置・メニューバーの有無・断った要求の数と理由・待っている確認やメニューの種類・文言・ボタン名）、`GCBW`（クリップボードに入れる）、`GANS`（ボタン名を指定して答える。無いボタン名は断り、確認は待ったまま）。`GFLT` の `menu` / `popup` で次のメニューの作成と右クリックメニューの表示を 1 回だけ失敗させられる（エコー領域に理由が出る）。分からない要求は 0 を返して数え、`OutputDebugString` にも出す
+- ツールとのやり取りは `WM_COPYDATA`（`src/win/headless.h` に一覧）。`GSTA`（状態をファイルに書く: ヘッドレスか・設定ファイル・タイトル・エコー領域のメッセージ・変更の有無・文字数・クリップボードの中身・カーソルとマークと先頭の行・本文（64K 文字まで）・升目の位置・メニューバーの有無・色付きグリフの描き方（`color_support`）・断った要求の数と理由・待っている確認やメニューの種類・文言・ボタン名）、`GCBW`（クリップボードに入れる）、`GANS`（ボタン名を指定して答える。無いボタン名は断り、確認は待ったまま）。`GFLT` の `menu` / `popup` で次のメニューの作成と右クリックメニューの表示を 1 回だけ失敗させられる（エコー領域に理由が出る）。`GFLT` の `color` は次の色付きグリフの変換を失敗させる（以後は単色）。`GRDW`（本文は枚数 1〜1000）はその枚数の画面をその場で続けて描き、1 枚ずつの時間（最初の 1 枚と、残りの中央値・95 パーセンタイル・最大）を `GSTA` の `redraw_*` に出す。デバッグビルドでは残りの枚数の間に C ランタイムが確保したバイト数も出す（リリースでは -1）。分からない要求は 0 を返して数え、`OutputDebugString` にも出す
 
 実機確認（受入条件 M1 の画面・キー・ダイアログ・ファイル・クリップボード）は `tools/app_check.py` で行う。テスト用ファイルを `build/app_check/<日時>/files/` に作って geditor を起動し、キーを送り、画面を `shots/*.png` に保存し、ファイルのバイト列・クリップボード・タイトルを確かめて、項目ごとに PASS / FAIL / SKIP と証拠を表示する。画像は目でも確かめる:
 
@@ -92,6 +92,8 @@ python tools/app_check.py build/release/geditor.exe --only-m3a
 python tools/app_check.py build/release/geditor.exe --only-m3b
 python tools/app_check.py build/release/geditor.exe --only-m3c
 python tools/app_check.py build/release/geditor.exe --visible --only-m3c   # F10: needs the unlocked desktop
+python tools/app_check.py build/release/geditor.exe --only-m3d
+python tools/app_check.py build/release/geditor.exe --visible --only-m3d   # F10 wrap-around: needs the unlocked desktop
 python tools/app_check.py build/release/geditor.exe --only-headless
 python tools/app_check.py build/release/geditor.exe --visible --only-visible
 python tools/app_check.py build/release/geditor.exe --visible --only-m3b
@@ -100,7 +102,7 @@ python tools/app_check.py build/release/geditor.exe --visible --only-m3b
 - 既定はヘッドレスで、最初の行に `mode headless` と出る。`--visible` を付けると従来どおり画面に出し、`SendInput` と前面（画面がロックされていなければ）・本物のクリップボード・本物の TaskDialog を使う（`mode visible`）
 - ヘッドレスの実行中は、別プロセスの見張りが 20ms ごとに前面のウィンドウと見えている `#32770`（ダイアログ）と `#32768`（メニューとポップアップメニュー）のウィンドウを調べ、geditor（同じ exe）のものが 1 度でもあれば FAIL にする。前面の見張りの間隔が 1 度でも 50ms を超えたときも FAIL にする。同じ見張りは 20ms ごとに、ヘッドレスの geditor のウィンドウ（`geditor.main` のツールウィンドウ）がどのモニターとも重ならず、最小化もされていないことを調べ、外れたら FAIL にする（最小化したツールウィンドウは主モニターにタイトルバーだけ置かれるため、ヘッドレスでは本当には最小化しない。`[S2]` は `WM_SIZE` の `SIZE_MINIMIZED` と元の大きさの `SIZE_RESTORED` を送って確かめる）。新しいウィンドウを探すときは、この実行が起動した geditor とその子プロセスのウィンドウだけを見る（ほかの geditor が開いていても数えない）。本物のクリップボードは開かず、`GetClipboardSequenceNumber` が前後で同じことを確かめる。利用者が実行中にコピーすることがあるので、同じ見張りが番号の変化ごとに `GetClipboardOwner` の持ち主のプロセスと、そのとき開いていた geditor を記録し、持ち主が geditor のとき（または持ち主が分からず、この実行の geditor が開いていたとき）だけ FAIL にする。ほかのプログラムが書いたときは持ち主のプログラム名を INFO に出す（判定の部分は作り物の持ち主で `[R3]` が確かめる）。`app_driver.py` はヘッドレスのとき `SendInput`・`keybd_event`・`SetForegroundWindow`・`BringWindowToTop`・`SetActiveWindow`・`SetFocus`・クリップボードの関数・`MoveWindow`・`SW_HIDE` / `SW_SHOWNOACTIVATE` / `SW_SHOWNA` 以外の `ShowWindow`（最小化も含む）・移動する `SetWindowPos` を呼ぶと例外にする
 - `--only-headless` はヘッドレスそのものの確認（ウィンドウの位置と種類・打鍵後の画像・見張り・ツール側の禁止・クリップボードの置き場と失敗・確認の種類とボタンごとの答え・待っている間のキー・新しいウィンドウ・おかしな要求・起動の失敗・計測スクリプト）だけを行う。全体の実行にも含まれる
-- 画面が要る確認はヘッドレスでは SKIP（`needs --visible`）になり、`--strict` でも失敗に数えない。今は次の 9 つ（`app_check.py` の `needs_visible` の呼び出し）で、前の 5 つは `--visible --only-visible`、後の 4 つのうち上の 3 つは `--visible --only-m3b` で確かめる（前面を取りダイアログやメニューを出すので、利用者が画面を使っていないときに行う。画面がロックされていると SKIP になる）:
+- 画面が要る確認はヘッドレスでは SKIP（`needs --visible`）になり、`--strict` でも失敗に数えない。今は次の 11 個（`app_check.py` の `needs_visible` の呼び出し）で、前の 5 つは `--visible --only-visible`、次の 4 つのうち上の 3 つは `--visible --only-m3b`、最後の 2 つはそれぞれ `--visible --only-m3c` と `--visible --only-m3d` で確かめる（前面を取りダイアログやメニューを出すので、利用者が画面を使っていないときに行う。画面がロックされていると SKIP になる）:
   - `[visible] keys through SendInput to the foreground window`（`SendInput` と前面）
   - `[visible] task dialogs: their look and their buttons`（TaskDialog の見た目と `TDM_CLICK_BUTTON`）
   - `[visible] the real clipboard: C-k / C-y through CF_UNICODETEXT`（本物のクリップボード）
@@ -110,6 +112,8 @@ python tools/app_check.py build/release/geditor.exe --visible --only-m3b
   - `[C6] Alt+Space opens the system menu`（システムメニュー）
   - `[C4] the real right-click popup (look, position at the mouse)`（`TrackPopupMenu` の見た目と位置）
   - `[C5] the mouse cursor is an I-beam over text and an arrow elsewhere`（`WM_SETCURSOR` は本物のマウス位置を読むので、人が画面で確かめる）
+  - `[M3c C5] F10 (SendInput press and release) drops the File menu down ...`（F10 で File が下に開き、左右で移る）
+  - `[M3d C3] F10 (SendInput) drops File down; Left goes to View, ...`（F10 の端での折り返し）
 - 日本語 IME の確認（下記）も画面が要る
 - 最後の行に PASS / FAIL / SKIP の件数（そのうち `--visible` が要るもの）が出る。`--strict` を付けると `needs --visible` 以外の SKIP が 1 件でもあれば終了コード 1。`--only-retry1` は長いパス・最小化と復元・結合文字と不可視文字・ログオフ時の保存確認・クリップボード読込失敗の確認だけを行う
 - 起動する geditor にはすべて `--settings` で `build/app_check/<日時>/` の下のファイルを渡す
@@ -118,6 +122,8 @@ python tools/app_check.py build/release/geditor.exe --visible --only-m3b
 - `--only-m3b` はメニューとマウスの確認（M3b）だけを行う。クリック・ドラッグ（下へはみ出したときの自動スクロールと離したときの停止）・ダブルクリック・Shift+クリック・ホイール（1 刻みに満たない量の累積）・undo の区切り・何もしないクリックを `PostMessage` のマウスのメッセージで確かめ、`shots/m3b_*.png` に撮る。本物のメニューバーを `GetMenu` と `GetMenuItemInfoW` で（`WM_INITMENUPOPUP` を送ってから）読んでコアの表と比べ、`WM_COMMAND` で項目を実行し、F10 と右クリックで待っているメニューに答える。`menu_bar: false` の出し入れ、Alt+F と Alt 単独、メニューと右クリックメニューの作成失敗の表示も確かめる。`--visible --only-m3b` は本物のメニューループ・システムメニュー・右クリックメニューを `PrintWindow` で撮る
 - `--only-m3c` は書記素クラスタと F10 の確認（M3c）だけを行う。U+FE0F 付きの絵文字・ZWJ でつないだ家族・国旗・キーキャップ・か＋゛ が ASCII の隣で 2 升に描かれ、カーソルがその後ろに来ること（画素で調べる）、DEL 1 回で消えて undo 1 回で戻ることを確かめる。形を作るのをわざと失敗させるときは `WM_COPYDATA`（`dwData` = `'GFLT'`、本文 `shape`）を送る。M-x の途中で ESC を 3 回送るとミニバッファが `Quit` で閉じること（ESC 2 回では待つこと）、F10 は保留中の `menu_bar` の質問と、開くサブメニュー（状態の `menu_open=File`）を確かめる
 - `--visible --only-m3c` は本物の F10 を `SendInput` で押して離し、File メニューが下に開いて離した後も残ること、右キーで Edit、左キーで File と View（端で折り返す）へ移ること、Esc で閉じることを状態の `menu_popup` / `menu_loop_active` と `#32768` の窓で確かめる。前面を取るので、利用者がデスクトップを使っていないときに実行する
+- `--only-m3d` はカラー絵文字と F10 の折り返しの確認（M3d）だけを行う。灰色だけの配色（どのチャンネルも 0x20〜0x60。ClearType のにじみもこの範囲に収まる）で、U+2639 U+FE0F・U+263A U+FE0F・肌の色付きの 👍・ZWJ でつないだ家族・😀・✅ を「a＋絵文字＋b 漢x」の行に置き、その間に ASCII と漢字の行を挟んで撮る。範囲の外で色相のある画素を色付きと数え、絵文字の 2 升にあり、同じ行のほかの升目と下の行に無いこと、`a` と `漢` は描かれていて色が無いことを 1 つずつ確かめる。カーソルの縦棒が絵文字の上に描かれること、全体を選んだ画像で絵文字が色を保ち升目に選択の色が出ること、`GFLT` の `color` で単色になりエコー領域に `Colour emoji are not available; drawn in one colour` が 1 回だけ出ることも確かめる。ヘッドレスでは、折り返し用に送ったしるし付きの ← がメニューループの外では捨てられ（カーソルが動かない）、F10 が M3c と同じく `menu_open=File` で待つことを確かめる。最後に、絵文字 30 行×40 個の画面・それを単色にした画面・ASCII の画面を `GRDW` で 60 枚ずつ描き、時間と全体の CPU 負荷を INFO に出す（デバッグビルドの exe を渡すと、色付きの画面が単色の画面より多く確保しないことも確かめる）
+- `--visible --only-m3d` は本物の F10 を `SendInput` で押し、File、← で View、→ で File と 1 回の打鍵ずつで移ること（`menu_popups` の並びからシステムメニューを除くと `File,View,File`）、Esc でドロップダウンが閉じ、もう 1 回の Esc でメニューから抜けることを確かめ、各段階を `shots/m3d_v*.png` に撮る。前面を取るので、利用者がデスクトップを使っていないときに実行する
 - `tools/` のスクリプトは `__pycache__` を作業ツリーに残さない（`sys.dont_write_bytecode` と、`app_driver.py` が読み込み時に自分の `.pyc` を消す処理による）
 - ヘッドレスではいつも `PostMessage` で `WM_KEYDOWN` / `WM_CHAR` を送り、修飾キーの状態は `AttachThreadInput` と `SetKeyboardState` で与える。`--visible` では、画面がロックされていなければ `SendInput` で打鍵する（geditor を前面に出してから送り、前面でなければ送らずに止まる）。ロック中か `--input post` なら `PostMessage` で送る（`--input post` では geditor を `SW_SHOWNOACTIVATE` で起動し、前面を取らない）。どちらで動いたかは `input mode` の行に出る
 - `--visible` で画面がロックされていると `OpenClipboard` がアクセス拒否になるため、クリップボードを使う確認は SKIP になる（geditor 側の書き込み失敗の表示は確かめる）。`--visible` では実行の前後でクリップボードの文字列を保存・復元する（ヘッドレスでは触れない）
@@ -133,7 +139,7 @@ python tools/app_check.py build/release/geditor.exe --visible --only-m3b
 - `src/win/`: Win32 層。`window.*`（ウィンドウ・メッセージ・`Host` の実装）、`input.*`（キー変換）、`renderer.*` と `text_measurer.*`（Direct2D / DirectWrite の升目描画と代替フォント）、`ime.*`、`clipboard.*`、`file_io.*`、`dialogs.*`（TaskDialog）、`process.*`（新しいウィンドウ）、`command_line.*`、`measure.*`（起動・打鍵の計測）、`config_watcher.*`（設定ファイルの監視スレッド）、`menu_bar.*`（コアのメニューから `HMENU` を組み立て、`WM_INITMENUPOPUP` で更新し、読み戻す）、`question.h`（確認の文言とボタン。TaskDialog とヘッドレスが共用。ヘッドレスのメニューもここで確認の形にする）、`headless.h`（ヘッドレスの `WM_COPYDATA` と状態の書式）。キー変換・起動引数・クリップボードの改行変換・ファイル種別の判定・`HMENU` の組み立てなどウィンドウなしで試せる部分は静的ライブラリ `geditor_win_logic` にまとめ、テストからも使う。`text_measurer.*` は静的ライブラリ `geditor_text`（`dwrite` をリンク）にして、どのフォントで文字を描くかをテストからも確かめる
 - 高 DPI は Per-Monitor V2（`geditor.manifest` と `SetProcessDpiAwarenessContext`）。`WM_DPICHANGED` でフォントと升目を作り直し、勧められた大きさに変え、先頭の行を保つ。ウィンドウの右端に Win32 の縦スクロールバーを初回描画の後から常に出す（初回の描画を起動時間に含めないため。位置は論理行で近似）
 - `comctl32`（TaskDialog）と `shell32`（ドラッグ＆ドロップ）は遅延読み込みにして起動時間に含めない。TaskDialog のために `src/win/geditor.manifest` で Common Controls v6 を指定する
-- `tests/`: `geditor_tests`（ctest に登録）と `tests/perf/` の `geditor_perf`（登録しない）。`test_win_font.cpp` は本物の DirectWrite で、英字が Consolas、日本語と絵文字が代替フォントで描かれることを確かめ、選ばれたフォント名を表示する
+- `tests/`: `geditor_tests`（ctest に登録）と `tests/perf/` の `geditor_perf`（登録しない）。`test_win_font.cpp` は本物の DirectWrite で、英字が Consolas、日本語と絵文字が代替フォントで描かれることを確かめ、選ばれたフォント名を表示する。😀 と U+2639 U+FE0F には色の層があり、`A` と `漢` には無いこと、変換の失敗で単色になることも確かめる
 - `.clangd` は `build/release/compile_commands.json` を読む（`cmake --preset release` で作られる）
 
 ## 文字幅表と書記素クラスタ表の生成
@@ -167,7 +173,16 @@ python -I tools/gen_char_width.py <folder>
 - クラスタの幅: 絵文字として表示するもの（Emoji の性質を持つ文字の後に U+FE0F（`g` ＋ U+FE0F は文字のまま）、肌の色、絵文字どうしを ZWJ でつないだもの、国旗の 2 文字、先頭が Emoji_Presentation の文字。地域指示子 1 文字は除く）は 2 桁。それ以外は先頭の文字の幅（幅 0 の文字だけのクラスタは 0）
 - 外から来た位置（`set_point`・マウス・`+LINE`）と、編集でクラスタがつながったときの point / mark は、その位置以前のクラスタの境目に寄せる
 - 長い行は 64K 単位ごとの記録（区切りの状態も持つ）から数え直すので、区切りの計算は描く行と動く位置の近くだけで行う
-- 複数の文字からなるクラスタは、`MapCharacters` が選んだ 1 つのフォントで 1 つの文字列として形を作り（絵文字として表示するクラスタや、選ばれたフォントにない文字があるときは、主フォントを指定しない `MapCharacters` の結果を使う）、升目より広ければ横に縮める。絵文字は単色のまま。どのフォントにも無いときや形を作れないときは、先頭の文字のグリフ（無ければ欠字の箱）を描く
+- 複数の文字からなるクラスタと、1 文字でも絵文字として表示するクラスタ（😀 など）は、`MapCharacters` が選んだ 1 つのフォントで 1 つの文字列として形を作り（絵文字として表示するクラスタや、選ばれたフォントにない文字があるときは、主フォントを指定しない `MapCharacters` の結果を使う）、升目より広ければ横に縮める。どのフォントにも無いときや形を作れないときは、先頭の文字のグリフ（無ければ欠字の箱）を描く
+
+## カラー絵文字（M3d）
+
+- グリフは、そのフォントが色付きの表現を持つときだけ色で描く（`IDWriteFontFace2::IsColorFont` のフォントで、`TranslateColorGlyphRun` が色の層を返すもの）。それ以外は今までどおり設定の `foreground` などの 1 色。色の設定項目は作らない（いつも有効）
+- 描き方は描画先（render target）に問い合わせて決める: COLR の層は `DrawGlyphRun` を層の色で重ねる（どの描画先でも描ける）。`ID2D1DeviceContext7` があれば COLR のペイントツリー（`DrawPaintGlyphRun`。Segoe UI Emoji の今の絵文字はこれで、`DrawText` の `D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT` と同じ画素になることを実測した）、`ID2D1DeviceContext4` があれば SVG と画像のグリフも描く。開発 PC のソフトウェア描画先（ウィンドウと `GCAP` の DC の両方）は 3 つとも持つ（`GSTA` の `color_support=colr,svg,bitmap,paint`）
+- 層は升目に収める規則・選択範囲の背景・カーソルの縦棒の重ね方が他の文字と同じ（背景の後に描き、縦棒はその後）。空白記号と改行記号は変わらない
+- インターフェースは最初の色付きグリフで作る（色付きフォントかどうかの問い合わせはフォントごとに 1 回）。層はグリフ（とクラスタ）ごとに 1 回だけ変換して覚えておき、毎フレームは確保しない
+- 変換に失敗したとき（`TranslateColorGlyphRun` が無い古い Windows を含む）は、そのフォントを作り直すまで単色で描き、エコー領域に `Colour emoji are not available; drawn in one colour` と 1 回だけ出す
+- `IDWriteFactory4` / `IDWriteFactory8` / `ID2D1DeviceContext4` / `ID2D1DeviceContext7` はプロジェクトの `_WIN32_WINNT`（Windows 10）より新しい `NTDDI_VERSION` でしか宣言されないので、`text_measurer.cpp` と `renderer.cpp` だけがファイルの先頭で `NTDDI_VERSION` を上げる（ヘッダーには前方宣言だけを置く）。実行時は `QueryInterface` で確かめるので、無い Windows でも起動する
 
 ## コードの約束
 

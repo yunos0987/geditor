@@ -5,6 +5,8 @@
 // whitespace / end-of-line marks come from the core (Editor::display_row,
 // grapheme.h); this file only draws them, one cluster in its cells. Rows wider than the
 // window (wrap "none", or "fixed" wider than the window) scroll horizontally.
+// Glyphs with a colour representation in their font (emoji) are drawn in
+// their colours (M3d decision D1), squeezed into their cells like the others.
 #pragma once
 
 #include <cstddef>
@@ -19,6 +21,11 @@
 
 #include "editor.h"
 #include "text_measurer.h"
+
+// Newer than the project's _WIN32_WINNT (d2d1_3.h for later NTDDI
+// versions), asked for at run time; renderer.cpp raises NTDDI_VERSION.
+struct ID2D1DeviceContext4;
+struct ID2D1DeviceContext7;
 
 namespace geditor::win {
 
@@ -66,6 +73,15 @@ class Renderer {
   void fail_next_font() { fail_next_font_ = true; }
   // The next shaping of a cluster fails (TextMeasurer::fail_next_shaping).
   void fail_next_shaping() { measurer_.fail_next_shaping(); }
+  // The next colour glyph cannot be translated (TextMeasurer::fail_next_color):
+  // from then on glyphs are drawn in one colour (decision D3).
+  void fail_next_color() { measurer_.fail_next_color(); }
+  // True once, after the first frame in which colour glyphs failed (decision
+  // D3: the window says so once in the echo area).
+  bool take_color_failure();
+  // What the render target of the last colour glyph offered (state for the
+  // tools): "none" before any colour glyph, else e.g. "colr,svg,bitmap,paint".
+  std::wstring color_support() const;
 
   // Full text rows that fit in a client area `height_dip` high with an echo
   // area of `echo_rows` lines.
@@ -131,12 +147,35 @@ class Renderer {
   // Appends a cell; a cluster of several code points keeps its text.
   void add_cell(char32_t c, int column, int width, size_t offset, int code_points, bool emoji,
                 std::wstring_view text);
+  // Appends the cell of a buffer cluster; a cluster of several code points
+  // or an emoji keeps its text (copied from the buffer, no allocation once
+  // cluster_text_ has grown).
+  void add_buffer_cell(const PieceTree& text, const DisplayCell& c);
   void draw_cells(float x0, float top, D2D1_COLOR_F color);
-  // Draws a cluster of several code points into its cells at x (squeezed
-  // when wider), or over the base at `base_x` when it has no cells.
-  void draw_cluster(const Cell& cell, float x, float baseline);
+  // Draws a cluster of several code points (or an emoji) into its cells at x
+  // (squeezed when wider), or over the base at `base_x` when it has no cells.
+  void draw_cluster(const Cell& cell, float x, float baseline, D2D1_COLOR_F color);
   void flush_run(uint16_t face, float x, float baseline);
   void fill(float left, float top, float right, float bottom, D2D1_COLOR_F color);
+
+  // ---- Colour glyphs (M3d decisions D1-D4) ----
+  // The interfaces of a render target that draw colour glyphs, asked for
+  // on its first colour glyph.
+  struct ColorTarget {
+    ID2D1DeviceContext4* dc4 = nullptr;  // SVG and bitmap glyphs
+    ID2D1DeviceContext7* dc7 = nullptr;  // the COLR paint tree
+    bool queried = false;
+  };
+  void release_color_target(ColorTarget& target);
+  // On the first colour glyph of a frame: the interfaces of the target and
+  // the formats that the measurer may translate into.
+  void prepare_color();
+  // The colour layers of a glyph / cluster, nullptr when it has none.
+  const TextMeasurer::ColorRun* color_glyph(uint16_t face, uint16_t index);
+  const TextMeasurer::ColorRun* color_cluster(const TextMeasurer::ClusterGlyphs& g);
+  // Draws the layers of `run` (glyphs of face `face`) at `origin`; layers
+  // without a colour of their own get `color`.
+  void draw_color_run(const TextMeasurer::ColorRun& run, uint16_t face, D2D1_POINT_2F origin, D2D1_COLOR_F color);
 
   ID2D1Factory* d2d_factory_ = nullptr;
   IDWriteFactory* dwrite_factory_ = nullptr;
@@ -155,6 +194,12 @@ class Renderer {
   std::wstring cluster_text_;  // texts of the multi-code-point clusters of cells_
   std::vector<UINT16> run_glyphs_;
   std::vector<FLOAT> run_advances_;
+  ColorTarget hwnd_color_;           // of hwnd_target_ (released with it)
+  ColorTarget* color_ = nullptr;     // of the frame being drawn (not owned)
+  bool color_ready_ = false;         // prepare_color ran in this frame
+  uint32_t color_formats_shown_ = 0; // formats of the last prepare_color (state)
+  bool color_failure_reported_ = false;
+  bool color_failure_pending_ = false;
 };
 
 }  // namespace geditor::win

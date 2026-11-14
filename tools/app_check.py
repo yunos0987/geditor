@@ -205,21 +205,25 @@ def layout(shot):
 
 
 def cursor_box(shot, region: str = "text"):
-    """Bounding box of cursor-coloured pixels in the text area or echo line."""
+    """Bounding box of cursor-coloured pixels in the text area or echo line.
+    Only the columns that hold at least half as many of them as the fullest
+    column count: the cursor is a bar, and colour emoji (M3d) have small
+    white parts (eyes, teeth) that would otherwise count."""
     w, h, px = shot
     text_bottom, _, mode_bottom = layout(shot)
     y0, y1 = (0, text_bottom) if region == "text" else (mode_bottom, h)
-    xs, ys = [], []
+    columns = {}
     for y in range(y0, y1):
         row = px[y * w * 4:(y + 1) * w * 4]
         for x in range(w):
             i = x * 4
             if row[i] == 0xFF and row[i + 1] == 0xFF and row[i + 2] == 0xFF:
-                xs.append(x)
-                ys.append(y)
-    if not xs:
+                columns.setdefault(x, []).append(y)
+    if not columns:
         return None
-    return min(xs), min(ys), max(xs), max(ys)
+    fullest = max(len(ys) for ys in columns.values())
+    bar = {x: ys for x, ys in columns.items() if 2 * len(ys) >= fullest}
+    return min(bar), min(min(ys) for ys in bar.values()), max(bar), max(max(ys) for ys in bar.values())
 
 
 def count(shot, rgb: int, region: str = "text") -> int:
@@ -974,6 +978,11 @@ def is_yellow(r, g, b):
 
 def is_cyan(r, g, b):
     return g > 60 and b > 60 and r < 30
+
+
+def is_lit(r, g, b):
+    """Not the black background (any colour of a glyph)."""
+    return max(r, g, b) > 60
 
 
 def count_where(shot, pred, box=None) -> int:
@@ -2660,10 +2669,12 @@ def run_m3c_checks(exe: pathlib.Path, out: pathlib.Path):
             shot = app.capture(shots / shot_name)
             lh, cw, left = float(state["line_height"]), float(state["cell_width"]), float(state["text_left"])
             a = count_where(shot, is_red, cell_box(state, row, 0, 1))
-            first_cell = count_where(shot, is_red, cell_box(state, row, 1, 1))
-            second_cell = count_where(shot, is_red, cell_box(state, row, 2, 1))
+            # M3d: emoji are drawn in their own colours, so the cluster cells
+            # count every lit pixel (black background), not only red ones.
+            first_cell = count_where(shot, is_lit, cell_box(state, row, 1, 1))
+            second_cell = count_where(shot, is_lit, cell_box(state, row, 2, 1))
             b = count_where(shot, is_red, cell_box(state, row, 3, 1))
-            after = count_where(shot, is_red, cell_box(state, row, 4, 6))
+            after = count_where(shot, is_lit, cell_box(state, row, 4, 6))
             box = cursor_box(shot)
             cursor_x = box[0] if box else -1
             expected_x = left + 3 * cw
@@ -2672,7 +2683,8 @@ def run_m3c_checks(exe: pathlib.Path, out: pathlib.Path):
             point_ok = state["point"] == str(line_start + 1 + len(text.encode("utf-16-le")) // 2)
             check(f"[M3c C4] {name} is drawn in {cells} cells next to ASCII, the cursor after it",
                   a > 0 and first_cell > 0 and second_cell > 0 and b > 0 and after == 0 and cursor_ok and point_ok,
-                  f"red pixels: 'a' {a}, cluster cells {first_cell} / {second_cell}, 'b' {b}, after 'b' {after}; "
+                  f"red pixels: 'a' {a}, 'b' {b}; lit pixels: cluster cells {first_cell} / {second_cell}, "
+                  f"after 'b' {after}; "
                   f"cursor x={cursor_x} (cell 3 at {expected_x:.1f}), point={state['point']} ({shot_name})")
             keys("DEL")
             time.sleep(0.2)
@@ -2845,6 +2857,319 @@ def run_m3c_visible_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
 
+# ---- M3d: colour emoji and the F10 wrap-around ----
+
+# A grey scheme: every colour that is not an emoji's lies in the grey box
+# [0x20, 0x60] of each channel (ClearType mixes foreground and background
+# channel by channel, so its fringes stay inside it too). A pixel outside the
+# box with a clear hue is a colour of a glyph (an emoji).
+M3D_GREY = {
+    "background": "#202020", "foreground": "#505050", "cursor": "#606060",
+    "selection": "#383838", "line_number": "#505050", "line_number_current": "#606060",
+    "whitespace": "#404040", "eol": "#404040",
+    "mode_line_background": "#303030", "mode_line_foreground": "#606060",
+}
+M3D_SELECTION = 0x383838
+M3D_BACKGROUND = 0x202020
+
+# (name, text, screenshot) of the [C2] samples; each is drawn in 2 cells.
+M3D_EMOJI = [
+    ("U+2639 U+FE0F", "☹️"),
+    ("U+263A U+FE0F", "☺️"),
+    ("thumbs up + U+1F3FD", "\U0001f44d\U0001f3fd"),
+    ("ZWJ family", "\U0001f468‍\U0001f469‍\U0001f467"),
+    ("U+1F600", "\U0001f600"),
+    ("U+2705", "✅"),
+]
+M3D_VISIBLE_F10 = ("[M3d C3] F10 (SendInput) drops File down; Left goes to View, Right from View goes to File "
+                   "(wrap-around with one key each); Esc closes the drop-down and a second Esc the menu bar")
+
+
+def is_emoji_colour(r, g, b):
+    """A colour outside the grey box of M3D_GREY with a hue (not grey)."""
+    outside = min(r, g, b) < 0x18 or max(r, g, b) > 0x68
+    return outside and max(r, g, b) - min(r, g, b) > 40
+
+
+def is_drawn(r, g, b):
+    """Not the background of M3D_GREY (any glyph pixel)."""
+    return max(abs(r - 0x20), abs(g - 0x20), abs(b - 0x20)) > 8
+
+
+def m3d_document(work: pathlib.Path) -> tuple[pathlib.Path, list[str]]:
+    """Each sample on its own row "a<emoji>b 漢x", with an ASCII / CJK row
+    between them: cells 0 'a', 1-2 the emoji, 3 'b', 5-6 '漢', 7 'x'."""
+    lines = []
+    for _, text in M3D_EMOJI:
+        lines.append("a" + text + "b 漢x")
+        lines.append("plain ASCII 漢字")
+    doc = work / "m3d.txt"
+    doc.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    return doc, lines
+
+
+def m3d_colour_rows(shot, state: dict, region: bool) -> list[tuple[bool, str]]:
+    """[C2] on one screenshot, (verdict, evidence) per sample row: coloured
+    pixels in both emoji cells and nowhere else on the row or on the ASCII /
+    CJK row below; the ASCII and CJK glyphs are drawn (not background) in one
+    colour. With `region`, the selection colour shows inside the emoji cells
+    too."""
+    rows = []
+    w = shot[0]
+    for i, (name, _) in enumerate(M3D_EMOJI):
+        row = 2 * i
+        first = count_where(shot, is_emoji_colour, cell_box(state, row, 1, 1))
+        second = count_where(shot, is_emoji_colour, cell_box(state, row, 2, 1))
+        # Left of the emoji cells (cell 0 and the margin), right of them (cell
+        # 3 to the window edge), and the whole ASCII / CJK row below.
+        before_cells = cell_box(state, row, 0, 1)
+        after_cells = cell_box(state, row, 3, 1)
+        outside = (count_where(shot, is_emoji_colour, (0, before_cells[1], before_cells[2], before_cells[3])) +
+                   count_where(shot, is_emoji_colour, (after_cells[0], after_cells[1], w, after_cells[3])))
+        below = cell_box(state, row + 1, 0, 1)
+        between = count_where(shot, is_emoji_colour, (0, below[1], w, below[3]))
+        a_drawn = count_where(shot, is_drawn, cell_box(state, row, 0, 1))
+        kanji_drawn = count_where(shot, is_drawn, cell_box(state, row, 5, 2))
+        selected = count(shot, M3D_SELECTION, "text") if region else 0
+        in_cells = 0
+        if region:
+            box = cell_box(state, row, 1, 2)
+            in_cells = d.count_color(shot[0], shot[1], shot[2], M3D_SELECTION, box)
+        row_ok = (first > 0 and second > 0 and outside == 0 and between == 0 and a_drawn > 0 and
+                  kanji_drawn > 0 and (not region or in_cells > 0))
+        rows.append((row_ok, f"{name}: coloured px in its cells {first}/{second}, elsewhere on its row {outside}, "
+                             f"on the ASCII/CJK row below {between}; drawn px 'a' {a_drawn}, '漢' {kanji_drawn}" +
+                             (f"; selection px in its cells {in_cells} (whole text area {selected})"
+                              if region else "")))
+    return rows
+
+
+def run_m3d_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C2], [C3] (headless part), [C4] (redraw benchmark) and [C5] of the
+    M3d packet on the real app, headless."""
+    work = out / "files_m3d"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    base = {"colors": M3D_GREY, "line_numbers": False, "eol_marks": {"show": False}}
+    settings.write_bytes(settings_json(base))
+    doc, lines = m3d_document(work)
+    names = []
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings, height=600)
+    try:
+        record("INFO", "M3d input mode", app.use_input())
+        time.sleep(0.5)
+        app.keys("C-f")  # the cursor before the first emoji: its bar is drawn over it (D2)
+        time.sleep(0.2)
+        state = app.state()
+        shot = app.capture(shots / "m3d_01_colour_emoji.png")
+        names.append("m3d_01_colour_emoji.png")
+        bar = d.count_color(shot[0], shot[1], shot[2], int(M3D_GREY["cursor"][1:], 16), cell_box(state, 0, 1, 1))
+        check("[M3d C2] the bar cursor is drawn over an emoji (cursor colour in its first cell)",
+              bar > 0 and state["point"] == "1", f"cursor px in the cell of U+2639 U+FE0F {bar}, point={state['point']} "
+              "(m3d_01_colour_emoji.png)")
+        record("INFO", "[M3d] colour formats of the render target (software)",
+               f"color_support={state.get('color_support')!r} (colr: COLR layers through DrawGlyphRun; svg / bitmap: "
+               "ID2D1DeviceContext4; paint: the COLR paint tree through ID2D1DeviceContext7)")
+        for (name, _), (row_ok, ev) in zip(M3D_EMOJI, m3d_colour_rows(shot, state, region=False)):
+            check(f"[M3d C2] {name} is drawn in colour inside its 2 cells; ASCII and CJK next to it in one colour",
+                  row_ok, ev + " (m3d_01_colour_emoji.png)")
+
+        # The same emoji in an active region: selection under them, colours kept.
+        app.keys("M-< C-SPC M->")
+        time.sleep(0.3)
+        region_state = app.state()
+        shot = app.capture(shots / "m3d_02_colour_emoji_region.png")
+        names.append("m3d_02_colour_emoji_region.png")
+        rows = m3d_colour_rows(shot, region_state, region=True)
+        check("[M3d C2] in an active region the emoji keep their colours over the selection background",
+              all(ok for ok, _ in rows) and region_state["mark_active"] == "1",
+              f"mark_active={region_state['mark_active']}; " + "; ".join(ev for _, ev in rows) +
+              " (m3d_02_colour_emoji_region.png)")
+        app.keys("C-g M-<")
+        time.sleep(0.2)
+        app.keys("C-f C-b")  # clears "Mark set" of M-<
+        time.sleep(0.2)
+
+        # [C5] (D3): colour fails; one colour from then on, said once.
+        app.fault("color")
+        failed = d.wait_for(lambda: M3D_COLOUR_MESSAGE in app.state()["message"] or None, 3.0)
+        state = app.state()
+        shot = app.capture(shots / "m3d_03_colour_failed.png")
+        names.append("m3d_03_colour_failed.png")
+        coloured = sum(count_where(shot, is_emoji_colour, cell_box(state, 2 * i, 1, 2))
+                       for i in range(len(M3D_EMOJI)))
+        drawn = [count_where(shot, is_drawn, cell_box(state, 2 * i, 1, 2)) for i in range(len(M3D_EMOJI))]
+        echo_top = int(float(state["mode_line_top"]) + float(state["line_height"])) + 1
+        echo = count_where(shot, is_drawn, (0, echo_top, shot[0], shot[1]))
+        app.keys("C-f")
+        time.sleep(0.2)
+        cleared = app.state()["message"]
+        app.fault("color")
+        app.keys("C-b")
+        time.sleep(0.4)
+        again = app.state()
+        check("[M3d C5] a failed colour glyph is drawn in one colour and the echo area says so once",
+              failed is not None and coloured == 0 and all(n > 0 for n in drawn) and echo > 0 and
+              M3D_COLOUR_MESSAGE not in cleared and M3D_COLOUR_MESSAGE not in again["message"] and app.alive(),
+              f"message={state['message']!r}; coloured px in the emoji cells {coloured}, drawn px per emoji {drawn}, "
+              f"echo px {echo}; after C-f message={cleared!r}; after a second 'GFLT' color and C-b "
+              f"message={again['message']!r}, color_support={again.get('color_support')!r} "
+              "(m3d_03_colour_failed.png: the emoji in grey)")
+
+        # [C3] headless: the second key of a wrap-around that no menu loop
+        # took is dropped (it would move the cursor otherwise); a real Left
+        # still moves it.
+        app.keys("M-< C-e")
+        time.sleep(0.2)
+        before = app.state()["point"]
+        d.user32.PostMessageW(app.hwnd, d.WM_KEYDOWN, 0x25, 0x20000002)  # VK_LEFT, the wrap marker
+        time.sleep(0.3)
+        after_marker = app.state()["point"]
+        app.keys("<left>")
+        time.sleep(0.2)
+        after_left = app.state()["point"]
+        check("[M3d C3] headless: a queued wrap-around key outside a menu loop is dropped; Left still moves",
+              before == after_marker and int(after_left) < int(before),
+              f"point at the end of line 1 {before}; after the posted wrap key {after_marker}; after Left "
+              f"{after_left}")
+        app.keys("<f10>")
+        question = app.wait_question(3.0)
+        pending = app.state()
+        check("[M3d C3] headless F10 still records the pending menu_bar menu with File open (as M3c)",
+              question is not None and pending["question"] == "menu_bar" and pending.get("menu_open") == "File" and
+              pending["menu_loops"] == "0",
+              f"question={pending.get('question')} menu_open={pending.get('menu_open')!r} "
+              f"menu_loops={pending['menu_loops']}")
+        app.answer("Cancel")
+    finally:
+        app.kill()
+    record("INFO", "[M3d] screenshots", ", ".join(names))
+    run_m3d_benchmark(exe, out)
+    needs_visible(M3D_VISIBLE_F10, "the real menu loop needs the screen and SendInput")
+
+
+M3D_COLOUR_MESSAGE = "Colour emoji are not available; drawn in one colour"
+
+
+def run_m3d_benchmark(exe: pathlib.Path, out: pathlib.Path):
+    """[C4] (D4): frame times of a screen full of emoji (30 rows x 40) and of
+    the same screen in ASCII, drawn at once through 'GRDW', with the total
+    CPU load meanwhile. In a debug build the bytes that the C runtime
+    allocated per frame are compared too."""
+    work = out / "files_m3d_bench"
+    work.mkdir(parents=True, exist_ok=True)
+    settings = work / "settings.json"
+    settings.write_bytes(settings_json({"line_numbers": False, "wrap": "none"}))
+    cycle = ["\U0001f600", "✅", "\U0001f44d\U0001f3fd", "☺️", "\U0001f468‍\U0001f469‍\U0001f467",
+             "\U0001f389", "\U0001f680", "❤️"]
+    emoji_doc = work / "emoji.txt"
+    emoji_doc.write_bytes("".join("".join(cycle[(r + c) % len(cycle)] for c in range(40)) + "\n"
+                                  for r in range(30)).encode("utf-8"))
+    ascii_doc = work / "ascii.txt"
+    ascii_doc.write_bytes("".join("".join("ab"[(r + c) % 2] * 2 for c in range(40)) + "\n"
+                                  for r in range(30)).encode("utf-8"))
+    results = {}
+
+    def measure(app, state) -> dict:
+        app.redraw(5)  # warm-up: glyphs and colour layers looked up
+        before = d.system_times()
+        values = app.redraw(60)
+        after = d.system_times()
+        values["cpu"] = f"{d.cpu_load(before, after):.0f}"
+        values["rows"] = state["text_rows"]
+        return values
+
+    for name, doc in (("emoji", emoji_doc), ("ascii", ascii_doc)):
+        app = d.App(exe, [str(doc)], cwd=work, settings=settings, width=900, height=700)
+        try:
+            time.sleep(0.5)
+            state = app.state()
+            results[name] = measure(app, state)
+            if name == "emoji":
+                # The same screen in one colour (decision D3): the difference
+                # is what the colour path costs, in time and in allocations.
+                app.fault("color")
+                time.sleep(0.3)
+                results["emoji in one colour"] = measure(app, state)
+                results["emoji in one colour"]["support"] = app.state().get("color_support", "")
+        finally:
+            app.kill()
+    for name, v in results.items():
+        record("INFO", f"[M3d C4] redraw of a screen of {name} ({v['rows']} rows x 40 clusters)",
+               f"60 frames: median {v['redraw_median_ms']} ms, p95 {v['redraw_p95_ms']} ms, max "
+               f"{v['redraw_max_ms']} ms (first of the run {v['redraw_first_ms']} ms), error {v['redraw_error']}, "
+               f"C runtime bytes allocated in 59 frames {v['redraw_alloc_bytes']} (-1: release build), total CPU "
+               f"load {v['cpu']} %")
+    colour, mono, plain = results["emoji"], results["emoji in one colour"], results["ascii"]
+    # Debug builds only: the colour path allocates nothing per frame of its
+    # own (the same screen in one colour allocates as much; the rest is the
+    # core's rows).
+    alloc_ok = colour["redraw_alloc_bytes"] == "-1" or int(colour["redraw_alloc_bytes"]) <= int(
+        mono["redraw_alloc_bytes"])
+    check("[M3d C4] the emoji screen redraws without errors; the colour path allocates nothing per frame",
+          all(v["redraw_error"] == "none" for v in results.values()) and alloc_ok and "failed" in mono["support"],
+          f"errors {[v['redraw_error'] for v in results.values()]}; C runtime bytes in 59 frames: emoji in colour "
+          f"{colour['redraw_alloc_bytes']}, the same in one colour {mono['redraw_alloc_bytes']}, ASCII "
+          f"{plain['redraw_alloc_bytes']} (-1: release build, not measured); one colour: "
+          f"color_support={mono['support']!r}")
+
+
+def run_m3d_visible_checks(exe: pathlib.Path, out: pathlib.Path):
+    """--visible: F10, Left, Right and Esc through SendInput on an unlocked
+    desktop (decision D6)."""
+    work = out / "files_m3d_visible"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = no_settings(out)
+    doc = work / "v.txt"
+    doc.write_bytes(b"hello world\nsecond line\n")
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings)
+    try:
+        if app.use_input() != "sendinput":
+            record("SKIP", M3D_VISIBLE_F10, "geditor cannot take the foreground (locked desktop or --input post)")
+            return
+
+        def popup(expected: str, shot: str) -> tuple[bool, str]:
+            ok = d.wait_for(lambda: app.state().get("menu_popup") == expected, 3.0) is not None
+            time.sleep(0.4)  # the key release and the menu animation
+            menus = d.windows_of(app.proc.pid, "#32768")
+            state = app.state()
+            if menus:
+                d.capture(menus[0], shots / shot)
+            return (ok and bool(menus) and state.get("menu_popup") == expected and
+                    state.get("menu_loop_active") == "1"), \
+                f"{expected}: popup={state.get('menu_popup')!r} popups={state.get('menu_popups')!r} " \
+                f"#32768={menus} ({shot})"
+
+        app.keys("<f10>")  # SendInput: F10 down and up
+        file_ok, file_ev = popup("File", "m3d_v1_f10_file.png")
+        app.keys("<left>")  # one key: through the system menu to View
+        view_ok, view_ev = popup("View", "m3d_v2_left_view.png")
+        app.keys("<right>")  # one key: through the system menu to File
+        back_ok, back_ev = popup("File", "m3d_v3_right_file.png")
+        popups = app.state().get("menu_popups", "")
+        app.keys("ESC")
+        time.sleep(0.4)
+        after_esc = app.state()
+        closed = not d.windows_of(app.proc.pid, "#32768")
+        d.capture(app.hwnd, shots / "m3d_v4_esc.png")
+        app.keys("ESC")
+        time.sleep(0.4)
+        after_esc2 = app.state()
+        # One key press each: View right after File (the system menu may open
+        # in between), File right after View.
+        order = [p for p in popups.split(",") if p and p != "System"]
+        order_ok = order[:3] == ["File", "View", "File"]
+        check(M3D_VISIBLE_F10,
+              file_ok and view_ok and back_ok and order_ok and closed and after_esc2.get("menu_loop_active") == "0",
+              f"{file_ev}; {view_ev}; {back_ev}; drop-downs in order without System {order}; after Esc: #32768 "
+              f"closed={closed} popup={after_esc.get('menu_popup')!r} (m3d_v4_esc.png); after a second Esc: menu "
+              f"loop active={after_esc2.get('menu_loop_active')}")
+    finally:
+        app.kill()
+
+
 # ---- --only-visible: the checks that need the real screen ----
 
 def run_visible_checks(exe: pathlib.Path, out: pathlib.Path):
@@ -2951,6 +3276,8 @@ def main() -> int:
                         help="run only the M3b menu, context menu and mouse checks")
     parser.add_argument("--only-m3c", action="store_true",
                         help="run only the M3c grapheme cluster and F10 checks")
+    parser.add_argument("--only-m3d", action="store_true",
+                        help="run only the M3d colour emoji, redraw benchmark and F10 wrap-around checks")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -2973,7 +3300,7 @@ def main() -> int:
     saved = None if d.HEADLESS else clipboard_text()
     sequence0 = d.user32.GetClipboardSequenceNumber()
     only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_m3c or
-            args.only_headless or args.only_visible)
+            args.only_m3d or args.only_headless or args.only_visible)
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
@@ -3003,6 +3330,11 @@ def main() -> int:
                 run_m3c_checks(exe, out)
             else:
                 run_m3c_visible_checks(exe, out)
+        if not only or args.only_m3d:
+            if d.HEADLESS:
+                run_m3d_checks(exe, out)
+            else:
+                run_m3d_visible_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)

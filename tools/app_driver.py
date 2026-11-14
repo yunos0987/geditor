@@ -453,9 +453,13 @@ class App:
 
     def fault(self, what: str) -> bool:
         """'GFLT': "target", "font", "menu", "popup", "shape" (the next
-        shaping of a grapheme cluster), "clipboard-read" or
-        "clipboard-write"."""
+        shaping of a grapheme cluster), "color" (the next colour glyph; then
+        one colour), "clipboard-read" or "clipboard-write"."""
         return inject_fault(self.hwnd, what)
+
+    def redraw(self, frames: int) -> dict:
+        """'GRDW': draws `frames` frames at once; the redraw_* state values."""
+        return redraw(self.hwnd, frames)
 
     # ---- M3b: menus and mouse (posted messages, any mode) ----
     def menu_bar(self) -> list:
@@ -1367,6 +1371,42 @@ def inject_fault(hwnd, what: str) -> bool:
     name = ctypes.create_unicode_buffer(what)
     data = COPYDATASTRUCT(COPYDATA_FAULT, len(what) * 2, ctypes.cast(name, ctypes.c_void_p))
     return bool(user32.SendMessageW(hwnd, 0x004A, 0, ctypes.addressof(data)))
+
+
+# ---- M3d: redraw benchmark and CPU load ----
+
+COPYDATA_REDRAW = 0x57445247  # 'GRDW', see MainWindow WM_COPYDATA
+
+
+def redraw(hwnd, frames: int) -> dict:
+    """Makes geditor draw `frames` frames at once ('GRDW') and returns the
+    redraw_* values of its state (times in ms; redraw_alloc_bytes is -1 in a
+    release build)."""
+    if copy_data(hwnd, COPYDATA_REDRAW, str(frames), timeout_ms=60000) != 1:
+        raise DriverError("geditor rejected the redraw request")
+    return {k: v for k, v in read_state(hwnd).items() if k.startswith("redraw_")}
+
+
+class FILETIME(ctypes.Structure):
+    _fields_ = [("low", wt.DWORD), ("high", wt.DWORD)]
+
+
+kernel32.GetSystemTimes.argtypes = [ctypes.POINTER(FILETIME)] * 3
+
+
+def system_times() -> tuple[int, int]:
+    """(idle, total) CPU time of all processors in 100 ns units."""
+    idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
+    if not kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+        raise DriverError(f"GetSystemTimes failed (error {ctypes.get_last_error()})")
+    value = lambda t: (t.high << 32) | t.low  # noqa: E731
+    return value(idle), value(kernel) + value(user)  # kernel time includes idle time
+
+
+def cpu_load(before: tuple[int, int], after: tuple[int, int]) -> float:
+    """Total CPU load in percent (all processors) between two system_times()."""
+    idle, total = after[0] - before[0], after[1] - before[1]
+    return 100.0 * (1.0 - idle / total) if total > 0 else 0.0
 
 
 if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--sample-foreground":

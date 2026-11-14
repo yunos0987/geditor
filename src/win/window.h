@@ -110,9 +110,12 @@ class MainWindow final : public Host {
   // dropped down (decision G7; when the key that ran the command is still
   // held, on its release), or headless the pending menu (decision B7).
   void enter_menu_bar();
-  // WM_NEXTMENU: Left / Right at the ends of the menu bar wrap around within
-  // it instead of moving to the system menu (decision G7).
+  // WM_NEXTMENU: Left / Right at the ends of the menu bar wrap around to its
+  // other end with one key press, through the system menu (M3d decision D6).
   void handle_next_menu(WPARAM key, MDINEXTMENU* next);
+  // 'GRDW' (M3d [C4]): draws `frames` frames at once and keeps their times
+  // (and, in a debug build, the bytes the C runtime allocated meanwhile).
+  void run_redraw_benchmark(int frames);
   // WM_INITMENUPOPUP / WM_UNINITMENUPOPUP: which drop-down is open (state
   // for the tools).
   void note_menu_popup(HMENU menu, bool system_menu);
@@ -205,6 +208,8 @@ class MainWindow final : public Host {
   unsigned settings_reloads_ = 0;  // reloads applied after the startup read
   unsigned frames_ = 0;            // frames drawn successfully
   unsigned reloads_drawn_ = 0;     // settings_reloads_ at the last drawn frame
+  // ---- 'GRDW' (M3d [C4]) ----
+  std::wstring redraw_result_;     // state lines of the last benchmark
 };
 
 }  // namespace geditor::win

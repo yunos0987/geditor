@@ -1,4 +1,12 @@
+// ID2D1DeviceContext4 / ID2D1DeviceContext7 (colour glyphs, M3d) are
+// declared for NTDDI versions newer than the project's _WIN32_WINNT; they are
+// asked for at run time (QueryInterface), so this raises NTDDI_VERSION for
+// this file only, before any header.
+#define NTDDI_VERSION 0x0A00000D  // NTDDI_WIN10_CU
+
 #include "renderer.h"
+
+#include <d2d1_3.h>
 
 #include <algorithm>
 #include <cmath>
@@ -171,8 +179,15 @@ bool Renderer::ensure_target(HWND hwnd) {
 }
 
 void Renderer::discard_target() {
+  release_color_target(hwnd_color_);
   safe_release(hwnd_brush_);
   safe_release(hwnd_target_);
+}
+
+void Renderer::release_color_target(ColorTarget& target) {
+  safe_release(target.dc7);
+  safe_release(target.dc4);
+  target.queried = false;
 }
 
 void Renderer::resize(UINT width, UINT height) {
@@ -189,9 +204,11 @@ HRESULT Renderer::paint(HWND hwnd, const Editor& editor, ViewState& view) {
   mark_stage("render_target");
   target_ = hwnd_target_;
   brush_ = hwnd_brush_;
+  color_ = &hwnd_color_;
   const HRESULT hr = draw_frame(editor, view);
   target_ = nullptr;
   brush_ = nullptr;
+  color_ = nullptr;
   return hr;
 }
 
@@ -208,20 +225,112 @@ HRESULT Renderer::paint_to_dc(HWND hwnd, HDC dc, const Editor& editor, const Vie
   HRESULT hr = d2d_factory_->CreateDCRenderTarget(&props, &dc_target);
   if (SUCCEEDED(hr)) hr = dc_target->BindDC(dc, &rc);
   if (SUCCEEDED(hr)) hr = dc_target->CreateSolidColorBrush(rgb(0xffffff), &dc_brush);
+  ColorTarget dc_color;
   if (SUCCEEDED(hr)) {
     target_ = dc_target;
     brush_ = dc_brush;
+    color_ = &dc_color;
     ViewState copy = view;  // printing does not change the view
     hr = draw_frame(editor, copy);
     target_ = nullptr;
     brush_ = nullptr;
+    color_ = nullptr;
   }
+  release_color_target(dc_color);
   safe_release(dc_brush);
   safe_release(dc_target);
   return hr;
 }
 
+bool Renderer::take_color_failure() {
+  const bool pending = color_failure_pending_;
+  color_failure_pending_ = false;
+  return pending;
+}
+
+std::wstring Renderer::color_support() const {
+  if (color_formats_shown_ == 0) return L"none";
+  std::wstring text = L"colr";
+  if ((color_formats_shown_ & TextMeasurer::kFormatSvg) != 0) text += L",svg";
+  if ((color_formats_shown_ & TextMeasurer::kFormatBitmaps) != 0) text += L",bitmap";
+  if ((color_formats_shown_ & TextMeasurer::kFormatPaintTree) != 0) text += L",paint";
+  if (measurer_.color_failed()) text += L",failed";
+  return text;
+}
+
+void Renderer::prepare_color() {
+  if (color_ready_ || color_ == nullptr || target_ == nullptr) return;
+  color_ready_ = true;
+  if (!color_->queried) {
+    // Decision D4: asked for on the first colour glyph of this target only.
+    color_->queried = true;
+    if (FAILED(target_->QueryInterface(__uuidof(ID2D1DeviceContext4), reinterpret_cast<void**>(&color_->dc4)))) {
+      color_->dc4 = nullptr;
+    }
+    if (FAILED(target_->QueryInterface(__uuidof(ID2D1DeviceContext7), reinterpret_cast<void**>(&color_->dc7)))) {
+      color_->dc7 = nullptr;
+    }
+  }
+  // COLR layers are glyph runs in a colour (any target); outlines come with
+  // them for the glyphs of a run that have no colour.
+  uint32_t formats = TextMeasurer::kFormatTrueType | TextMeasurer::kFormatCff | TextMeasurer::kFormatColr;
+  uint32_t paint_level = 0;
+  if (color_->dc4 != nullptr) formats |= TextMeasurer::kFormatSvg | TextMeasurer::kFormatBitmaps;
+  if (color_->dc7 != nullptr) {
+    paint_level = static_cast<uint32_t>(color_->dc7->GetPaintFeatureLevel());
+    if (paint_level != 0) formats |= TextMeasurer::kFormatPaintTree;
+  }
+  measurer_.set_color_formats(formats, paint_level);
+  color_formats_shown_ = formats;
+}
+
+const TextMeasurer::ColorRun* Renderer::color_glyph(uint16_t face, uint16_t index) {
+  if (measurer_.color_failed() || !measurer_.is_color_face(face)) return nullptr;
+  prepare_color();
+  return measurer_.color_glyph(face, index);
+}
+
+const TextMeasurer::ColorRun* Renderer::color_cluster(const TextMeasurer::ClusterGlyphs& g) {
+  if (measurer_.color_failed() || !measurer_.is_color_face(g.face)) return nullptr;
+  prepare_color();
+  return measurer_.color_cluster(g);
+}
+
+void Renderer::draw_color_run(const TextMeasurer::ColorRun& run, uint16_t face, D2D1_POINT_2F origin,
+                              D2D1_COLOR_F color) {
+  DWRITE_GLYPH_RUN glyphs{};
+  glyphs.fontFace = measurer_.face(face);
+  glyphs.fontEmSize = measurer_.face_em(face);
+  for (const TextMeasurer::ColorLayer& layer : run.layers) {
+    glyphs.glyphCount = layer.count;
+    glyphs.glyphIndices = run.glyphs.data() + layer.first;
+    glyphs.glyphAdvances = run.advances.data() + layer.first;
+    glyphs.glyphOffsets = run.offsets.data() + layer.first;
+    const D2D1_POINT_2F at = D2D1::Point2F(origin.x + layer.x, origin.y + layer.y);
+    // The formats were chosen by prepare_color from the interfaces of this
+    // target, so the interface of each layer is there.
+    if ((layer.format & TextMeasurer::kFormatPaintTree) != 0 && color_->dc7 != nullptr) {
+      brush_->SetColor(color);  // the paint tree's "text colour"
+      color_->dc7->DrawPaintGlyphRun(at, &glyphs, brush_, 0, DWRITE_MEASURING_MODE_NATURAL);
+    } else if ((layer.format & TextMeasurer::kFormatSvg) != 0 && color_->dc4 != nullptr) {
+      brush_->SetColor(color);
+      color_->dc4->DrawSvgGlyphRun(at, &glyphs, brush_, nullptr, 0, DWRITE_MEASURING_MODE_NATURAL);
+    } else if ((layer.format & TextMeasurer::kFormatBitmaps) != 0 && color_->dc4 != nullptr) {
+      color_->dc4->DrawColorBitmapGlyphRun(
+          static_cast<DWRITE_GLYPH_IMAGE_FORMATS>(layer.format & TextMeasurer::kFormatBitmaps), at, &glyphs,
+          DWRITE_MEASURING_MODE_NATURAL, D2D1_COLOR_BITMAP_GLYPH_SNAP_OPTION_DEFAULT);
+    } else {
+      // A COLR layer (or an outline without colour) in its colour.
+      brush_->SetColor(layer.foreground ? color
+                                        : D2D1::ColorF(layer.color.r, layer.color.g, layer.color.b, layer.color.a));
+      target_->DrawGlyphRun(at, &glyphs, brush_, DWRITE_MEASURING_MODE_NATURAL);
+    }
+  }
+  brush_->SetColor(color);
+}
+
 HRESULT Renderer::draw_frame(const Editor& editor, ViewState& view) {
+  color_ready_ = false;
   target_->BeginDraw();
   target_->SetTransform(D2D1::Matrix3x2F::Identity());
   target_->Clear(color_of(editor, kColorBackground));
@@ -234,6 +343,11 @@ HRESULT Renderer::draw_frame(const Editor& editor, ViewState& view) {
   draw_mode_line(editor, mode_y, size.width);
   draw_echo_area(editor, view, echo_y, size.width, rows);
   mark_stage("draw_calls");
+  if (measurer_.color_failed() && !color_failure_reported_) {
+    // Decision D3: reported once (the glyphs were drawn in one colour).
+    color_failure_reported_ = true;
+    color_failure_pending_ = true;
+  }
   const HRESULT hr = target_->EndDraw();
   mark_stage("end_draw");
   return hr;
@@ -298,18 +412,13 @@ void Renderer::draw_text_area(const Editor& editor, ViewState& view, float width
     }
     if (b.has_mark && b.mark_active && b.mark != b.point) draw_region(b, x0, y, selection);
     // Characters, then whitespace marks in their own colour. A cluster of
-    // several code points is drawn from its text in the buffer.
+    // several code points (or an emoji) is drawn from its text in the buffer.
     for (int pass = 0; pass < 2; ++pass) {
       cells_.clear();
       cluster_text_.clear();
       for (const DisplayCell& c : row_.cells) {
         if (c.mark != (pass == 1)) continue;
-        if (c.code_points > 1) {
-          const std::wstring text = b.text.substr(c.offset, std::min(c.length, kMaxShapedClusterUnits));
-          add_cell(c.c, c.column, c.width, c.offset, c.code_points, c.emoji, text);
-        } else {
-          add_cell(c.c, c.column, c.width, c.offset, 1, false, std::wstring_view());
-        }
+        add_buffer_cell(b.text, c);
       }
       draw_cells(x0, y, pass == 0 ? foreground : whitespace);
     }
@@ -454,7 +563,9 @@ void Renderer::add_cell(char32_t c, int column, int width, size_t offset, int co
                         std::wstring_view text) {
   Cell cell{c, column, width, offset};
   cell.emoji = emoji;
-  if (code_points > 1 && !text.empty()) {
+  // An emoji of one code point too: it is shaped with the emoji font as a
+  // cluster (decision D1 of M3d).
+  if ((code_points > 1 || emoji) && !text.empty()) {
     cell.text_begin = cluster_text_.size();
     cell.text_length = text.size();
     cluster_text_.append(text);
@@ -462,24 +573,43 @@ void Renderer::add_cell(char32_t c, int column, int width, size_t offset, int co
   cells_.push_back(cell);
 }
 
-void Renderer::draw_cluster(const Cell& cell, float x, float baseline) {
+void Renderer::add_buffer_cell(const PieceTree& text, const DisplayCell& c) {
+  Cell cell{c.c, c.column, c.width, c.offset};
+  cell.emoji = c.emoji;
+  if (c.code_points > 1 || (c.emoji && !c.mark)) {
+    cell.text_begin = cluster_text_.size();
+    text.for_each_chunk(c.offset, std::min(c.length, kMaxShapedClusterUnits), [this](std::wstring_view chunk) {
+      cluster_text_.append(chunk);
+      return true;
+    });
+    cell.text_length = cluster_text_.size() - cell.text_begin;
+  }
+  cells_.push_back(cell);
+}
+
+void Renderer::draw_cluster(const Cell& cell, float x, float baseline, D2D1_COLOR_F color) {
   const std::wstring_view text(cluster_text_.data() + cell.text_begin, cell.text_length);
   const TextMeasurer::ClusterGlyphs& g = measurer_.cluster(text, cell.emoji);
   if (g.glyphs.empty()) return;
-  DWRITE_GLYPH_RUN run{};
-  run.fontFace = measurer_.face(g.face);
-  run.fontEmSize = measurer_.face_em(g.face);
-  run.glyphCount = static_cast<UINT32>(g.glyphs.size());
-  run.glyphIndices = g.glyphs.data();
-  run.glyphAdvances = g.advances.data();
-  run.glyphOffsets = g.offsets.data();
-  // Wider than its cells: squeezed horizontally into them (PLAN 4.7).
+  // Wider than its cells: squeezed horizontally into them (PLAN 4.7), in
+  // colour or not.
   const float slot = static_cast<float>(cell.width) * measurer_.cell_width();
   const bool squeeze = cell.width > 0 && g.width > slot + 0.5f;
   if (squeeze) {
     target_->SetTransform(D2D1::Matrix3x2F::Scale(slot / g.width, 1.0f, D2D1::Point2F(x, baseline)));
   }
-  target_->DrawGlyphRun(D2D1::Point2F(x, baseline), &run, brush_, DWRITE_MEASURING_MODE_NATURAL);
+  if (const TextMeasurer::ColorRun* layers = color_cluster(g)) {
+    draw_color_run(*layers, g.face, D2D1::Point2F(x, baseline), color);
+  } else {
+    DWRITE_GLYPH_RUN run{};
+    run.fontFace = measurer_.face(g.face);
+    run.fontEmSize = measurer_.face_em(g.face);
+    run.glyphCount = static_cast<UINT32>(g.glyphs.size());
+    run.glyphIndices = g.glyphs.data();
+    run.glyphAdvances = g.advances.data();
+    run.glyphOffsets = g.offsets.data();
+    target_->DrawGlyphRun(D2D1::Point2F(x, baseline), &run, brush_, DWRITE_MEASURING_MODE_NATURAL);
+  }
   if (squeeze) target_->SetTransform(D2D1::Matrix3x2F::Identity());
 }
 
@@ -515,7 +645,7 @@ void Renderer::draw_cells(float x0, float top, D2D1_COLOR_F color) {
       // cells; one without cells goes over the base before it.
       flush_run(run_face, run_x, baseline);
       const float x = x0 + static_cast<float>(cell.column) * cw;
-      draw_cluster(cell, cell.width == 0 && has_base ? base_x : x, baseline);
+      draw_cluster(cell, cell.width == 0 && has_base ? base_x : x, baseline, color);
       has_base = false;
       continue;
     }
@@ -552,6 +682,18 @@ void Renderer::draw_cells(float x0, float top, D2D1_COLOR_F color) {
     base_face = g.face;
     base_x = x;
     base_end = x + std::min(g.advance, slot);
+    if (const TextMeasurer::ColorRun* layers = color_glyph(g.face, g.index)) {
+      // A glyph of a colour font with colour (decision D1): its layers,
+      // squeezed into its cells like the glyph below.
+      flush_run(run_face, run_x, baseline);
+      const bool squeeze = g.advance > slot + 0.5f;
+      if (squeeze) {
+        target_->SetTransform(D2D1::Matrix3x2F::Scale(slot / g.advance, 1.0f, D2D1::Point2F(x, baseline)));
+      }
+      draw_color_run(*layers, g.face, D2D1::Point2F(x, baseline), color);
+      if (squeeze) target_->SetTransform(D2D1::Matrix3x2F::Identity());
+      continue;
+    }
     if (g.advance > slot + 0.5f) {
       // Wider than its cells: squeeze it horizontally into them.
       flush_run(run_face, run_x, baseline);
