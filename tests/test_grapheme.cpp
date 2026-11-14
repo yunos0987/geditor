@@ -130,6 +130,28 @@ TEST(grapheme_width_vs15_keeps_base_width) {
   CHECK_EQ(single_width(L"☺︎"), 1);
 }
 
+TEST(grapheme_vs15_after_an_emoji_presentation_character_is_text_style) {
+  // U+1F600 U+FE0E: the first code point's width (2, East Asian Wide) and not
+  // shown as emoji, so it is drawn in one colour (user, 2026-11-14).
+  const std::wstring text(L"\U0001F600\xFE0E");
+  CHECK_EQ(single_width(text), 2);
+  bool emoji = true;
+  int clusters = 0;
+  geditor::for_each_cluster(std::wstring_view(text), [&](const Cluster& c) {
+    emoji = c.emoji;
+    ++clusters;
+    return true;
+  });
+  CHECK_EQ(clusters, 1);
+  CHECK(!emoji);
+  bool plain_emoji = false;
+  geditor::for_each_cluster(std::wstring_view(L"\U0001F600"), [&](const Cluster& c) {
+    plain_emoji = c.emoji;
+    return true;
+  });
+  CHECK(plain_emoji);
+}
+
 TEST(grapheme_width_vs16_after_a_non_emoji_keeps_base_width) {
   // U+FE0F shows only Emoji characters as emoji: "g" + U+FE0F is text, and
   // "#" + U+FE0F (Emoji=Yes) is an emoji.

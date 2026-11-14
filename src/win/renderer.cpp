@@ -598,7 +598,9 @@ void Renderer::draw_cluster(const Cell& cell, float x, float baseline, D2D1_COLO
   if (squeeze) {
     target_->SetTransform(D2D1::Matrix3x2F::Scale(slot / g.width, 1.0f, D2D1::Point2F(x, baseline)));
   }
-  if (const TextMeasurer::ColorRun* layers = color_cluster(g)) {
+  // Colour only for clusters shown as emoji (2 cells, decision G2 of M3c);
+  // text-style symbols and U+FE0E stay in one colour (user, 2026-11-14).
+  if (const TextMeasurer::ColorRun* layers = cell.emoji ? color_cluster(g) : nullptr) {
     draw_color_run(*layers, g.face, D2D1::Point2F(x, baseline), color);
   } else {
     DWRITE_GLYPH_RUN run{};
@@ -682,9 +684,10 @@ void Renderer::draw_cells(float x0, float top, D2D1_COLOR_F color) {
     base_face = g.face;
     base_x = x;
     base_end = x + std::min(g.advance, slot);
-    if (const TextMeasurer::ColorRun* layers = color_glyph(g.face, g.index)) {
-      // A glyph of a colour font with colour (decision D1): its layers,
-      // squeezed into its cells like the glyph below.
+    if (const TextMeasurer::ColorRun* layers = cell.emoji ? color_glyph(g.face, g.index) : nullptr) {
+      // A glyph of a colour font with colour (decision D1), only when its
+      // cluster is shown as emoji: its layers, squeezed into its cells like
+      // the glyph below.
       flush_run(run_face, run_x, baseline);
       const bool squeeze = g.advance > slot + 0.5f;
       if (squeeze) {

@@ -209,6 +209,10 @@ void ClusterWidth::add(char32_t c) {
     // U+FE0F asks for the emoji presentation of an Emoji character only
     // ("g" + U+FE0F stays text).
     if (c == 0xFE0F && is_emoji(first_)) emoji_ = true;
+    // U+FE0E right after the first code point asks for its text style, even
+    // for an Emoji_Presentation character (PLAN 2: the first code point's
+    // width, drawn in one colour).
+    if (c == 0xFE0E && count_ == 1) emoji_ = false;
     if (previous_zwj_ && (p & kExtPictBit) != 0) emoji_ = true;
     if (first_ri_ && count_ == 1 && ri) emoji_ = true;
     if (!emoji_ && is_emoji_modifier(c)) emoji_ = true;

@@ -3045,11 +3045,52 @@ def run_m3d_checks(exe: pathlib.Path, out: pathlib.Path):
     finally:
         app.kill()
     record("INFO", "[M3d] screenshots", ", ".join(names))
+    run_m3d_text_style_check(exe, out)
     run_m3d_benchmark(exe, out)
     needs_visible(M3D_VISIBLE_F10, "the real menu loop needs the screen and SendInput")
 
 
 M3D_COLOUR_MESSAGE = "Colour emoji are not available; drawn in one colour"
+
+# Clusters not shown as emoji (text style): drawn in one colour even though
+# Segoe UI Emoji has them in colour (user, 2026-11-14).
+M3D_TEXT_STYLE = [
+    ("U+2639", "☹"),
+    ("U+2764", "❤"),
+    ("U+2714", "✔"),
+    ("U+2600", "☀"),
+    ("U+2639 U+FE0E", "☹︎"),
+    ("U+1F600 U+FE0E", "\U0001f600︎"),
+]
+
+
+def run_m3d_text_style_check(exe: pathlib.Path, out: pathlib.Path):
+    """Text-style symbols and U+FE0E clusters: drawn (not blank) and with no
+    coloured pixel anywhere on their rows."""
+    work = out / "files_m3d_text"
+    work.mkdir(parents=True, exist_ok=True)
+    settings = work / "settings.json"
+    settings.write_bytes(settings_json({"colors": M3D_GREY, "line_numbers": False, "eol_marks": {"show": False}}))
+    doc = work / "m3d_text.txt"
+    doc.write_bytes(("\n".join("a" + text + "b" for _, text in M3D_TEXT_STYLE) + "\n").encode("utf-8"))
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings, height=400)
+    try:
+        app.use_input()
+        time.sleep(0.5)
+        state = app.state()
+        shot = app.capture(out / "shots" / "m3d_05_text_style.png")
+        rows = []
+        ok = True
+        for i, (name, _) in enumerate(M3D_TEXT_STYLE):
+            box = cell_box(state, i, 0, 1)
+            coloured = count_where(shot, is_emoji_colour, (0, box[1], shot[0], box[3]))
+            drawn = count_where(shot, is_drawn, cell_box(state, i, 1, 1))
+            ok = ok and coloured == 0 and drawn > 0
+            rows.append(f"{name}: coloured px on its row {coloured}, drawn px in its first cell {drawn}")
+        check("[M3d D1] text-style symbols and U+FE0E clusters are drawn in one colour", ok,
+              "; ".join(rows) + " (m3d_05_text_style.png)")
+    finally:
+        app.kill()
 
 
 def run_m3d_benchmark(exe: pathlib.Path, out: pathlib.Path):
