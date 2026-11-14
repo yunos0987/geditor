@@ -117,6 +117,8 @@ constexpr DefaultBinding kGlobalBindings[] = {
     {L"C-x C-x", "exchange-point-and-mark"},
     {L"C-x h", "mark-whole-buffer"},
     {L"C-g", "keyboard-quit"},
+    // ESC ESC ESC: ESC then ESC is M-ESC (decision G8).
+    {L"M-ESC ESC", "keyboard-escape-quit"},
     // Delete and kill
     {L"C-d", "delete-char"},
     {L"DEL", "delete-backward-char"},

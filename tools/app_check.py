@@ -1,4 +1,4 @@
-"""Real-app checks of geditor M1, M2, M3a and M3b (run by hand; Windows only).
+"""Real-app checks of geditor M1, M2, M3a, M3b and M3c (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
@@ -20,7 +20,12 @@ mouse messages at the cells that the state's grid gives (clicks, drags,
 double-clicks, Shift+clicks, the wheel), read the real menu bar of the
 window (GetMenu and GetMenuItemInfoW after WM_INITMENUPOPUP), invoke items
 with WM_COMMAND, and answer the menus that F10 and WM_CONTEXTMENU leave
-pending in the headless state ('GSTA' / 'GANS').
+pending in the headless state ('GSTA' / 'GANS'). The M3c checks
+(--only-m3c) look at the pixels of grapheme clusters in their cells (U+FE0F,
+a ZWJ family, a flag, a keycap, か + U+3099), DEL and undo by cluster, a
+failed shaping ('GFLT' "shape") and a cluster without glyphs, and F10 in
+the headless state; with --visible, F10 through SendInput drops the File
+menu down (Left / Right / Esc, read from the state's menu_popup).
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
@@ -1887,7 +1892,7 @@ M3B_ITEMS = [
     ("File > Save As...", "C-x C-w", True),
     *[(f"File > Encoding for Saving > {name}", "", False) for name in (
         "utf-8", "utf-8-bom", "utf-16le", "utf-16le-bom", "utf-16be", "utf-16be-bom", "shift_jis", "euc-jp",
-        "iso-2022-jp", "windows-1252", "gb18030", "big5", "euc-kr")],
+        "iso-2022-jp")],
     ("File > Line Endings > LF", "", False), ("File > Line Endings > CRLF", "", False),
     ("File > Line Endings > CR", "", False), ("File > Read Only", "C-x C-q", True),
     ("File > Settings", "", True), ("File > Exit", "C-M-w", True),
@@ -2379,11 +2384,11 @@ def run_m3b_menu_bar(app, run: M3bRun, settings: pathlib.Path, wrap10: dict):
     count = len(app.menu_bar())
     check("[C3] the real menu bar (GetMenu after WM_INITMENUPOPUP) has the core's texts, keys, grey items and "
           "marks for File, Edit and View",
-          titles == ["File", "Edit", "View"] and not problems and count == 56 and
+          titles == ["File", "Edit", "View"] and not problems and count == 52 and
           marks == {"View > Line Numbers": True, "View > Line Ending Marks": True, "View > Whitespace Marks": True,
                     "View > Wrap > Fixed": True, "View > Wrap > Max": False, "View > Wrap > None": False} and
-          len(radios) == 20,
-          f"titles={titles} items={count} (3 titles + 53 PLAN rows) problems={problems[:5]} marks={marks} "
+          len(radios) == 16,
+          f"titles={titles} items={count} (3 titles + 49 PLAN rows) problems={problems[:5]} marks={marks} "
           f"radio items={len(radios)} "
           f"(e.g. {items['Edit > Undo'].text!r} {items['Edit > Undo'].key!r})")
     check("[C6] not implemented items are grey in the HMENU",
@@ -2601,6 +2606,245 @@ def run_m3b_visible_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
 
+# ---- M3c: grapheme clusters and F10 ----
+
+# The cluster samples of the M3c checks: (name, text of the cluster, cells,
+# screenshot name).
+M3C_CLUSTERS = [
+    ("U+263A U+FE0F", "☺️", 2, "m3c_01_vs16.png"),
+    ("ZWJ family", "\U0001f468‍\U0001f469‍\U0001f467", 2, "m3c_02_zwj_family.png"),
+    ("flag JP", "\U0001f1ef\U0001f1f5", 2, "m3c_03_flag.png"),
+    ("keycap #", "#️⃣", 2, "m3c_04_keycap.png"),
+    ("U+304B U+3099 (ka + voiced mark)", "が", 2, "m3c_05_ka_voiced.png"),
+]
+M3C_VISIBLE_F10 = ("[M3c C5] F10 (SendInput press and release) drops the File menu down and it stays; Right moves "
+                   "to Edit, Left to File and then View (wrap-around); Esc closes it")
+
+
+def cell_box(state: dict, row: int, first: int, cells: int) -> tuple[int, int, int, int]:
+    """Client pixels (x0, y0, x1, y1) of cells [first, first + cells) of
+    screen row `row` (the anti-aliased edges of a glyph stay inside)."""
+    lh, cw, left = float(state["line_height"]), float(state["cell_width"]), float(state["text_left"])
+    return (int(left + first * cw + 1), int(row * lh), int(left + (first + cells) * cw - 1), int((row + 1) * lh))
+
+
+def run_m3c_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C4], [C5] (headless part) and [C8] of the M3c packet on the real app:
+    clusters drawn in their cells (pixels of a vivid colour scheme), DEL and
+    undo by cluster, the cursor after a cluster, a failed shaping and a
+    cluster without glyphs, and F10 of the headless state."""
+    work = out / "files_m3c"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    base = {"colors": VIVID, "line_numbers": False, "eol_marks": {"show": False}}
+    settings.write_bytes(settings_json(base))
+    doc = work / "m3c.txt"
+    lines = ["a" + text + "b" for _, text, _, _ in M3C_CLUSTERS] + ["", ""]
+    original = "\n".join(lines) + "\n"
+    doc.write_bytes(original.encode("utf-8"))
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings)
+    names = []
+    try:
+        record("INFO", "M3c input mode", app.use_input())
+        time.sleep(0.4)
+        for row, (name, text, cells, shot_name) in enumerate(M3C_CLUSTERS):
+            keys = app.keys
+            keys("M-<")
+            for _ in range(row):
+                keys("C-n")
+            keys("C-a C-f C-f")
+            time.sleep(0.2)
+            state = app.state()
+            names.append(shot_name)
+            shot = app.capture(shots / shot_name)
+            lh, cw, left = float(state["line_height"]), float(state["cell_width"]), float(state["text_left"])
+            a = count_where(shot, is_red, cell_box(state, row, 0, 1))
+            first_cell = count_where(shot, is_red, cell_box(state, row, 1, 1))
+            second_cell = count_where(shot, is_red, cell_box(state, row, 2, 1))
+            b = count_where(shot, is_red, cell_box(state, row, 3, 1))
+            after = count_where(shot, is_red, cell_box(state, row, 4, 6))
+            box = cursor_box(shot)
+            cursor_x = box[0] if box else -1
+            expected_x = left + 3 * cw
+            cursor_ok = box is not None and abs(cursor_x - expected_x) <= 2 and row * lh - 1 <= box[1] <= (row + 1) * lh
+            line_start = sum(len(l.encode("utf-16-le")) // 2 + 1 for l in lines[:row])
+            point_ok = state["point"] == str(line_start + 1 + len(text.encode("utf-16-le")) // 2)
+            check(f"[M3c C4] {name} is drawn in {cells} cells next to ASCII, the cursor after it",
+                  a > 0 and first_cell > 0 and second_cell > 0 and b > 0 and after == 0 and cursor_ok and point_ok,
+                  f"red pixels: 'a' {a}, cluster cells {first_cell} / {second_cell}, 'b' {b}, after 'b' {after}; "
+                  f"cursor x={cursor_x} (cell 3 at {expected_x:.1f}), point={state['point']} ({shot_name})")
+            keys("DEL")
+            time.sleep(0.2)
+            deleted = app.state()
+            keys("C-/")
+            time.sleep(0.2)
+            restored = app.state()
+            row_text = lambda s: s["text"].split("\n")[row]  # noqa: E731
+            check(f"[M3c C4] DEL once removes {name}; one undo restores it",
+                  row_text(deleted) == "ab" and row_text(restored) == "a" + text + "b" and
+                  restored["point"] == state["point"],
+                  f"after DEL {row_text(deleted)!r}, after C-/ {row_text(restored)!r} point={restored['point']}")
+        # [C8] A failed shaping, and a cluster that no font has, are drawn.
+        row = len(M3C_CLUSTERS)
+        app.keys("M-<")
+        for _ in range(row):
+            app.keys("C-n")
+        app.fault("shape")
+        app.type("ö \U0010fffd́")
+        time.sleep(0.3)
+        state = app.state()
+        shot = app.capture(shots / "m3c_06_fallbacks.png")
+        names.append("m3c_06_fallbacks.png")
+        failed_shape = count_where(shot, is_red, cell_box(state, row, 0, 1))
+        no_font = count_where(shot, is_red, cell_box(state, row, 2, 1))
+        check("[M3c C8] a cluster whose shaping fails is drawn (the glyph of its first character)",
+              failed_shape > 0, f"red pixels in the cell of o + U+0308 after 'GFLT' shape: {failed_shape} "
+              "(m3c_06_fallbacks.png, cell 0)")
+        check("[M3c C8] a cluster that no font has is drawn as the missing-glyph box",
+              no_font > 0, f"red pixels in the cell of U+10FFFD + U+0301: {no_font} (m3c_06_fallbacks.png, cell 2)")
+        app.keys("C-/")
+
+        # [C10] ESC ESC ESC (keyboard-escape-quit) aborts M-x like C-g.
+        app.keys("M-x")
+        time.sleep(0.2)
+        reading = app.state()
+        app.keys("ESC ESC")
+        time.sleep(0.2)
+        waiting = app.state()
+        app.keys("ESC")
+        time.sleep(0.3)
+        quit_state = app.state()
+        shot = app.capture(shots / "m3c_07_escape_quit.png")
+        names.append("m3c_07_escape_quit.png")
+        check("[M3c C10] posted ESC ESC ESC in M-x aborts the minibuffer with 'Quit' (ESC ESC alone waits)",
+              reading["minibuffer"] == "1" and waiting["minibuffer"] == "1" and quit_state["minibuffer"] == "0" and
+              quit_state["message"] == "Quit" and
+              count_where(shot, is_red, (0, layout(shot)[2], shot[0], shot[1])) > 0,
+              f"minibuffer {reading['minibuffer']} -> after ESC ESC {waiting['minibuffer']} -> after the third ESC "
+              f"{quit_state['minibuffer']}; message={quit_state['message']!r} (m3c_07_escape_quit.png: 'Quit' "
+              "in the echo area)")
+
+        # [R3] An input that starts with a combining mark: after C-a the caret
+        # is at the start of the input, right after the prompt "M-x ".
+        app.keys("M-x")
+        app.type(chr(0x301) + "ab")
+        time.sleep(0.2)
+        end_state = app.state()
+        app.keys("C-a")
+        time.sleep(0.3)
+        start_state = app.state()
+        shot = app.capture(shots / "m3c_08_minibuffer_mark_caret.png")
+        names.append("m3c_08_minibuffer_mark_caret.png")
+        app.keys("C-g")
+        cw = float(start_state["cell_width"])
+        # Without line numbers (base settings) the text starts at the margin,
+        # which the echo area starts at too.
+        margin = float(start_state["text_left"])
+        caret_start = float(start_state["caret_x"])
+        caret_end = float(end_state["caret_x"])
+        check("[M3c R3] minibuffer input starting with U+0301: after C-a the caret is at the input start",
+              abs(caret_start - (margin + 4 * cw)) <= 2 and abs(caret_end - (margin + 6 * cw)) <= 2 and
+              start_state["minibuffer"] == "1",
+              f"caret_x after C-a {caret_start} (expected {margin + 4 * cw:.1f}: prompt 'M-x ' is 4 cells), at the "
+              f"end {caret_end} (expected {margin + 6 * cw:.1f}) (m3c_08_minibuffer_mark_caret.png)")
+
+        # [C5] F10 in the headless state: the pending menu bar with File open.
+        app.keys("M-<")
+        app.keys("<f10>")
+        question = app.wait_question(3.0)
+        pending = app.state()
+        check("[M3c C5] headless F10 records the pending menu_bar menu with File as the open submenu",
+              question is not None and pending["question"] == "menu_bar" and pending.get("menu_open") == "File" and
+              pending["menu_loops"] == "0",
+              f"question={pending.get('question')} menu_open={pending.get('menu_open')!r} "
+              f"menu_loops={pending['menu_loops']}")
+        app.answer("Cancel")
+        time.sleep(0.2)
+        # Alt+F, Alt alone and Alt+Space as in M3b.
+        app.keys("M-<")
+        app.keys("M-f")
+        time.sleep(0.2)
+        alt_f = app.state()
+        app._post_key_raw(d.VK_MENU)
+        time.sleep(0.3)
+        alt = app.state()
+        app.keys("M-SPC")
+        time.sleep(0.3)
+        alt_space = app.state()
+        check("[M3c C5] Alt+F is forward-word, Alt alone enters no menu, Alt+Space goes to the system menu "
+              "request (swallowed headless) as in M3b",
+              alt_f["point"] == "1" and alt["question"] == alt_space["question"] == "none" and
+              alt["menu_loops"] == alt_space["menu_loops"] == "0" and alt_space["last_keymenu"] == "keymenu 32",
+              f"after M-f point={alt_f['point']}; after Alt: menu_loops={alt['menu_loops']} "
+              f"last={alt['last_keymenu']!r}; after Alt+Space: last={alt_space['last_keymenu']!r} "
+              f"question={alt_space['question']}")
+        apply_settings(settings, {**base, "menu_bar": False})
+        app.keys("<f10>")
+        time.sleep(0.3)
+        hidden = app.state()
+        check("[M3c C5] menu_bar: false: F10 says 'Menu bar is hidden'",
+              hidden["message"] == "Menu bar is hidden" and hidden["question"] == "none" and
+              hidden["menu_bar"] == "0", f"message={hidden['message']!r} question={hidden['question']}")
+    finally:
+        app.kill()
+    record("INFO", "[M3c C4] screenshots", ", ".join(names))
+    needs_visible(M3C_VISIBLE_F10, "the real menu loop needs the screen and SendInput")
+
+
+def run_m3c_visible_checks(exe: pathlib.Path, out: pathlib.Path):
+    """--visible: F10 through SendInput on an unlocked desktop (decision G7)."""
+    work = out / "files_m3c_visible"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = no_settings(out)
+    doc = work / "v.txt"
+    doc.write_bytes(b"hello world\nsecond line\n")
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings)
+    try:
+        if app.use_input() != "sendinput":
+            record("SKIP", M3C_VISIBLE_F10, "geditor cannot take the foreground (locked desktop or --input post)")
+            return
+
+        def popup(expected: str, shot: str) -> tuple[bool, str]:
+            ok = d.wait_for(lambda: app.state().get("menu_popup") == expected, 3.0) is not None
+            time.sleep(0.4)  # the key release and the menu animation
+            menus = d.windows_of(app.proc.pid, "#32768")
+            state = app.state()
+            if menus:
+                d.capture(menus[0], shots / shot)
+            return (ok and bool(menus) and state.get("menu_popup") == expected and
+                    state.get("menu_loop_active") == "1"), \
+                f"{expected}: popup={state.get('menu_popup')!r} #32768={menus} ({shot})"
+
+        app.keys("<f10>")  # SendInput: F10 down and up
+        file_ok, file_ev = popup("File", "m3c_v1_f10_file.png")
+        time.sleep(0.6)
+        still = d.windows_of(app.proc.pid, "#32768")
+        stays = bool(still) and app.state().get("menu_popup") == "File"
+        app.keys("<right>")
+        edit_ok, edit_ev = popup("Edit", "m3c_v2_right_edit.png")
+        app.keys("<left>")
+        back_ok, back_ev = popup("File", "m3c_v3_left_file.png")
+        app.keys("<left>")
+        view_ok, view_ev = popup("View", "m3c_v4_left_view.png")
+        app.keys("ESC")
+        time.sleep(0.4)
+        after_esc = app.state()
+        closed = not d.windows_of(app.proc.pid, "#32768")
+        app.keys("ESC")
+        time.sleep(0.4)
+        after_esc2 = app.state()
+        check(M3C_VISIBLE_F10,
+              file_ok and stays and edit_ok and back_ok and view_ok and closed and
+              after_esc2.get("menu_loop_active") == "0",
+              f"{file_ev}; still open 0.6 s after the release={stays}; {edit_ev}; {back_ev}; {view_ev}; "
+              f"after Esc: #32768 closed={closed} popup={after_esc.get('menu_popup')!r}; after a second Esc: "
+              f"menu loop active={after_esc2.get('menu_loop_active')} popups={after_esc2.get('menu_popups')!r}")
+    finally:
+        app.kill()
+
+
 # ---- --only-visible: the checks that need the real screen ----
 
 def run_visible_checks(exe: pathlib.Path, out: pathlib.Path):
@@ -2705,6 +2949,8 @@ def main() -> int:
                         help="run only the M3a display checks")
     parser.add_argument("--only-m3b", action="store_true",
                         help="run only the M3b menu, context menu and mouse checks")
+    parser.add_argument("--only-m3c", action="store_true",
+                        help="run only the M3c grapheme cluster and F10 checks")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -2726,8 +2972,8 @@ def main() -> int:
     # (no open needed) shows that nothing wrote to it.
     saved = None if d.HEADLESS else clipboard_text()
     sequence0 = d.user32.GetClipboardSequenceNumber()
-    only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_headless or
-            args.only_visible)
+    only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_m3c or
+            args.only_headless or args.only_visible)
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
@@ -2752,6 +2998,11 @@ def main() -> int:
                 run_m3b_checks(exe, out)
             else:
                 run_m3b_visible_checks(exe, out)
+        if not only or args.only_m3c:
+            if d.HEADLESS:
+                run_m3c_checks(exe, out)
+            else:
+                run_m3c_visible_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)

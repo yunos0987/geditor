@@ -35,6 +35,7 @@ constexpr Expected kExpectedGlobal[] = {
     {L"C-x C-x", "exchange-point-and-mark"},
     {L"C-x h", "mark-whole-buffer"},
     {L"C-g", "keyboard-quit"},
+    {L"M-ESC ESC", "keyboard-escape-quit"},  // M3c (decision G8)
     {L"C-d", "delete-char"},
     {L"<delete>", "delete-char"},
     {L"DEL", "delete-backward-char"},

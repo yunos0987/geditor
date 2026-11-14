@@ -5,6 +5,7 @@
 
 #include "char_width.h"
 #include "echo_text.h"
+#include "grapheme.h"
 #include "measure.h"
 #include "unicode.h"
 
@@ -30,10 +31,10 @@ void safe_release(T*& p) {
   }
 }
 
-// Cells of `c` starting at `column`, with a fast path for printable ASCII.
-int advance_of(char32_t c, int column, int tab_width) {
-  if (c >= 0x20 && c < 0x7F) return 1;
-  return cell_advance(c, column, tab_width);
+// Cells of a cluster starting at `column` (TAB to the next stop).
+int advance_of(const Cluster& c, int column, int tab_width) {
+  if (c.first == U'\t') return cell_advance(U'\t', column, tab_width);
+  return c.width;
 }
 
 // Characters that are never drawn: controls, the space (blank anyway) and
@@ -43,19 +44,10 @@ bool is_blank(char32_t c) {
   return c <= 0x20 || c == 0x7F || (c >= 0x80 && c < 0xA0) || is_invisible_format_char(c);
 }
 
-// Calls f(code_point, offset) for the code points of `s`; f returns false to
-// stop. Returns false when stopped.
-template <typename F>
-bool for_each_code_point(std::wstring_view s, F&& f) {
-  size_t i = 0;
-  while (i < s.size()) {
-    size_t units = 0;
-    const char32_t c = decode_at(s, i, &units);
-    if (!f(c, i)) return false;
-    i += units;
-  }
-  return true;
-}
+// The longest cluster text that is shaped (decision G6): the code points
+// after it in a longer cluster (only runs of hundreds of combining marks are
+// that long) are not drawn.
+constexpr size_t kMaxShapedClusterUnits = 64;
 
 }  // namespace
 
@@ -305,11 +297,19 @@ void Renderer::draw_text_area(const Editor& editor, ViewState& view, float width
       }
     }
     if (b.has_mark && b.mark_active && b.mark != b.point) draw_region(b, x0, y, selection);
-    // Characters, then whitespace marks in their own colour.
+    // Characters, then whitespace marks in their own colour. A cluster of
+    // several code points is drawn from its text in the buffer.
     for (int pass = 0; pass < 2; ++pass) {
       cells_.clear();
+      cluster_text_.clear();
       for (const DisplayCell& c : row_.cells) {
-        if (c.mark == (pass == 1)) cells_.push_back(Cell{c.c, c.column, c.width, c.offset});
+        if (c.mark != (pass == 1)) continue;
+        if (c.code_points > 1) {
+          const std::wstring text = b.text.substr(c.offset, std::min(c.length, kMaxShapedClusterUnits));
+          add_cell(c.c, c.column, c.width, c.offset, c.code_points, c.emoji, text);
+        } else {
+          add_cell(c.c, c.column, c.width, c.offset, 1, false, std::wstring_view());
+        }
       }
       draw_cells(x0, y, pass == 0 ? foreground : whitespace);
     }
@@ -398,11 +398,15 @@ void Renderer::draw_echo_area(const Editor& editor, ViewState& view, float y, fl
   std::wstring text;
   int cursor_column = -1;
   if (editor.minibuffer_active()) {
-    // The prompt stays visible; the input is abbreviated on the left.
+    // The prompt stays visible; the input is abbreviated on the left. The
+    // prompt and the input are drawn (and segmented) apart (review R3).
     const Buffer& mb = editor.minibuffer_buffer();
     const MinibufferLine line = fit_minibuffer(editor.minibuffer_prompt(), mb.text.text(), mb.point,
                                                multi_line ? std::wstring() : editor.message(), columns);
-    text = line.text;
+    const std::wstring_view all(line.text);
+    draw_echo_line(all.substr(0, line.input_start), y, columns, foreground);
+    draw_echo_line(all.substr(line.input_start), y, columns - line.input_column, foreground,
+                   static_cast<float>(line.input_column) * cw);
     cursor_column = line.cursor_column;
   } else if (multi_line) {
     return;
@@ -411,7 +415,7 @@ void Renderer::draw_echo_area(const Editor& editor, ViewState& view, float y, fl
   } else {
     text = fit_message(editor.message(), columns);
   }
-  draw_echo_line(text, y, columns, foreground);
+  if (!editor.minibuffer_active()) draw_echo_line(text, y, columns, foreground);
   if (cursor_column >= 0) {
     const float x = kMarginDip + static_cast<float>(cursor_column) * cw;
     fill(x, y, x + kCursorWidthDip, y + lh, color_of(editor, kColorCursor));
@@ -421,27 +425,62 @@ void Renderer::draw_echo_area(const Editor& editor, ViewState& view, float y, fl
   }
 }
 
-void Renderer::draw_echo_line(std::wstring_view text, float y, int columns, D2D1_COLOR_F color) {
+void Renderer::draw_echo_line(std::wstring_view text, float y, int columns, D2D1_COLOR_F color, float x) {
   // The echo line counts TAB as one cell, like fit_message / fit_minibuffer.
   constexpr int kEchoTabWidth = 1;
   collect_string(text, 0, columns + 1, kEchoTabWidth);
-  draw_cells(kMarginDip, y, color);
+  draw_cells(kMarginDip + x, y, color);
 }
 
 int Renderer::collect_string(std::wstring_view s, int left, int columns, int tab_width) {
   cells_.clear();
+  cluster_text_.clear();
   const int right = left + columns;
   int column = 0;
-  for_each_code_point(s, [&](char32_t c, size_t offset) {
+  for_each_cluster(s, [&](const Cluster& c) {
     if (column >= right) return false;
     const int w = advance_of(c, column, tab_width);
     if (column + w > left || (w == 0 && column >= left)) {
-      cells_.push_back(Cell{c, column - left, w, offset});
+      add_cell(c.first, column - left, w, c.offset, c.code_points, c.emoji,
+               s.substr(c.offset, std::min(c.length, kMaxShapedClusterUnits)));
     }
     column += w;
     return true;
   });
   return column - left;
+}
+
+void Renderer::add_cell(char32_t c, int column, int width, size_t offset, int code_points, bool emoji,
+                        std::wstring_view text) {
+  Cell cell{c, column, width, offset};
+  cell.emoji = emoji;
+  if (code_points > 1 && !text.empty()) {
+    cell.text_begin = cluster_text_.size();
+    cell.text_length = text.size();
+    cluster_text_.append(text);
+  }
+  cells_.push_back(cell);
+}
+
+void Renderer::draw_cluster(const Cell& cell, float x, float baseline) {
+  const std::wstring_view text(cluster_text_.data() + cell.text_begin, cell.text_length);
+  const TextMeasurer::ClusterGlyphs& g = measurer_.cluster(text, cell.emoji);
+  if (g.glyphs.empty()) return;
+  DWRITE_GLYPH_RUN run{};
+  run.fontFace = measurer_.face(g.face);
+  run.fontEmSize = measurer_.face_em(g.face);
+  run.glyphCount = static_cast<UINT32>(g.glyphs.size());
+  run.glyphIndices = g.glyphs.data();
+  run.glyphAdvances = g.advances.data();
+  run.glyphOffsets = g.offsets.data();
+  // Wider than its cells: squeezed horizontally into them (PLAN 4.7).
+  const float slot = static_cast<float>(cell.width) * measurer_.cell_width();
+  const bool squeeze = cell.width > 0 && g.width > slot + 0.5f;
+  if (squeeze) {
+    target_->SetTransform(D2D1::Matrix3x2F::Scale(slot / g.width, 1.0f, D2D1::Point2F(x, baseline)));
+  }
+  target_->DrawGlyphRun(D2D1::Point2F(x, baseline), &run, brush_, DWRITE_MEASURING_MODE_NATURAL);
+  if (squeeze) target_->SetTransform(D2D1::Matrix3x2F::Identity());
 }
 
 void Renderer::flush_run(uint16_t face, float x, float baseline) {
@@ -471,6 +510,15 @@ void Renderer::draw_cells(float x0, float top, D2D1_COLOR_F color) {
   float base_x = 0;
   float base_end = 0;  // where the base glyph's own advance ends
   for (const Cell& cell : cells_) {
+    if (cell.text_length > 0) {
+      // A cluster of several code points (decision G6): one glyph run in its
+      // cells; one without cells goes over the base before it.
+      flush_run(run_face, run_x, baseline);
+      const float x = x0 + static_cast<float>(cell.column) * cw;
+      draw_cluster(cell, cell.width == 0 && has_base ? base_x : x, baseline);
+      has_base = false;
+      continue;
+    }
     if (is_blank(cell.c)) {
       flush_run(run_face, run_x, baseline);
       continue;

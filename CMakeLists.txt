@@ -34,6 +34,7 @@ add_library(geditor_core STATIC
   src/core/editor.cpp
   src/core/encoding.cpp
   src/core/files.cpp
+  src/core/grapheme.cpp
   src/core/jsonc.cpp
   src/core/key.cpp
   src/core/keymap.cpp

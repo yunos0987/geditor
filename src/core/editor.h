@@ -319,8 +319,8 @@ class Editor {
   RowPos max_top();
   // Moves point onto the screen rows [top_, top_ + visible) when it is off.
   void keep_point_on_screen();
-  // `offset` within the main buffer, not between the halves of a surrogate
-  // pair.
+  // `offset` within the main buffer, on the cluster boundary at or before it
+  // (decision G3).
   size_t clamp_main_offset(size_t offset) const;
   // Starts a mouse action as a command of its own: clears the message and
   // pending input and ends the typing undo group.

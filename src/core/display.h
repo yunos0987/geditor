@@ -116,12 +116,16 @@ EolMark eol_mark_for_line(const PieceTree& tree, size_t line, Eol eol, const Dis
 // `line` starts; the line end when there is none.
 size_t trailing_whitespace_start(const PieceTree& tree, size_t line);
 
-// One drawn cell of a row.
+// One drawn cluster of a row (PLAN 4.7: each grapheme cluster is drawn in its
+// own cells).
 struct DisplayCell {
-  char32_t c = 0;        // the character, or its whitespace mark when `mark`
+  char32_t c = 0;        // its first code point, or its whitespace mark when `mark`
   int column = 0;        // relative to the first visible column
-  int width = 0;         // cells (0 for zero-width characters)
+  int width = 0;         // cells (0 for zero-width clusters)
   size_t offset = 0;
+  size_t length = 1;     // UTF-16 units of the cluster in the buffer
+  int code_points = 1;   // more than 1: draw the text [offset, offset + length) as one cluster
+  bool emoji = false;    // the cluster is shown as an emoji (decision G2)
   bool mark = false;     // c is a whitespace mark (colour "whitespace")
   bool trailing = false; // trailing whitespace ("whitespace" as background)
 };

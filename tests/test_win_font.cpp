@@ -136,6 +136,84 @@ TEST(win_font_other_family_and_size) {
   CHECK(std::fabs(m.em() - 20.0f) < 1e-4f);
 }
 
+// ---- [M3c] Clusters of several code points (decision G6, [C8]) ----
+
+TEST(win_font_clusters_are_shaped_with_one_font) {
+  Factory f;
+  if (f.get() == nullptr) return;
+  TextMeasurer m;
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  // `emoji`: the core shows the cluster as an emoji (Cluster::emoji).
+  const struct {
+    const char* name;
+    std::wstring text;
+    bool emoji;
+  } samples[] = {
+      {"U+263A U+FE0F", L"\x263A\xFE0F", true},
+      {"ZWJ family", L"\U0001F468\x200D\U0001F469\x200D\U0001F467", true},
+      {"flag JP", L"\U0001F1EF\U0001F1F5", true},
+      {"keycap #", L"#\xFE0F\x20E3", true},
+      {"thumbs up + skin tone", L"\U0001F44D\U0001F3FD", true},
+      {"U+304B U+3099", L"\x304B\x3099", false},
+      {"e + U+0301", L"e\x0301", false},
+      {"Hangul L V T", L"\x1100\x1161\x11A8", false},
+      {"Devanagari KA VIRAMA SSA", L"\x0915\x094D\x0937", false},
+  };
+  for (const auto& s : samples) {
+    const TextMeasurer::ClusterGlyphs& g = m.cluster(s.text, s.emoji);
+    std::printf("  %s -> %s, %zu glyph(s), %.1f DIPs%s\n", s.name,
+                test::to_display(m.family_of_cluster(s.text, s.emoji)).c_str(), g.glyphs.size(), g.width,
+                g.shaped ? "" : " (fallback)");
+    CHECK(g.shaped);
+    CHECK(!g.glyphs.empty());
+    CHECK_EQ(g.glyphs.size(), g.advances.size());
+    CHECK_EQ(g.glyphs.size(), g.offsets.size());
+    CHECK(g.width > 0);
+    // Nothing is drawn as the missing-glyph box.
+    bool box = false;
+    for (const uint16_t index : g.glyphs) box = box || index == 0;
+    CHECK(!box);
+  }
+  // An emoji cluster asks for the emoji font, though Consolas has U+263A as
+  // text; "g" + U+FE0F is no emoji (the core says so) and stays in Consolas.
+  CHECK(m.family_of_cluster(L"\x263A\xFE0F", true) != std::wstring(L"Consolas"));
+  CHECK_EQ(m.family_of_cluster(L"e\x0301", false), std::wstring(L"Consolas"));
+  CHECK_EQ(m.family_of_cluster(L"g\xFE0F", false), std::wstring(L"Consolas"));
+}
+
+TEST(win_font_cluster_without_glyphs_draws_the_missing_glyph_box) {
+  // [C8]: no font has U+10FFFD (a private use character of plane 16): the
+  // cluster is drawn as the missing-glyph box of the primary font, not as
+  // nothing.
+  Factory f;
+  if (f.get() == nullptr) return;
+  TextMeasurer m;
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  const TextMeasurer::ClusterGlyphs& g = m.cluster(L"\U0010FFFD\x0301", false);
+  CHECK(!g.shaped);
+  CHECK_EQ(g.glyphs.size(), size_t{1});
+  if (!g.glyphs.empty()) CHECK_EQ(g.glyphs[0], uint16_t{0});
+  CHECK(g.width > 0);
+  CHECK_EQ(g.face, uint16_t{0});
+}
+
+TEST(win_font_cluster_shaping_failure_draws_the_first_character) {
+  // [C8]: a failed shaping falls back to the glyph of the first code point.
+  Factory f;
+  if (f.get() == nullptr) return;
+  TextMeasurer m;
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  m.fail_next_shaping();
+  const TextMeasurer::ClusterGlyphs& g = m.cluster(L"e\x0301", false);
+  CHECK(!g.shaped);
+  CHECK_EQ(g.glyphs.size(), size_t{1});
+  if (!g.glyphs.empty()) CHECK_EQ(g.glyphs[0], m.glyph(U'e').index);
+  CHECK(g.glyphs.empty() || g.glyphs[0] != 0);
+  CHECK(g.width > 0);
+  // The next cluster is shaped again.
+  CHECK(m.cluster(L"a\x0301", false).shaped);
+}
+
 TEST(win_font_text_scale_steps_change_the_cell_size) {
   // [C9]: each step is 1.2 times the size; Consolas cells scale with it.
   Factory f;

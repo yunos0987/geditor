@@ -156,7 +156,9 @@ TEST(wrap_zero_width_characters_stay_on_their_row) {
   const PieceTree t(L"abćd");
   const WrapLayout l = make_layout(3);
   CHECK(same(row_starts(t, l), {0, 4}));
-  CHECK_EQ(where(t, l, 3), std::string("0:0:3"));
+  // M3c: offset 3 (the mark) is inside the cluster c + U+0301 and maps to
+  // its start (it was "0:0:3" when the cursor unit was the code point).
+  CHECK_EQ(where(t, l, 3), std::string("0:0:2"));
   CHECK_EQ(where(t, l, 4), std::string("0:1:0"));
   // The goal column passes over a zero-width character at it.
   const PieceTree u(L"ábc");
@@ -268,4 +270,103 @@ TEST(wrap_edit_keeps_layout_consistent) {
   // A change that the layout was not told about is noticed too.
   t.erase(0, 4);
   CHECK(same(row_starts(t, l), {0, 3}));
+}
+
+// ---- [M3c-2] Wrapping by grapheme cluster ----
+
+namespace {
+
+// Every cluster boundary of line 0 round-trips through (row, cell), and
+// every cell of every row maps to a boundary.
+bool cluster_round_trips(const PieceTree& t, const WrapLayout& l) {
+  std::vector<size_t> boundaries;
+  geditor::for_each_cluster(t, 0, t.line_end(0), geditor::GraphemeBreaker(), nullptr,
+                            [&](const geditor::Cluster& c) {
+                              if (c.width > 0) boundaries.push_back(c.offset);
+                              return true;
+                            });
+  boundaries.push_back(t.line_end(0));
+  for (const size_t b : boundaries) {
+    int column = 0;
+    const RowPos p = l.row_of(t, b, &column);
+    if (l.offset_at(t, p.line, p.row, column) != b) return false;
+  }
+  const size_t rows = l.row_count(t, 0);
+  for (size_t r = 0; r < rows; ++r) {
+    for (int c = 0; c <= l.width() + 1; ++c) {
+      const size_t off = l.offset_at(t, 0, r, c);
+      if (geditor::cluster_start(t, off) != off) return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+TEST(wrap_two_cell_cluster_at_row_end_moves_to_the_next_row) {
+  // Width 3: "ab" leaves 1 cell, the 2-cell U+263A U+FE0F goes down whole.
+  const PieceTree t(L"ab☺️c");
+  const WrapLayout l = make_layout(3);
+  CHECK(same(row_starts(t, l), {0, 2}));
+  CHECK_EQ(where(t, l, 2), std::string("0:1:0"));
+  CHECK_EQ(where(t, l, 4), std::string("0:1:2"));
+  CHECK(cluster_round_trips(t, l));
+  // A ZWJ family and a flag the same way.
+  const PieceTree u(L"ab\U0001F468‍\U0001F469‍\U0001F467\U0001F1EF\U0001F1F5");
+  CHECK(same(row_starts(u, l), {0, 2, 10}));
+  CHECK(cluster_round_trips(u, l));
+}
+
+TEST(wrap_never_breaks_inside_a_cluster) {
+  // e + U+0301 fills the row; the mark never starts the next one.
+  const PieceTree t(L"abéc");
+  const WrapLayout l = make_layout(3);
+  CHECK(same(row_starts(t, l), {0, 4}));
+  // Width 1: each 2-cell cluster gets a row of its own, whole.
+  const PieceTree u(L"#️⃣が각क्षx");
+  const WrapLayout one = make_layout(1);
+  CHECK(same(row_starts(u, one), {0, 3, 5, 8, 11}));
+  CHECK(cluster_round_trips(u, one));
+  for (int width = 1; width <= 6; ++width) CHECK(cluster_round_trips(u, make_layout(width)));
+}
+
+TEST(wrap_row_chars_reports_whole_clusters) {
+  const PieceTree t(L"a\U0001F44D\U0001F3FDb");
+  std::vector<geditor::RowChar> chars;
+  make_layout(10).row_chars(t, 0, 0, 0, 10, &chars);
+  CHECK_EQ(chars.size(), size_t{3});
+  if (chars.size() == 3) {
+    CHECK_EQ(chars[1].offset, size_t{1});
+    CHECK_EQ(chars[1].length, size_t{4});
+    CHECK_EQ(chars[1].code_points, 2);
+    CHECK_EQ(chars[1].width, 2);
+    CHECK_EQ(chars[2].column, 3);
+  }
+}
+
+// [C6] Drawing and moving near the end of a 10MB line with clusters: the
+// segmentation runs from the nearest recorded state, not over the line.
+TEST(wrap_long_line_of_clusters_segments_only_near_the_rows_needed) {
+  std::wstring text;
+  text.reserve(5u << 20);
+  while (text.size() < (5u << 20)) text += L"ab é ☺️ \U0001F1EF\U0001F1F5 が ";
+  const PieceTree t(text);
+  WrapLayout l = make_layout(80);
+  const size_t rows = l.row_count(t, 0);  // walks the line once
+  CHECK(rows > 50000);
+  const size_t near_end = geditor::cluster_start(t, text.size() - 1000);
+  l.reset_scanned();
+  int column = 0;
+  const RowPos p = l.row_of(t, near_end, &column);
+  CHECK(l.scanned() <= WrapLayout::kCheckpointInterval);
+  l.reset_scanned();
+  std::vector<geditor::RowChar> chars;
+  l.row_chars(t, 0, p.row, 0, 81, &chars);
+  CHECK(!chars.empty());
+  CHECK_EQ(l.offset_at(t, 0, p.row, column), near_end);
+  CHECK(l.scanned() <= 2 * WrapLayout::kCheckpointInterval);
+  size_t scanned = 0;
+  geditor::prev_cluster_offset(t, near_end, &scanned);
+  geditor::next_cluster_offset(t, near_end, &scanned);
+  CHECK(scanned < 32);
 }

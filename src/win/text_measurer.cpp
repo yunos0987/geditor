@@ -78,6 +78,51 @@ class CharSource final : public IDWriteTextAnalysisSource {
   const wchar_t* locale_;
 };
 
+// Receives the script of the text from IDWriteTextAnalyzer::AnalyzeScript
+// (the first run: a cluster has one script). On the stack, like CharSource.
+class ScriptSink final : public IDWriteTextAnalysisSink {
+ public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override {
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteTextAnalysisSink)) {
+      *object = static_cast<IDWriteTextAnalysisSink*>(this);
+      return S_OK;
+    }
+    *object = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+  ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+  HRESULT STDMETHODCALLTYPE SetScriptAnalysis(UINT32 position, UINT32,
+                                              const DWRITE_SCRIPT_ANALYSIS* analysis) noexcept override {
+    if (!found && position == 0) {
+      script = *analysis;
+      found = true;
+    }
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE SetLineBreakpoints(UINT32, UINT32, const DWRITE_LINE_BREAKPOINT*) noexcept override {
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE SetBidiLevel(UINT32, UINT32, UINT8, UINT8) noexcept override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE SetNumberSubstitution(UINT32, UINT32, IDWriteNumberSubstitution*) noexcept override {
+    return S_OK;
+  }
+
+  DWRITE_SCRIPT_ANALYSIS script{};
+  bool found = false;
+};
+
+// The first code point of `text`.
+char32_t first_code_point(std::wstring_view text) {
+  if (text.empty()) return 0;
+  const char32_t c = static_cast<char32_t>(text[0]);
+  if (c >= 0xD800 && c <= 0xDBFF && text.size() > 1 && text[1] >= 0xDC00 && text[1] <= 0xDFFF) {
+    return 0x10000 + ((c - 0xD800) << 10) + (static_cast<char32_t>(text[1]) - 0xDC00);
+  }
+  return c;
+}
+
 // Identity of a font face: its first file's reference key, index and
 // simulations (different IDWriteFontFace objects can describe one face).
 std::vector<uint8_t> face_key(IDWriteFontFace* face) {
@@ -140,6 +185,8 @@ void TextMeasurer::release() {
   for (Face& f : faces_) safe_release(f.face);
   faces_.clear();
   cache_.clear();
+  clusters_.clear();
+  safe_release(analyzer_);
   for (bool& known : ascii_known_) known = false;
   safe_release(fallback_);
   safe_release(collection_);
@@ -353,6 +400,154 @@ TextMeasurer::Glyph TextMeasurer::fallback_glyph(char32_t c) {
   g.index = index;
   g.advance = advance_of(face_index, index);
   return g;
+}
+
+bool TextMeasurer::covers(uint16_t face, std::wstring_view text) const {
+  size_t i = 0;
+  while (i < text.size()) {
+    char32_t c = static_cast<char32_t>(text[i]);
+    size_t units = 1;
+    if (c >= 0xD800 && c <= 0xDBFF && i + 1 < text.size() && text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
+      c = 0x10000 + ((c - 0xD800) << 10) + (static_cast<char32_t>(text[i + 1]) - 0xDC00);
+      units = 2;
+    }
+    i += units;
+    // Joiners, variation selectors and tags: the shaper hides them.
+    const bool ignorable = (c >= 0x200B && c <= 0x200F) || (c >= 0x2060 && c <= 0x2064) ||
+                           (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0xE0000 && c <= 0xE0FFF);
+    if (!ignorable && glyph_index_in(face, c) == 0) return false;
+  }
+  return true;
+}
+
+bool TextMeasurer::map_cluster(std::wstring_view text, const wchar_t* base_family, uint16_t* face) {
+  CharSource source(text.data(), static_cast<UINT32>(text.size()), locale_);
+  UINT32 mapped_length = 0;
+  IDWriteFont* font = nullptr;
+  float scale = 1.0f;
+  if (FAILED(fallback_->MapCharacters(&source, 0, static_cast<UINT32>(text.size()), collection_, base_family,
+                                      DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                      DWRITE_FONT_STRETCH_NORMAL, &mapped_length, &font, &scale)) ||
+      font == nullptr) {
+    return false;
+  }
+  IDWriteFontFace* font_face = nullptr;
+  const bool ok = mapped_length > 0 && SUCCEEDED(font->CreateFontFace(&font_face)) &&
+                  add_face(font_face, em_ * scale, family_name(font), face);
+  safe_release(font_face);
+  safe_release(font);
+  return ok;
+}
+
+bool TextMeasurer::cluster_face(std::wstring_view text, bool emoji, uint16_t* face) {
+  if (!fallback_tried_) create_fallback();
+  if (fallback_ != nullptr) {
+    // MapCharacters for the whole cluster, from the primary family.
+    uint16_t mapped = 0;
+    const bool have = map_cluster(text, family_.c_str(), &mapped);
+    // A cluster shown as emoji (U+263A U+FE0F), which the primary family may
+    // have as text (U+263A in Consolas), or a font that lacks part of the
+    // cluster (U+20E3 of a keycap) would show a box: then the font that
+    // MapCharacters picks without the primary family, when it has all of it.
+    if (!have || emoji || !covers(mapped, text)) {
+      uint16_t other = 0;
+      if (map_cluster(text, L"", &other) && covers(other, text)) {
+        *face = other;
+        return true;
+      }
+    }
+    if (have) {
+      *face = mapped;
+      return true;
+    }
+  }
+  // No fallback: the face of the first code point when one has it.
+  const Glyph g = glyph(first_code_point(text));
+  if (g.index == 0) return false;
+  *face = g.face;
+  return true;
+}
+
+bool TextMeasurer::shape_cluster(std::wstring_view text, bool emoji, ClusterGlyphs* out) {
+  if (fail_next_shaping_) {
+    fail_next_shaping_ = false;
+    return false;
+  }
+  if (text.empty() || text.size() > 0xFFFF || factory_ == nullptr) return false;
+  uint16_t face = 0;
+  if (!cluster_face(text, emoji, &face)) return false;
+  if (analyzer_ == nullptr && FAILED(factory_->CreateTextAnalyzer(&analyzer_))) return false;
+  const UINT32 length = static_cast<UINT32>(text.size());
+  CharSource source(text.data(), length, locale_);
+  ScriptSink sink;
+  if (FAILED(analyzer_->AnalyzeScript(&source, 0, length, &sink)) || !sink.found) return false;
+
+  std::vector<UINT16> cluster_map(length);
+  std::vector<DWRITE_SHAPING_TEXT_PROPERTIES> text_props(length);
+  UINT32 max_glyphs = length * 3 / 2 + 16;
+  std::vector<UINT16> glyphs;
+  std::vector<DWRITE_SHAPING_GLYPH_PROPERTIES> glyph_props;
+  UINT32 count = 0;
+  HRESULT hr = E_NOT_SUFFICIENT_BUFFER;
+  for (int attempt = 0; attempt < 3 && hr == E_NOT_SUFFICIENT_BUFFER; ++attempt) {
+    glyphs.resize(max_glyphs);
+    glyph_props.resize(max_glyphs);
+    hr = analyzer_->GetGlyphs(text.data(), length, faces_[face].face, FALSE, FALSE, &sink.script, locale_,
+                              nullptr, nullptr, nullptr, 0, max_glyphs, cluster_map.data(), text_props.data(),
+                              glyphs.data(), glyph_props.data(), &count);
+    max_glyphs *= 2;
+  }
+  if (FAILED(hr) || count == 0) return false;
+  std::vector<FLOAT> advances(count);
+  std::vector<DWRITE_GLYPH_OFFSET> offsets(count);
+  if (FAILED(analyzer_->GetGlyphPlacements(text.data(), cluster_map.data(), text_props.data(), length,
+                                           glyphs.data(), glyph_props.data(), count, faces_[face].face,
+                                           faces_[face].em, FALSE, FALSE, &sink.script, locale_, nullptr,
+                                           nullptr, 0, advances.data(), offsets.data()))) {
+    return false;
+  }
+  bool any = false;
+  for (UINT32 i = 0; i < count; ++i) {
+    if (glyphs[i] != 0) any = true;
+  }
+  if (!any) return false;  // every glyph missing: the fallback shows the box
+  out->face = face;
+  out->glyphs.assign(glyphs.begin(), glyphs.begin() + count);
+  out->advances.assign(advances.begin(), advances.end());
+  out->offsets.assign(offsets.begin(), offsets.end());
+  out->width = 0;
+  for (const float a : out->advances) out->width += a;
+  out->shaped = true;
+  return true;
+}
+
+const TextMeasurer::ClusterGlyphs& TextMeasurer::cluster(std::wstring_view text, bool emoji) {
+  std::wstring key(text);
+  key.push_back(emoji ? L'1' : L'0');  // the presentation is part of the key
+  const auto it = clusters_.find(key);
+  if (it != clusters_.end()) return it->second;
+  ClusterGlyphs run;
+  if (!shape_cluster(text, emoji, &run)) {
+    // Decision C8: the first code point's glyph (the missing-glyph box of
+    // the primary font when no font has it), never nothing.
+    const Glyph g = glyph(first_code_point(text));
+    run = ClusterGlyphs();
+    run.face = g.face;
+    run.glyphs.push_back(g.index);
+    run.advances.push_back(g.advance);
+    run.offsets.push_back(DWRITE_GLYPH_OFFSET{0, 0});
+    run.width = g.advance;
+    run.shaped = false;
+  }
+  // A bound on the cache (clusters of more than one code point are rare).
+  if (clusters_.size() >= 4096) clusters_.clear();
+  return clusters_.emplace(std::move(key), std::move(run)).first->second;
+}
+
+std::wstring TextMeasurer::family_of_cluster(std::wstring_view text, bool emoji) {
+  const ClusterGlyphs& run = cluster(text, emoji);
+  if (run.face >= faces_.size()) return std::wstring();
+  return faces_[run.face].family;
 }
 
 }  // namespace geditor::win

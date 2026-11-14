@@ -62,6 +62,7 @@ build/release/geditor.exe [--settings=PATH] [+LINE] [file]
 - 設定ファイルは起動時に同期で読み、初回描画の後に別スレッドで監視する。保存すると約 200ms 後に読み直す。構文の誤りはファイル全体を採用せず、意味の誤りはその項目だけ無視する。誤りは行・桁付きでエコー領域に出し、2 件以上ならエコー領域を最大 10 行まで広げる（ウィンドウが低いときはモードラインと本文 1 行が残る行数まで。収まらない分は最後の行の `... and N more` に数える。次のキーで 1 行に戻る）。`M-x find-user-init-file` で設定ファイルを開く（無ければ書き方の例を入れた未保存の新規バッファになる）
 - M3a までに反映する項目: キー設定（`keys` / `minibuffer_keys` / `isearch_keys` / `query_replace_keys`）と表示の項目（`font` / `colors` / `tab_width` / `line_numbers` / `wrap` / `whitespace` / `eol_marks`）。`colors` の `search_match` / `search_current` は検索（M5）まで、`eol_other` は改行コードの混在（M4）まで使わない。M3b で `menu_bar` も反映する（読み直すとその場でメニューバーを出し入れし、先頭の行は変えない）。ほかの項目は型と値を検査して保持し、後の段階で使う
 - 入っていないフォント名（`font.family` / `font.fallback`）はエコー領域に `Font not found: <name>` と出し、Consolas（とシステムの代替フォント）を使う。出すのは `font.family` / `font.fallback` の値が変わったときだけで、text-scale・DPI の変更・`font.size` だけの変更でフォントを作り直しても繰り返さない。`font.fallback` を書かなければシステムの代替フォントだけを使う
+- F10（`menu-bar-open`）は File メニューを下に開いた状態でメニューに入る。F10 を押している間は待ち、離したときに開く（離す操作でメニューから抜けないため）。左右キーはメニューバーの端で折り返し、システムメニューへは移らない（Alt+Space では開く）
 - View のコマンド（`toggle-line-numbers` / `toggle-eol-marks` / `toggle-whitespace-marks` / `set-wrap-mode`）と text-scale（`C-x C-+` / `C-x C--` / `C-x C-0`、1 段 1.2 倍、6〜200 ピクセル）はそのウィンドウだけに効き、設定ファイルには書かない。設定を読み直しても、その項目のファイルの値が変わるまでは切り替えた値を保つ
 - メニュー（M3b、PLAN 4.9）: 中身はコアの `src/core/menu.*` にデータとして持ち、`src/win/menu_bar.*` がそれだけから `HMENU` を組み立てる。メニューバーは初回描画から出す。各項目の右には、今のキーマップでその項目のコマンド（と引数）にちょうど割り当たっているキー列のうち最も短いものを 1 つ出す（同じ長さなら設定ファイル > Windows 互換キー > Emacs の順で先に見つかったもの。例: Undo は `C-M-z`、Save は `C-M-s`。`C-c &` のようにキーに `&` があれば、メニューの文字列では `&&` と書いてアクセスキーにしない）。表示・灰色・チェックとラジオは `WM_INITMENUPOPUP` でそのつどコアに問い合わせる。灰色になるのは未実装のコマンドの項目と、ミニバッファの途中の全項目だけ（Cut / Copy はリージョンが無くても選べ、コマンドが理由を表示する）。File メニューのチェックとラジオは M4-9 まで付かない。F10（`menu-bar-open`）とマウスでメニューに入る。Alt+英字はキーマップのまま（`M-f` は `forward-word`）、Alt 単独ではメニューに入らない。アクセスキー（`&Undo` など）はメニューに入ってからだけ効く。`menu_bar: false` ではメニューバーが消え、F10 は `Menu bar is hidden` と出す
 - 右クリックの簡易メニュー（Undo / Redo / Cut / Copy / Paste / Select All）は Edit メニューの先頭の項目そのもの（同じ定義）から作る。マウスではその位置に、Apps キーと Shift+F10（`S-<f10>` に割り当てが無いとき）ではカーソルの位置に出す。右クリックではカーソルと選択範囲を動かさない。`menu_bar: false` でも出る
@@ -89,6 +90,8 @@ python tools/app_check.py build/release/geditor.exe --only-retry1
 python tools/app_check.py build/release/geditor.exe --only-m2
 python tools/app_check.py build/release/geditor.exe --only-m3a
 python tools/app_check.py build/release/geditor.exe --only-m3b
+python tools/app_check.py build/release/geditor.exe --only-m3c
+python tools/app_check.py build/release/geditor.exe --visible --only-m3c   # F10: needs the unlocked desktop
 python tools/app_check.py build/release/geditor.exe --only-headless
 python tools/app_check.py build/release/geditor.exe --visible --only-visible
 python tools/app_check.py build/release/geditor.exe --visible --only-m3b
@@ -113,6 +116,8 @@ python tools/app_check.py build/release/geditor.exe --visible --only-m3b
 - `--only-m2` は設定ファイルの確認（M2）だけを行う。geditor の起動中に設定ファイルを書き換えて、キーの割り当てが効くまでの時間を測り（1 秒以内）、構文の誤りで直前の設定が残ること、誤りが 4 件のときにエコー領域が 4 行に広がり次のキーで 1 行に戻ること、ファイルを消すと既定に戻ること、他のプログラムが共有なしで開いている間は読めない理由を表示して直前の設定を保つこと、`find-user-init-file` が例の入った未保存のバッファを開き、保存した例が誤りなしで読めることを確かめる。最後に、無いフォルダーの設定ファイルを指定して監視を始められないことの表示を確かめる
 - `--only-m3a` は表示の確認（M3a）だけを行う。起動中に設定ファイルの表示項目を 1 つずつ書き換えて画面の画素を調べる（原色の配色で色を見分ける）。View のコマンドを M-x から実行し、text-scale のキー、`WM_VSCROLL`、本物の `WM_DPICHANGED`（lParam の RECT は Windows が geditor 側へ写す）を送る。フォントと描画先（render target）の作成をわざと失敗させるときは `WM_COPYDATA`（`dwData` = `'GFLT'`、本文 `font` か `target`）を送る。最後に `[C4 table]` の行で「設定項目 | 画像 | 見えるもの」の表を出す
 - `--only-m3b` はメニューとマウスの確認（M3b）だけを行う。クリック・ドラッグ（下へはみ出したときの自動スクロールと離したときの停止）・ダブルクリック・Shift+クリック・ホイール（1 刻みに満たない量の累積）・undo の区切り・何もしないクリックを `PostMessage` のマウスのメッセージで確かめ、`shots/m3b_*.png` に撮る。本物のメニューバーを `GetMenu` と `GetMenuItemInfoW` で（`WM_INITMENUPOPUP` を送ってから）読んでコアの表と比べ、`WM_COMMAND` で項目を実行し、F10 と右クリックで待っているメニューに答える。`menu_bar: false` の出し入れ、Alt+F と Alt 単独、メニューと右クリックメニューの作成失敗の表示も確かめる。`--visible --only-m3b` は本物のメニューループ・システムメニュー・右クリックメニューを `PrintWindow` で撮る
+- `--only-m3c` は書記素クラスタと F10 の確認（M3c）だけを行う。U+FE0F 付きの絵文字・ZWJ でつないだ家族・国旗・キーキャップ・か＋゛ が ASCII の隣で 2 升に描かれ、カーソルがその後ろに来ること（画素で調べる）、DEL 1 回で消えて undo 1 回で戻ることを確かめる。形を作るのをわざと失敗させるときは `WM_COPYDATA`（`dwData` = `'GFLT'`、本文 `shape`）を送る。M-x の途中で ESC を 3 回送るとミニバッファが `Quit` で閉じること（ESC 2 回では待つこと）、F10 は保留中の `menu_bar` の質問と、開くサブメニュー（状態の `menu_open=File`）を確かめる
+- `--visible --only-m3c` は本物の F10 を `SendInput` で押して離し、File メニューが下に開いて離した後も残ること、右キーで Edit、左キーで File と View（端で折り返す）へ移ること、Esc で閉じることを状態の `menu_popup` / `menu_loop_active` と `#32768` の窓で確かめる。前面を取るので、利用者がデスクトップを使っていないときに実行する
 - `tools/` のスクリプトは `__pycache__` を作業ツリーに残さない（`sys.dont_write_bytecode` と、`app_driver.py` が読み込み時に自分の `.pyc` を消す処理による）
 - ヘッドレスではいつも `PostMessage` で `WM_KEYDOWN` / `WM_CHAR` を送り、修飾キーの状態は `AttachThreadInput` と `SetKeyboardState` で与える。`--visible` では、画面がロックされていなければ `SendInput` で打鍵する（geditor を前面に出してから送り、前面でなければ送らずに止まる）。ロック中か `--input post` なら `PostMessage` で送る（`--input post` では geditor を `SW_SHOWNOACTIVATE` で起動し、前面を取らない）。どちらで動いたかは `input mode` の行に出る
 - `--visible` で画面がロックされていると `OpenClipboard` がアクセス拒否になるため、クリップボードを使う確認は SKIP になる（geditor 側の書き込み失敗の表示は確かめる）。`--visible` では実行の前後でクリップボードの文字列を保存・復元する（ヘッドレスでは触れない）
@@ -123,7 +128,7 @@ python tools/app_check.py build/release/geditor.exe --visible --only-m3b
 
 ## 構成
 
-- `src/core/`: 編集の核（静的ライブラリ `geditor_core`）。piece tree・undo・文字コード・キー表記・キーマップ・コマンド・ミニバッファ・升目計算・JSONC パーサー（`jsonc.*`。リポジトリで唯一の JSON パーサー）・設定の検査とキーマップの層（`config.*`）を持つ。折り返し（論理行を画面の行に分ける計算。長い行は 64K 文字ごとの区切りを記録して再利用する）は `layout.*` の `WrapLayout` にあり、描画・上下移動・スクロール・スクロールバーのすべてがこれを使う（描画側で折り返し位置を計算しない）。行番号の幅・空白記号・改行記号・text-scale の大きさ・View の切り替えは `display.*`。メニューの中身（項目・コマンドと引数・区切り線・サブメニュー・チェックとラジオ・有効無効・キー表示）は `menu.*`、ホイールの量の累積は `mouse.*`。ファイル・クリップボード・ダイアログ・ウィンドウ起動などの環境依存の処理は `src/core/host.h` の `Host`（抽象クラス）を通して呼ぶ。Win32 側（`src/win/`）がこれを実装し、テストは `tests/fake_host.*` の偽物を使う
+- `src/core/`: 編集の核（静的ライブラリ `geditor_core`）。書記素クラスタの区切りと幅（`grapheme.*`）・piece tree・undo・文字コード・キー表記・キーマップ・コマンド・ミニバッファ・升目計算・JSONC パーサー（`jsonc.*`。リポジトリで唯一の JSON パーサー）・設定の検査とキーマップの層（`config.*`）を持つ。折り返し（論理行を画面の行に分ける計算。長い行は 64K 文字ごとの区切りを記録して再利用する）は `layout.*` の `WrapLayout` にあり、描画・上下移動・スクロール・スクロールバーのすべてがこれを使う（描画側で折り返し位置を計算しない）。行番号の幅・空白記号・改行記号・text-scale の大きさ・View の切り替えは `display.*`。メニューの中身（項目・コマンドと引数・区切り線・サブメニュー・チェックとラジオ・有効無効・キー表示）は `menu.*`、ホイールの量の累積は `mouse.*`。ファイル・クリップボード・ダイアログ・ウィンドウ起動などの環境依存の処理は `src/core/host.h` の `Host`（抽象クラス）を通して呼ぶ。Win32 側（`src/win/`）がこれを実装し、テストは `tests/fake_host.*` の偽物を使う
 - `geditor_core` には `user32` などの UI 系ライブラリをリンクしない
 - `src/win/`: Win32 層。`window.*`（ウィンドウ・メッセージ・`Host` の実装）、`input.*`（キー変換）、`renderer.*` と `text_measurer.*`（Direct2D / DirectWrite の升目描画と代替フォント）、`ime.*`、`clipboard.*`、`file_io.*`、`dialogs.*`（TaskDialog）、`process.*`（新しいウィンドウ）、`command_line.*`、`measure.*`（起動・打鍵の計測）、`config_watcher.*`（設定ファイルの監視スレッド）、`menu_bar.*`（コアのメニューから `HMENU` を組み立て、`WM_INITMENUPOPUP` で更新し、読み戻す）、`question.h`（確認の文言とボタン。TaskDialog とヘッドレスが共用。ヘッドレスのメニューもここで確認の形にする）、`headless.h`（ヘッドレスの `WM_COPYDATA` と状態の書式）。キー変換・起動引数・クリップボードの改行変換・ファイル種別の判定・`HMENU` の組み立てなどウィンドウなしで試せる部分は静的ライブラリ `geditor_win_logic` にまとめ、テストからも使う。`text_measurer.*` は静的ライブラリ `geditor_text`（`dwrite` をリンク）にして、どのフォントで文字を描くかをテストからも確かめる
 - 高 DPI は Per-Monitor V2（`geditor.manifest` と `SetProcessDpiAwarenessContext`）。`WM_DPICHANGED` でフォントと升目を作り直し、勧められた大きさに変え、先頭の行を保つ。ウィンドウの右端に Win32 の縦スクロールバーを初回描画の後から常に出す（初回の描画を起動時間に含めないため。位置は論理行で近似）
@@ -131,19 +136,38 @@ python tools/app_check.py build/release/geditor.exe --visible --only-m3b
 - `tests/`: `geditor_tests`（ctest に登録）と `tests/perf/` の `geditor_perf`（登録しない）。`test_win_font.cpp` は本物の DirectWrite で、英字が Consolas、日本語と絵文字が代替フォントで描かれることを確かめ、選ばれたフォント名を表示する
 - `.clangd` は `build/release/compile_commands.json` を読む（`cmake --preset release` で作られる）
 
-## 文字幅表の生成
+## 文字幅表と書記素クラスタ表の生成
 
-`src/core/char_width_table.inc` は `tools/gen_char_width.py` が Unicode Character Database から作る生成物で、手で直さない。Unicode を更新するときは、新しい空のフォルダーに次の 3 ファイルを置いて実行する（`<version>` は unicode.org の最新版。生成物の先頭に版が記録される）:
+次の 3 つは `tools/gen_char_width.py` が Unicode Character Database から作る生成物で、手で直さない。
+
+- `src/core/char_width_table.inc`: 文字幅表（各文字の 0 / 1 / 2 桁）
+- `src/core/grapheme_table.inc`: 書記素クラスタの区切りと桁の数え方に使う性質（Grapheme_Cluster_Break・Extended_Pictographic・Indic_Conjunct_Break・Emoji_Presentation・Emoji_Modifier・Emoji）と、文字幅表と同じ桁（レイアウトが 1 回の表引きで性質と桁を得るため。テストが全コードポイントで文字幅表と一致することを確かめる）
+- `tests/grapheme_break_test.inc`: `GraphemeBreakTest.txt` の全例（テストが全例を確かめる）
+
+Unicode を更新するときは、新しい空のフォルダーに次の 6 ファイルを置いて実行する（`<version>` は unicode.org の最新版。6 ファイルの版が揃っていないと止まる。生成物の先頭に版が記録される）:
 
 - `https://www.unicode.org/Public/<version>/ucd/EastAsianWidth.txt`
 - `https://www.unicode.org/Public/<version>/ucd/DerivedCoreProperties.txt`
 - `https://www.unicode.org/Public/<version>/ucd/extracted/DerivedGeneralCategory.txt`
+- `https://www.unicode.org/Public/<version>/ucd/auxiliary/GraphemeBreakProperty.txt`
+- `https://www.unicode.org/Public/<version>/ucd/auxiliary/GraphemeBreakTest.txt`
+- `https://www.unicode.org/Public/<version>/ucd/emoji/emoji-data.txt`
 
 ```powershell
 python -I tools/gen_char_width.py <folder>
 ```
 
-同じ入力からは同じバイト列が出る。幅の規則（0 / 1 / 2 桁）はスクリプト冒頭の説明にある。
+同じ入力からは同じバイト列が出る。幅の規則（0 / 1 / 2 桁）はスクリプト冒頭の説明にある。区切りの規則（UAX #29 の GB1〜GB999）が版で変わったときは `src/core/grapheme.cpp` の `GraphemeBreaker::next` も直す（18.0.0 では GB9c が「Linker の後の Consonant」になった）。
+
+## 書記素クラスタ
+
+カーソル・削除・単語移動の端・マウスの位置・折り返し・選択範囲の端・桁は、拡張書記素クラスタ（UAX #29）を単位にする（`docs/PLAN.md` 2 章のカーソル単位・桁の数え方）。
+
+- 区切りと幅は `src/core/grapheme.*` だけが決める。レイアウト・コマンド・マウス・表示の行・エコー領域・描画はこれを使い、描画側で区切りを数えない
+- クラスタの幅: 絵文字として表示するもの（Emoji の性質を持つ文字の後に U+FE0F（`g` ＋ U+FE0F は文字のまま）、肌の色、絵文字どうしを ZWJ でつないだもの、国旗の 2 文字、先頭が Emoji_Presentation の文字。地域指示子 1 文字は除く）は 2 桁。それ以外は先頭の文字の幅（幅 0 の文字だけのクラスタは 0）
+- 外から来た位置（`set_point`・マウス・`+LINE`）と、編集でクラスタがつながったときの point / mark は、その位置以前のクラスタの境目に寄せる
+- 長い行は 64K 単位ごとの記録（区切りの状態も持つ）から数え直すので、区切りの計算は描く行と動く位置の近くだけで行う
+- 複数の文字からなるクラスタは、`MapCharacters` が選んだ 1 つのフォントで 1 つの文字列として形を作り（絵文字として表示するクラスタや、選ばれたフォントにない文字があるときは、主フォントを指定しない `MapCharacters` の結果を使う）、升目より広ければ横に縮める。絵文字は単色のまま。どのフォントにも無いときや形を作れないときは、先頭の文字のグリフ（無ければ欠字の箱）を描く
 
 ## コードの約束
 

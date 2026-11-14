@@ -41,8 +41,14 @@ constexpr UINT kDragScrollMs = 50;
 constexpr DWORD kToUnicodeNoStateChange = 0x4;  // Windows 10 1607 and later
 constexpr ULONG_PTR kCopyDataCapture = 0x50414347;  // 'GCAP': WM_COPYDATA screenshot
 // 'GFLT': WM_COPYDATA from tools/app_check.py; the payload (UTF-16) "target"
-// or "font" makes the next render target / font creation fail.
+// or "font" makes the next render target / font creation fail ("shape": the
+// next shaping of a grapheme cluster).
 constexpr ULONG_PTR kCopyDataFault = 0x544C4647;
+// menu-bar-open queues a Down key for the menu loop so that the File menu
+// drops down (decision G7). Bit 29 (the context code) is never set in a real
+// WM_KEYDOWN, so the window can tell this one apart and drop it when no menu
+// loop took it.
+constexpr LPARAM kMenuDropDownLParam = 0x20000001;
 // --headless: the window starts this far right of the virtual screen (no
 // monitor shows it) with this size; the tools resize it in place.
 constexpr int kHeadlessGap = 200;
@@ -95,6 +101,24 @@ double ms_between(const LARGE_INTEGER& from, const LARGE_INTEGER& to) {
   QueryPerformanceFrequency(&frequency);
   return static_cast<double>(to.QuadPart - from.QuadPart) * 1000.0 /
          static_cast<double>(frequency.QuadPart);
+}
+
+// The name of drop-down `menu` for the state: "System" for the system menu,
+// the title of a menu bar item ("File") without '&', "Submenu" otherwise.
+std::wstring menu_popup_name(HMENU bar, HMENU menu, bool system_menu) {
+  if (system_menu) return L"System";
+  const int count = bar != nullptr ? GetMenuItemCount(bar) : 0;
+  for (int i = 0; i < count; ++i) {
+    if (GetSubMenu(bar, i) != menu) continue;
+    wchar_t title[64] = {};
+    GetMenuStringW(bar, static_cast<UINT>(i), title, 64, MF_BYPOSITION);
+    std::wstring name;
+    for (const wchar_t* p = title; *p != 0; ++p) {
+      if (*p != L'&') name += *p;
+    }
+    return name;
+  }
+  return L"Submenu";
 }
 
 }  // namespace
@@ -228,6 +252,10 @@ bool MainWindow::pre_translate(const MSG& msg) {
   if (msg.hwnd != hwnd_ || (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN)) {
     return false;
   }
+  // The Down key of enter_menu_bar that no menu loop took: dropped.
+  if (msg.message == WM_KEYDOWN && msg.wParam == VK_DOWN && msg.lParam == kMenuDropDownLParam) return true;
+  // Another key before the release that would open the menu bar cancels it.
+  if (menu_key_ != 0 && msg.wParam != menu_key_) menu_key_ = 0;
   ModifierState mods;
   mods.ctrl = GetKeyState(VK_CONTROL) < 0;
   mods.alt = GetKeyState(VK_MENU) < 0;
@@ -246,6 +274,7 @@ bool MainWindow::pre_translate(const MSG& msg) {
   }
   start_input_measure();
   chars_.reset();
+  last_key_vk_ = static_cast<UINT>(msg.wParam);
   handle_key(*key);
   return true;
 }
@@ -439,12 +468,42 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wparam, LPARAM lparam) {
       }
       break;
     }
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+      if (menu_key_ != 0 && wparam == menu_key_) {
+        // Decision G7: the key that ran menu-bar-open is up; the menu bar
+        // opens now, so that this release does not leave it at once.
+        menu_key_ = 0;
+        PostMessageW(hwnd_, kMsgOpenMenu, 0, 0);
+        return 0;
+      }
+      break;
+    case WM_KILLFOCUS:
+      menu_key_ = 0;
+      break;
     case WM_ENTERMENULOOP:
       ++menu_loops_;
+      menu_loop_active_ = true;
+      menu_popup_.clear();
+      menu_popups_.clear();
+      break;
+    case WM_EXITMENULOOP:
+      menu_loop_active_ = false;
+      menu_popup_.clear();
       break;
     case WM_INITMENUPOPUP:
+      note_menu_popup(reinterpret_cast<HMENU>(wparam), HIWORD(lparam) != 0);
       // Decision B1 / B2 and PLAN 4.9: texts, grey items and marks of now.
       update_menu(reinterpret_cast<HMENU>(wparam), editor_);
+      return 0;
+    case WM_UNINITMENUPOPUP:
+      // Only the drop-down shown now (the next one may open first).
+      if (menu_popup_name(GetMenu(hwnd_), reinterpret_cast<HMENU>(wparam), HIWORD(lparam) != 0) == menu_popup_) {
+        menu_popup_.clear();
+      }
+      break;
+    case WM_NEXTMENU:
+      handle_next_menu(wparam, reinterpret_cast<MDINEXTMENU*>(lparam));
       return 0;
     case WM_COMMAND:
       if (HIWORD(wparam) == 0 && lparam == 0) {
@@ -735,6 +794,10 @@ LRESULT MainWindow::handle_copy_data(const COPYDATASTRUCT* data) {
         fail_next_popup_ = true;
         return 1;
       }
+      if (*text == L"shape") {
+        renderer_.fail_next_shaping();
+        return 1;
+      }
       if (headless_ && *text == L"clipboard-read") {
         fail_clipboard_read_ = true;
         return 1;
@@ -838,6 +901,12 @@ bool MainWindow::write_state(const std::wstring& path) {
   text += state_line(L"menu_loops", std::to_wstring(menu_loops_));
   text += state_line(L"keymenu_count", std::to_wstring(keymenu_count_));
   text += state_line(L"last_keymenu", last_keymenu_);
+  // The menu loop of a visible window (decision G7): whether it runs, the
+  // drop-down open now and those opened in it.
+  text += state_line(L"menu_loop_active", menu_loop_active_ ? L"1" : L"0");
+  text += state_line(L"menu_popup", menu_popup_);
+  text += state_line(L"menu_popups", menu_popups_);
+  text += state_line(L"menu_key_waiting", menu_key_ != 0 ? L"1" : L"0");
   text += state_line(L"rejected", std::to_wstring(rejected_requests_));
   text += state_line(L"last_rejected", last_rejected_);
   text += question_ != nullptr ? question_state(*question_) : state_line(L"question", L"none");
@@ -1135,9 +1204,29 @@ void MainWindow::enter_menu_bar() {
     return;
   }
   if (!headless_) {
+    // Decision G7: while the key that ran menu-bar-open (F10) is held, wait
+    // for its release (WM_KEYUP / WM_SYSKEYUP): a menu loop entered before
+    // the release would leave the menu bar on it.
+    if (last_key_vk_ != 0 && GetKeyState(static_cast<int>(last_key_vk_)) < 0) {
+      menu_key_ = last_key_vk_;
+      return;
+    }
+    menu_key_ = 0;
+    // The File menu dropped down (PLAN 4.2, as Emacs): a Down key waits in
+    // the queue for the menu loop, which selects the first item of the bar.
+    PostMessageW(hwnd_, WM_KEYDOWN, VK_DOWN, kMenuDropDownLParam);
+    const unsigned loops = menu_loops_;
     // PLAN 4.2: straight to DefWindowProc, past the Alt-alone filter of
     // handle_message.
     DefWindowProcW(hwnd_, WM_SYSCOMMAND, SC_KEYMENU, 0);
+    if (menu_loops_ == loops) {
+      // No menu loop ran: take the Down key back (pre_translate drops it too).
+      MSG msg{};
+      if (PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_NOREMOVE) && msg.wParam == VK_DOWN &&
+          msg.lParam == kMenuDropDownLParam) {
+        PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE);
+      }
+    }
     return;
   }
   MENUBARINFO info{};
@@ -1149,6 +1238,30 @@ void MainWindow::enter_menu_bar() {
   }
   const UINT id = ask_headless_menu(QuestionKind::kMenuBar, bar, position);
   if (id != 0) PostMessageW(hwnd_, WM_COMMAND, id, 0);  // as the menu loop sends it
+}
+
+void MainWindow::handle_next_menu(WPARAM key, MDINEXTMENU* next) {
+  // Left from the first drop-down / Right from the last one: the menu loop
+  // asks where to go next; the menu bar itself again (its last / first item)
+  // instead of the system menu. Alt+Space still opens the system menu, and
+  // a loop in the system menu keeps the default.
+  HMENU bar = GetMenu(hwnd_);
+  if (next == nullptr || bar == nullptr || (key != VK_LEFT && key != VK_RIGHT)) return;
+  if (next->hmenuIn != bar) {
+    bool in_bar = false;
+    for (int i = 0; i < GetMenuItemCount(bar); ++i) {
+      if (GetSubMenu(bar, i) == next->hmenuIn) in_bar = true;
+    }
+    if (!in_bar) return;
+  }
+  next->hmenuNext = bar;
+  next->hwndNext = hwnd_;
+}
+
+void MainWindow::note_menu_popup(HMENU menu, bool system_menu) {
+  menu_popup_ = menu_popup_name(GetMenu(hwnd_), menu, system_menu);
+  if (!menu_popups_.empty()) menu_popups_ += L",";
+  menu_popups_ += menu_popup_;
 }
 
 UINT MainWindow::ask_headless_menu(QuestionKind kind, HMENU menu, POINT position) {

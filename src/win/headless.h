@@ -19,7 +19,8 @@
 // Headless menus (decision B7): menu-bar-open (F10) and WM_CONTEXTMENU do
 // not show a menu; the menu is pending in the state as a question
 // ("menu_bar" / "context_menu") with every item of the built HMENU
-// (menu_item lines) and its position (menu_x, menu_y).
+// (menu_item lines) and its position (menu_x, menu_y); the menu bar also
+// names the submenu that a visible window drops down (menu_open: File).
 // A request that is not understood returns 0, is counted in the state
 // ("rejected", "last_rejected") and goes to OutputDebugString.
 #pragma once
@@ -127,6 +128,7 @@ inline std::wstring question_state(const Question& q) {
   if (q.kind == QuestionKind::kMenuBar || q.kind == QuestionKind::kContextMenu) {
     text += state_line(L"menu_x", std::to_wstring(q.menu_position.x));
     text += state_line(L"menu_y", std::to_wstring(q.menu_position.y));
+    if (q.kind == QuestionKind::kMenuBar) text += state_line(L"menu_open", q.menu_open);
     for (const MenuEntry& e : q.menu) text += state_line(L"menu_item", menu_entry_text(e));
   }
   return text;

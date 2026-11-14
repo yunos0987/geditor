@@ -1,8 +1,9 @@
 // Direct2D drawing of the editor (docs/PLAN.md 4.6 / 4.7): the line-number
 // gutter and the text area on a cell grid, the mode line and the echo area /
 // minibuffer line (several lines while settings errors are shown). The rows,
-// their wrap positions and their whitespace / end-of-line marks come from the
-// core (Editor::display_row); this file only draws them. Rows wider than the
+// their wrap positions, their grapheme clusters and widths and their
+// whitespace / end-of-line marks come from the core (Editor::display_row,
+// grapheme.h); this file only draws them, one cluster in its cells. Rows wider than the
 // window (wrap "none", or "fixed" wider than the window) scroll horizontally.
 #pragma once
 
@@ -63,6 +64,8 @@ class Renderer {
   // fails as if Direct2D / DirectWrite had refused it.
   void fail_next_target() { fail_next_target_ = true; }
   void fail_next_font() { fail_next_font_ = true; }
+  // The next shaping of a cluster fails (TextMeasurer::fail_next_shaping).
+  void fail_next_shaping() { measurer_.fail_next_shaping(); }
 
   // Full text rows that fit in a client area `height_dip` high with an echo
   // area of `echo_rows` lines.
@@ -99,10 +102,15 @@ class Renderer {
 
  private:
   struct Cell {
-    char32_t c;
+    char32_t c;  // the first code point of the cluster
     int column;  // relative to the first visible column
-    int width;   // cells (0 for combining marks)
+    int width;   // cells (0 for zero-width clusters)
     size_t offset;
+    // A cluster of several code points: its text in cluster_text_ (length 0
+    // for one code point, which is drawn from `c`).
+    size_t text_begin = 0;
+    size_t text_length = 0;
+    bool emoji = false;  // shown as an emoji (from the core)
   };
 
   bool ensure_target(HWND hwnd);
@@ -115,10 +123,18 @@ class Renderer {
   // The echo area from `y` down: one line, or the lines of a multi-line
   // message (settings errors) followed by the minibuffer line when active.
   void draw_echo_area(const Editor& editor, ViewState& view, float y, float width, int rows);
-  void draw_echo_line(std::wstring_view text, float y, int columns, D2D1_COLOR_F color);
-  // Collect the cells of columns [left, left + columns) of `s` into cells_.
+  // One line of the echo area from `x` DIPs right of the margin.
+  void draw_echo_line(std::wstring_view text, float y, int columns, D2D1_COLOR_F color, float x = 0);
+  // Collect the clusters of columns [left, left + columns) of `s` into
+  // cells_ (the core's segmentation and widths).
   int collect_string(std::wstring_view s, int left, int columns, int tab_width);
+  // Appends a cell; a cluster of several code points keeps its text.
+  void add_cell(char32_t c, int column, int width, size_t offset, int code_points, bool emoji,
+                std::wstring_view text);
   void draw_cells(float x0, float top, D2D1_COLOR_F color);
+  // Draws a cluster of several code points into its cells at x (squeezed
+  // when wider), or over the base at `base_x` when it has no cells.
+  void draw_cluster(const Cell& cell, float x, float baseline);
   void flush_run(uint16_t face, float x, float baseline);
   void fill(float left, float top, float right, float bottom, D2D1_COLOR_F color);
 
@@ -136,6 +152,7 @@ class Renderer {
   bool fail_next_font_ = false;
   DisplayRow row_;
   std::vector<Cell> cells_;
+  std::wstring cluster_text_;  // texts of the multi-code-point clusters of cells_
   std::vector<UINT16> run_glyphs_;
   std::vector<FLOAT> run_advances_;
 };

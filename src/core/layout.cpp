@@ -10,55 +10,21 @@
 namespace geditor {
 namespace {
 
-// Calls f(code_point, offset, units) for each code point in [begin, end).
-// f returns false to stop.
-template <typename F>
-void for_each_code_point(const PieceTree& tree, size_t begin, size_t end, F&& f) {
-  if (end <= begin) return;
-  wchar_t pending = 0;
-  size_t offset = begin;
-  bool stop = false;
-  tree.for_each_chunk(begin, end - begin, [&](std::wstring_view chunk) {
-    for (const wchar_t w : chunk) {
-      if (pending != 0) {
-        const wchar_t high = pending;
-        pending = 0;
-        if (is_low_surrogate(w)) {
-          if (!f(combine_surrogates(high, w), offset, size_t{2})) {
-            stop = true;
-            return false;
-          }
-          offset += 2;
-          continue;
-        }
-        if (!f(static_cast<char32_t>(high), offset, size_t{1})) {
-          stop = true;
-          return false;
-        }
-        offset += 1;
-      }
-      if (is_high_surrogate(w)) {
-        pending = w;
-        continue;
-      }
-      if (!f(static_cast<char32_t>(w), offset, size_t{1})) {
-        stop = true;
-        return false;
-      }
-      offset += 1;
-    }
-    return true;
-  });
-  if (!stop && pending != 0) f(static_cast<char32_t>(pending), offset, size_t{1});
+// Cells of cluster `c` starting at `column` (TAB to the next stop).
+int cluster_advance(const Cluster& c, int column, int tab_width) {
+  if (c.first == U'\t') return cell_advance(U'\t', column, tab_width);
+  return c.width;
 }
 
 }  // namespace
 
 int column_at(const PieceTree& tree, size_t offset, int tab_width) {
-  const size_t start = tree.line_start(tree.line_of(offset));
+  const size_t line = tree.line_of(offset);
+  const size_t start = tree.line_start(line);
   int column = 0;
-  for_each_code_point(tree, start, offset, [&](char32_t c, size_t, size_t) {
-    column += cell_advance(c, column, tab_width);
+  for_each_cluster(tree, start, tree.line_end(line), GraphemeBreaker(), nullptr, [&](const Cluster& c) {
+    if (c.offset >= offset) return false;
+    column += cluster_advance(c, column, tab_width);
     return true;
   });
   return column;
@@ -69,10 +35,10 @@ size_t offset_at_column(const PieceTree& tree, size_t line, int column, int tab_
   const size_t end = tree.line_end(line);
   size_t result = end;
   int col = 0;
-  for_each_code_point(tree, start, end, [&](char32_t c, size_t off, size_t) {
-    const int w = cell_advance(c, col, tab_width);
+  for_each_cluster(tree, start, end, GraphemeBreaker(), nullptr, [&](const Cluster& c) {
+    const int w = cluster_advance(c, col, tab_width);
     if (col + w > column || (w > 0 && col == column)) {
-      result = off;
+      result = c.offset;
       return false;
     }
     col += w;
@@ -116,11 +82,6 @@ namespace {
 
 constexpr size_t kMaxLineCaches = 8;
 constexpr size_t kNone = ~size_t{0};
-
-int cells_of(char32_t c) {
-  if (c >= 0x20 && c < 0x7F) return 1;
-  return char_width(c);
-}
 
 }  // namespace
 
@@ -239,9 +200,11 @@ void WrapLayout::note_wrap_edit(size_t offset) {
       continue;
     }
     if (offset <= c.end) {
-      // The states before the edit stay valid. A state at the edit offset
-      // itself is dropped too: an inserted low surrogate could join the
-      // character before it.
+      // The states before the edit stay valid: a state is taken before the
+      // row break of its cluster is decided, and the segmentation state
+      // before a position depends on the text before it only. A state at
+      // the edit offset itself is dropped too: inserted text (a combining
+      // mark, a low surrogate) could join the cluster before it.
       while (c.states.size() > 1 && c.states.back().offset >= offset) c.states.pop_back();
       if (c.has_break && c.last_break.offset >= offset) c.has_break = false;
       c.complete = false;
@@ -258,7 +221,7 @@ WrapLayout::LineCache* WrapLayout::cache_for(const PieceTree& tree, size_t line)
     if (c.line != line) continue;
     if (c.start != start) {
       c.start = start;
-      c.states.assign(1, State{start, 0, 0, 0});
+      c.states.assign(1, State{start, 0, 0, 0, GraphemeBreaker()});
       c.complete = false;
       c.has_break = false;
     }
@@ -275,7 +238,7 @@ WrapLayout::LineCache* WrapLayout::cache_for(const PieceTree& tree, size_t line)
   c.line = line;
   c.start = start;
   c.end = end;
-  c.states.push_back(State{start, 0, 0, 0});
+  c.states.push_back(State{start, 0, 0, 0, GraphemeBreaker()});
   c.used = ++clock_;
   caches_.push_back(std::move(c));
   return &caches_.back();
@@ -336,7 +299,10 @@ size_t WrapLayout::trailing_start(const PieceTree& tree, size_t line) const {
     entry->end = end;
   }
   entry->used = ++clock_;
-  return entry->has_text ? entry->last_text + 1 : start;
+  if (!entry->has_text) return start;
+  // On a cluster boundary: whitespace inside the cluster of the last
+  // character of text (after a Prepend character) is not trailing.
+  return next_cluster_offset(tree, entry->last_text);
 }
 
 size_t WrapLayout::checkpoint_count(size_t line) const {
@@ -347,7 +313,7 @@ size_t WrapLayout::checkpoint_count(size_t line) const {
 }
 
 WrapLayout::State WrapLayout::line_start_state(const PieceTree& tree, size_t line) const {
-  return State{tree.line_start(line), 0, 0, 0};
+  return State{tree.line_start(line), 0, 0, 0, GraphemeBreaker()};
 }
 
 WrapLayout::State WrapLayout::seek(const PieceTree& tree, size_t line, LineCache* cache, size_t row,
@@ -370,75 +336,41 @@ WrapLayout::State WrapLayout::seek(const PieceTree& tree, size_t line, LineCache
 template <typename F>
 WrapLayout::State WrapLayout::walk(const PieceTree& tree, LineCache* cache, State s, size_t line_end,
                                    F&& f) const {
-  bool stopped = false;
-  auto step = [&](char32_t c, size_t offset, size_t units) {
-    if (cache != nullptr && offset >= cache->states.back().offset + kCheckpointInterval) {
-      cache->states.push_back(State{offset, s.row, s.column, s.logical});
+  auto step = [&](const Cluster& cl) {
+    if (cache != nullptr && cl.offset >= cache->states.back().offset + kCheckpointInterval) {
+      cache->states.push_back(State{cl.offset, s.row, s.column, s.logical, cl.before});
     }
-    ++scanned_;
     int w = 0;
     int logical_w = 0;
     auto row_break = [&] {
       if (cache != nullptr) {
-        cache->last_break = State{offset, s.row, s.column, s.logical};
+        cache->last_break = State{cl.offset, s.row, s.column, s.logical, cl.before};
         cache->has_break = true;
       }
       ++s.row;
       s.column = 0;
     };
-    if (c == U'\t') {
+    if (cl.first == U'\t') {
+      // A TAB is a cluster of its own (GB4 / GB5).
       if (width_ > 0 && s.column >= width_) row_break();
       w = tab_width_ - s.column % tab_width_;
       if (width_ > 0) w = std::min(w, width_ - s.column);
       logical_w = tab_width_ - static_cast<int>(s.logical % tab_width_);
     } else {
-      w = cells_of(c);
+      w = cl.width;
       if (width_ > 0 && w > 0 && s.column > 0 && s.column + w > width_) row_break();
       logical_w = w;
     }
-    s.offset = offset;
-    const bool go_on = f(c, offset, s.row, s.column, w, s.logical);
+    // (s.breaker is the state of the walk's start only: the states recorded
+    // above take cl.before.)
+    s.offset = cl.offset;
+    const bool go_on = f(cl, s.row, s.column, w, s.logical);
     s.column += w;
     s.logical += logical_w;
-    s.offset = offset + units;
+    s.offset = cl.offset + cl.length;
     return go_on;
   };
-  if (s.offset < line_end) {
-    wchar_t pending = 0;
-    size_t offset = s.offset;
-    tree.for_each_chunk(s.offset, line_end - s.offset, [&](std::wstring_view chunk) {
-      for (const wchar_t u : chunk) {
-        if (pending != 0) {
-          const wchar_t high = pending;
-          pending = 0;
-          if (is_low_surrogate(u)) {
-            if (!step(combine_surrogates(high, u), offset, 2)) {
-              stopped = true;
-              return false;
-            }
-            offset += 2;
-            continue;
-          }
-          if (!step(static_cast<char32_t>(high), offset, 1)) {
-            stopped = true;
-            return false;
-          }
-          offset += 1;
-        }
-        if (is_high_surrogate(u)) {
-          pending = u;
-          continue;
-        }
-        if (!step(static_cast<char32_t>(u), offset, 1)) {
-          stopped = true;
-          return false;
-        }
-        offset += 1;
-      }
-      return true;
-    });
-    if (!stopped && pending != 0 && !step(static_cast<char32_t>(pending), offset, 1)) stopped = true;
-  }
+  const bool stopped = s.offset < line_end && !for_each_cluster(tree, s.offset, line_end, s.breaker, &scanned_, step);
   if (!stopped && cache != nullptr) {
     cache->complete = true;
     cache->end_state = s;
@@ -452,7 +384,7 @@ size_t WrapLayout::row_count(const PieceTree& tree, size_t line) const {
   if (cache != nullptr && cache->complete) return cache->end_state.row + 1;
   const State from = cache != nullptr ? cache->states.back() : line_start_state(tree, line);
   const State end = walk(tree, cache, from, tree.line_end(line),
-                         [](char32_t, size_t, size_t, int, int, int64_t) { return true; });
+                         [](const Cluster&, size_t, int, int, int64_t) { return true; });
   return end.row + 1;
 }
 
@@ -469,7 +401,7 @@ bool WrapLayout::has_row(const PieceTree& tree, size_t line, size_t row) const {
   }
   const State from = cache != nullptr ? cache->states.back() : line_start_state(tree, line);
   bool found = false;
-  walk(tree, cache, from, tree.line_end(line), [&](char32_t, size_t, size_t r, int, int, int64_t) {
+  walk(tree, cache, from, tree.line_end(line), [&](const Cluster&, size_t r, int, int, int64_t) {
     if (r < row) return true;
     found = true;
     return false;
@@ -497,8 +429,9 @@ RowPos WrapLayout::row_of(const PieceTree& tree, size_t offset, int* column, int
   int col = 0;
   int64_t logical = 0;
   const State end = walk(tree, cache, from, tree.line_end(line),
-                         [&](char32_t, size_t off, size_t r, int c, int, int64_t lg) {
-                           if (off < offset) return true;
+                         [&](const Cluster& cl, size_t r, int c, int, int64_t lg) {
+                           // An offset inside a cluster maps to its start.
+                           if (cl.offset + cl.length <= offset) return true;
                            found = true;
                            pos.row = r;
                            col = c;
@@ -522,9 +455,9 @@ size_t WrapLayout::row_start(const PieceTree& tree, size_t line, size_t row) con
   const State from = seek(tree, line, cache, row - 1, std::numeric_limits<int>::max());
   size_t result = kNone;
   const State end = walk(tree, cache, from, tree.line_end(line),
-                         [&](char32_t, size_t off, size_t r, int, int, int64_t) {
+                         [&](const Cluster& cl, size_t r, int, int, int64_t) {
                            if (r < row) return true;
-                           result = off;
+                           result = cl.offset;
                            return false;
                          });
   if (result != kNone) return result;
@@ -540,24 +473,24 @@ size_t WrapLayout::offset_at(const PieceTree& tree, size_t line, size_t row, int
   size_t result = kNone;
   size_t last_base = kNone;
   bool next_row_reached = false;
-  walk(tree, cache, from, line_end, [&](char32_t, size_t off, size_t r, int c, int w, int64_t) {
+  walk(tree, cache, from, line_end, [&](const Cluster& cl, size_t r, int c, int w, int64_t) {
     if (r < row) return true;
     if (r > row) {
       next_row_reached = true;
       return false;
     }
     if (c + w > column || (w > 0 && c == column)) {
-      result = off;
+      result = cl.offset;
       return false;
     }
-    if (w > 0) last_base = off;
+    if (w > 0) last_base = cl.offset;
     return true;
   });
   if (result != kNone) return result;
   if (!next_row_reached) return line_end;
-  // Past the end of a row that continues on the next one: its last character.
+  // Past the end of a row that continues on the next one: its last cluster.
   if (last_base != kNone) return last_base;
-  return std::max(tree.line_start(line), prev_char_offset(tree, from.offset));
+  return std::max(tree.line_start(line), prev_cluster_offset(tree, from.offset));
 }
 
 RowInfo WrapLayout::row_chars(const PieceTree& tree, size_t line, size_t row, int from_column, int to,
@@ -570,13 +503,13 @@ RowInfo WrapLayout::row_chars(const PieceTree& tree, size_t line, size_t row, in
   int column_end = from.row == row ? from.column : 0;
   bool stopped_at_to = false;
   const State end = walk(tree, cache, from, tree.line_end(line),
-                         [&](char32_t ch, size_t off, size_t r, int c, int w, int64_t) {
+                         [&](const Cluster& cl, size_t r, int c, int w, int64_t) {
                            if (r < row) return true;
                            if (r > row) {
                              info.complete = true;
                              info.last = false;
                              info.end_column = column_end;
-                             info.end = off;
+                             info.end = cl.offset;
                              return false;
                            }
                            if (c >= to) {
@@ -584,7 +517,7 @@ RowInfo WrapLayout::row_chars(const PieceTree& tree, size_t line, size_t row, in
                              return false;
                            }
                            if (c + w > from_column || (w == 0 && c >= from_column)) {
-                             out->push_back(RowChar{ch, off, c, w});
+                             out->push_back(RowChar{cl.first, cl.offset, c, w, cl.length, cl.code_points, cl.emoji});
                            }
                            column_end = c + w;
                            return true;

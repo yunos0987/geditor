@@ -12,6 +12,9 @@ namespace {
 
 // ---- Helpers ----
 
+// Positions here are cluster boundaries (docs/PLAN.md 2 "cursor unit"):
+// characters are stepped over with next_cluster_offset / prev_cluster_offset,
+// and a cluster has the word class of its first code point.
 WordClass class_at(const PieceTree& t, size_t p) {
   return word_class(code_point_at(t, p));
 }
@@ -21,35 +24,35 @@ WordClass class_at(const PieceTree& t, size_t p) {
 // word character there.
 WordClass class_before_extenders(const PieceTree& t, size_t p) {
   while (p > 0) {
-    const WordClass c = class_at(t, prev_char_offset(t, p));
+    const WordClass c = class_at(t, prev_cluster_offset(t, p));
     if (c != WordClass::kExtender) return c == WordClass::kNone ? WordClass::kKatakana : c;
-    p = prev_char_offset(t, p);
+    p = prev_cluster_offset(t, p);
   }
   return WordClass::kKatakana;
 }
 
 size_t forward_word_end(const PieceTree& t, size_t p) {
   const size_t n = t.length();
-  while (p < n && class_at(t, p) == WordClass::kNone) p = next_char_offset(t, p);
+  while (p < n && class_at(t, p) == WordClass::kNone) p = next_cluster_offset(t, p);
   if (p >= n) return n;
   WordClass cls = class_at(t, p);
   if (cls == WordClass::kExtender) cls = class_before_extenders(t, p);
   while (p < n) {
     const WordClass c = class_at(t, p);
     if (c != cls && c != WordClass::kExtender) break;
-    p = next_char_offset(t, p);
+    p = next_cluster_offset(t, p);
   }
   return p;
 }
 
 size_t backward_word_start(const PieceTree& t, size_t p) {
-  while (p > 0 && class_at(t, prev_char_offset(t, p)) == WordClass::kNone) p = prev_char_offset(t, p);
+  while (p > 0 && class_at(t, prev_cluster_offset(t, p)) == WordClass::kNone) p = prev_cluster_offset(t, p);
   if (p == 0) return 0;
   const WordClass cls = class_before_extenders(t, p);
   while (p > 0) {
-    const WordClass c = class_at(t, prev_char_offset(t, p));
+    const WordClass c = class_at(t, prev_cluster_offset(t, p));
     if (c != cls && c != WordClass::kExtender) break;
-    p = prev_char_offset(t, p);
+    p = prev_cluster_offset(t, p);
   }
   return p;
 }
@@ -146,7 +149,7 @@ bool step_forward_char(Editor& ed) {
     ed.fail(L"End of buffer");
     return false;
   }
-  b.point = next_char_offset(b.text, b.point);
+  b.point = next_cluster_offset(b.text, b.point);
   return true;
 }
 
@@ -156,7 +159,7 @@ bool step_backward_char(Editor& ed) {
     ed.fail(L"Beginning of buffer");
     return false;
   }
-  b.point = prev_char_offset(b.text, b.point);
+  b.point = prev_cluster_offset(b.text, b.point);
   return true;
 }
 
@@ -408,6 +411,17 @@ void keyboard_quit(Editor& ed) {
   ed.fail(L"Quit");
 }
 
+// ESC ESC ESC (decision G8, as Emacs): in the minibuffer the same as C-g;
+// elsewhere it deactivates the region quietly (a prefix argument typed
+// before it is used up by this command).
+void keyboard_escape_quit(Editor& ed) {
+  if (ed.minibuffer_active()) {
+    keyboard_quit(ed);
+    return;
+  }
+  ed.main_buffer().mark_active = false;
+}
+
 // ---- Delete and kill ----
 
 // The offset `n` characters away from `p` (backward for a negative n), or
@@ -415,11 +429,11 @@ void keyboard_quit(Editor& ed) {
 size_t chars_away(const PieceTree& t, size_t p, int n) {
   for (int i = 0; i < n; ++i) {
     if (p >= t.length()) return std::wstring::npos;
-    p = next_char_offset(t, p);
+    p = next_cluster_offset(t, p);
   }
   for (int i = 0; i > n; --i) {
     if (p == 0) return std::wstring::npos;
-    p = prev_char_offset(t, p);
+    p = prev_cluster_offset(t, p);
   }
   return p;
 }
@@ -621,7 +635,7 @@ void transpose_chars_n(Editor& ed, int n) {
     ed.fail(L"Beginning of buffer");
     return;
   }
-  const size_t a = prev_char_offset(t, p);
+  const size_t a = prev_cluster_offset(t, p);
   const size_t other = chars_away(t, n > 0 ? p : a, n);
   if (other == std::wstring::npos) {
     ed.fail(n > 0 ? L"End of buffer" : L"Beginning of buffer");
@@ -657,17 +671,17 @@ void transpose_chars(Editor& ed) {
   size_t mid = 0;
   size_t c = 0;
   if (at_eol) {
-    mid = prev_char_offset(t, p);
+    mid = prev_cluster_offset(t, p);
     if (mid == 0) {
       ed.fail(L"Beginning of buffer");
       return;
     }
-    a = prev_char_offset(t, mid);
+    a = prev_cluster_offset(t, mid);
     c = p;
   } else {
-    a = prev_char_offset(t, p);
+    a = prev_cluster_offset(t, p);
     mid = p;
-    c = next_char_offset(t, p);
+    c = next_cluster_offset(t, p);
   }
   if (!ed.check_writable(b)) return;
   const std::wstring first = t.substr(a, mid - a);
@@ -868,10 +882,11 @@ void next_history_element(Editor& ed) {
 
 // ---- Parameters ----
 
+// The nine encodings of PLAN 2 "encodings that can be named" (Unicode and
+// Japanese only, decision G9), in its order.
 constexpr const wchar_t* kEncodingNames[] = {
-    L"utf-8",       L"utf-8-bom",    L"utf-16le", L"utf-16le-bom", L"utf-16be",
-    L"utf-16be-bom", L"shift_jis",   L"euc-jp",   L"iso-2022-jp",  L"windows-1252",
-    L"gb18030",     L"big5",         L"euc-kr",
+    L"utf-8",        L"utf-8-bom", L"utf-16le", L"utf-16le-bom", L"utf-16be",
+    L"utf-16be-bom", L"shift_jis", L"euc-jp",   L"iso-2022-jp",
 };
 constexpr const wchar_t* kEolChoices[] = {L"lf", L"crlf", L"cr"};
 constexpr const wchar_t* kWrapChoices[] = {L"none", L"window", L"fixed", L"max"};
@@ -923,6 +938,7 @@ constexpr CommandInfo kCommands[] = {
     {"isearch-repeat-forward", nullptr},
     {"isearch-toggle-case-fold", nullptr},
     {"isearch-toggle-regexp", nullptr},
+    {"keyboard-escape-quit", &keyboard_escape_quit},
     {"keyboard-quit", &keyboard_quit},
     {"kill-line", &kill_line},
     {"kill-region", &kill_region},
@@ -1004,7 +1020,7 @@ void word_bounds_at(const PieceTree& text, size_t offset, size_t* from, size_t* 
   }
   if (class_at(text, offset) == WordClass::kNone) {
     *from = offset;
-    *to = next_char_offset(text, offset);
+    *to = next_cluster_offset(text, offset);
     return;
   }
   // The end of the word that holds `offset`, then back over the same word.

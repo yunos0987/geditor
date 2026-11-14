@@ -21,7 +21,7 @@ constexpr MenuItem submenu_item(const wchar_t* text, std::span<const MenuItem> i
   return MenuItem{MenuItemKind::kSubmenu, text, nullptr, nullptr, MenuCheck::kNone, items};
 }
 
-// The 13 encodings of PLAN 2 (the names of encoding_names()), radio items of
+// The 9 encodings of PLAN 2 (the names of encoding_names()), radio items of
 // set-buffer-file-coding-system.
 constexpr MenuItem kEncodingItems[] = {
     command_item(L"utf-8", "set-buffer-file-coding-system", MenuCheck::kRadio, L"utf-8"),
@@ -33,10 +33,6 @@ constexpr MenuItem kEncodingItems[] = {
     command_item(L"shift_jis", "set-buffer-file-coding-system", MenuCheck::kRadio, L"shift_jis"),
     command_item(L"euc-jp", "set-buffer-file-coding-system", MenuCheck::kRadio, L"euc-jp"),
     command_item(L"iso-2022-jp", "set-buffer-file-coding-system", MenuCheck::kRadio, L"iso-2022-jp"),
-    command_item(L"windows-1252", "set-buffer-file-coding-system", MenuCheck::kRadio, L"windows-1252"),
-    command_item(L"gb18030", "set-buffer-file-coding-system", MenuCheck::kRadio, L"gb18030"),
-    command_item(L"big5", "set-buffer-file-coding-system", MenuCheck::kRadio, L"big5"),
-    command_item(L"euc-kr", "set-buffer-file-coding-system", MenuCheck::kRadio, L"euc-kr"),
 };
 
 constexpr MenuItem kLineEndingItems[] = {

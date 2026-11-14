@@ -8,7 +8,8 @@
 
 namespace geditor::win {
 
-// Width in cells (East Asian Width; TAB counts as 1 cell here).
+// Width in cells (the cluster widths of grapheme.h; TAB counts as 1 cell
+// here).
 int text_cells(std::wstring_view text);
 
 // Shortens `message` to at most `columns` cells by replacing a middle part
@@ -20,6 +21,12 @@ std::wstring fit_message(std::wstring_view message, int columns);
 struct MinibufferLine {
   std::wstring text;      // what to draw, starting at column 0
   int cursor_column = 0;  // cell column of the cursor in `text`
+  // Where the input starts in `text` (after the prompt and the ellipsis) and
+  // its cell column: the prompt and the input are segmented into grapheme
+  // clusters separately, so an input that starts with a combining mark does
+  // not join the prompt's last character (review R3).
+  size_t input_start = 0;
+  int input_column = 0;
 };
 
 // The minibuffer line: the prompt stays visible; when the input does not fit,

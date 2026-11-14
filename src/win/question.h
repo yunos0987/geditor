@@ -42,6 +42,9 @@ struct Question {
   // would open (client pixels).
   std::vector<MenuEntry> menu;
   POINT menu_position{};
+  // The menu bar: the submenu that a visible window shows dropped down when
+  // menu-bar-open enters the bar (decision G7: the first one, File).
+  std::wstring menu_open;
 };
 
 // Button ids (IDCANCEL / IDYES / IDNO for the standard meanings).
@@ -94,6 +97,14 @@ inline Question menu_question(QuestionKind kind, std::vector<MenuEntry> entries,
   }
   q.buttons.push_back(QuestionButton{IDCANCEL, L"Cancel"});
   q.default_button = IDCANCEL;
+  if (kind == QuestionKind::kMenuBar) {
+    for (const MenuEntry& e : entries) {
+      if (e.submenu && e.path.find(L" > ") == std::wstring::npos) {
+        q.menu_open = e.path;
+        break;
+      }
+    }
+  }
   q.menu = std::move(entries);
   q.menu_position = position;
   return q;

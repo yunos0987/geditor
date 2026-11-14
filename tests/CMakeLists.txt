@@ -9,9 +9,13 @@ add_executable(geditor_tests
   test_display.cpp
   test_encoding.cpp
   test_files.cpp
+  test_grapheme.cpp
+  test_grapheme_commands.cpp
   test_jsonc.cpp
   test_key.cpp
   test_keymap.cpp
+  test_m3c_keys.cpp
+  test_m3c_retry1.cpp
   test_layout_wrap.cpp
   test_menu.cpp
   test_minibuffer.cpp

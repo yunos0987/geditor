@@ -543,6 +543,18 @@ void Editor::finish_command(Buffer&) {
   for (Buffer* b : {&main_, &mini_}) {
     if (b->edited_in_command) b->mark_active = false;
     b->edited_in_command = false;
+    // An edit can join the clusters around point or the mark (deleting a TAB
+    // between "e" and U+0301, yanking text that starts with a combining
+    // mark). Point right after inserted text goes forward to the end of the
+    // cluster the insertion joined (a ZWJ typed between two emoji, a virama
+    // or a Prepend character typed before text): typing goes on after it, in
+    // order (decision G4). Otherwise point and the mark go back to the
+    // boundary at or before them (decision G3).
+    const bool after_insert = b->inserted_in_command && b->point == b->insert_end;
+    const size_t start = cluster_start(b->text, b->point);
+    if (start != b->point) b->point = after_insert ? next_cluster_offset(b->text, b->point) : start;
+    if (b->has_mark) b->mark = cluster_start(b->text, b->mark);
+    b->inserted_in_command = false;
   }
   last_command_ = this_command_;
   ensure_point_visible();
@@ -871,12 +883,9 @@ void Editor::text_scale_adjust(int steps) {
 }
 
 size_t Editor::clamp_main_offset(size_t offset) const {
-  offset = std::min(offset, main_.text.length());
-  if (offset > 0 && offset < main_.text.length() && is_low_surrogate(main_.text.char_at(offset)) &&
-      is_high_surrogate(main_.text.char_at(offset - 1))) {
-    --offset;
-  }
-  return offset;
+  // Decision G3: a position from outside snaps to the cluster boundary at or
+  // before it (this covers the halves of a surrogate pair too).
+  return cluster_start(main_.text, std::min(offset, main_.text.length()));
 }
 
 void Editor::begin_mouse_command() {
@@ -1048,6 +1057,8 @@ bool Editor::insert(Buffer& b, std::wstring_view text) {
   const size_t length_before = b.text.length();
   if (!insert_at(b, offset, text)) return false;
   b.point = offset + (b.text.length() - length_before);
+  b.inserted_in_command = true;
+  b.insert_end = b.point;
   return true;
 }
 

@@ -256,7 +256,8 @@ TEST(registry_names_are_unique_and_params_are_well_formed) {
       CHECK((p.type == geditor::ParamType::kChoice) == !p.choices.empty());
     }
   }
-  CHECK_EQ(geditor::encoding_names().size(), size_t{13});
+  // M3c (decision G9): 9 encodings (was 13).
+  CHECK_EQ(geditor::encoding_names().size(), size_t{9});
 }
 
 TEST(registry_later_commands_are_not_implemented) {

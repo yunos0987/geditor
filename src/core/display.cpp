@@ -92,7 +92,8 @@ size_t trailing_whitespace_start(const PieceTree& tree, size_t line) {
   const size_t start = tree.line_start(line);
   size_t p = tree.line_end(line);
   while (p > start && is_trailing_space(tree.char_at(p - 1))) --p;
-  return p;
+  // On a cluster boundary (as WrapLayout::trailing_start).
+  return p > start ? next_cluster_offset(tree, p - 1) : p;
 }
 
 void build_display_row(const PieceTree& tree, const WrapLayout& layout, Eol eol,
@@ -121,17 +122,24 @@ void build_display_row(const PieceTree& tree, const WrapLayout& layout, Eol eol,
     cell.column = rc.column - left;
     cell.width = rc.width;
     cell.offset = rc.offset;
-    if (rc.c == U' ' && options.space) {
+    cell.length = rc.length;
+    cell.code_points = rc.code_points;
+    cell.emoji = rc.emoji;
+    // Whitespace is a cluster of one code point; a space that carries a
+    // combining mark is drawn as text.
+    const bool single = rc.code_points == 1;
+    if (single && rc.c == U' ' && options.space) {
       cell.c = kSpaceMark;
       cell.mark = true;
-    } else if (rc.c == U'\t' && options.tab) {
+    } else if (single && rc.c == U'\t' && options.tab) {
       cell.c = kTabMark;
       cell.mark = true;
-    } else if (rc.c == kIdeographicSpace && options.fullwidth_space) {
+    } else if (single && rc.c == kIdeographicSpace && options.fullwidth_space) {
       cell.c = kFullwidthSpaceMark;
       cell.mark = true;
     }
-    cell.trailing = options.trailing && rc.offset >= trailing_from &&
+    if (cell.mark) cell.code_points = 1;
+    cell.trailing = options.trailing && single && rc.offset >= trailing_from &&
                     (rc.c == U' ' || rc.c == U'\t' || rc.c == kIdeographicSpace);
     out->cells.push_back(cell);
   }

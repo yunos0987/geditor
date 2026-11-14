@@ -3,11 +3,14 @@
 // missing from it are mapped to another font with IDWriteFontFallback, which
 // is created on the first missing character only: the settings' fallback
 // families (built with IDWriteFontFallbackBuilder, the system fallback after
-// them) or the system fallback alone (decision E1).
+// them) or the system fallback alone (decision E1). A grapheme cluster of
+// several code points is shaped as one string (cluster(), decision G6); its
+// boundaries come from the core, never from here.
 #pragma once
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -54,6 +57,31 @@ class TextMeasurer {
   std::wstring family_of(char32_t c);
 
   Glyph glyph(char32_t c);
+
+  // The glyphs of a grapheme cluster of more than one code point (docs/PLAN.md
+  // 4.7, decision G6): the font that IDWriteFontFallback::MapCharacters
+  // chooses for the whole cluster, shaped as one string by
+  // IDWriteTextAnalyzer. When no font is found, shaping fails or every glyph
+  // is missing, it is the glyph of the first code point (the missing-glyph
+  // box of the primary font when no font has that), with `shaped` false: a
+  // cluster is never drawn as nothing. `emoji`: the core shows the cluster as
+  // an emoji (Cluster::emoji), so a font that MapCharacters picks without
+  // the primary family is preferred. Results are cached by text and `emoji`.
+  struct ClusterGlyphs {
+    uint16_t face = 0;
+    std::vector<uint16_t> glyphs;
+    std::vector<float> advances;
+    std::vector<DWRITE_GLYPH_OFFSET> offsets;
+    float width = 0;  // sum of the natural advances in DIPs
+    bool shaped = false;
+  };
+  const ClusterGlyphs& cluster(std::wstring_view text, bool emoji);
+  // Checks: the next shaping of a cluster fails as if IDWriteTextAnalyzer
+  // had refused it (the result is the fallback above).
+  void fail_next_shaping() { fail_next_shaping_ = true; }
+  // The family name of the font that draws cluster `text` (tests).
+  std::wstring family_of_cluster(std::wstring_view text, bool emoji);
+
   // Glyph index of `c` in face `face` (0 when that face does not have it).
   uint16_t glyph_index_in(uint16_t face, char32_t c) const;
   // Natural advance in DIPs of glyph `index` of face `face`.
@@ -75,6 +103,15 @@ class TextMeasurer {
   Glyph fallback_glyph(char32_t c);
   void create_fallback();
   float advance_of(uint16_t face, uint16_t glyph) const;
+  // The face for cluster `text` (MapCharacters over all of it); false when
+  // none is found.
+  bool cluster_face(std::wstring_view text, bool emoji, uint16_t* face);
+  // MapCharacters over `text` from `base_family` ("" for none).
+  bool map_cluster(std::wstring_view text, const wchar_t* base_family, uint16_t* face);
+  // True when face `face` has a glyph for every code point of `text` other
+  // than joiners, variation selectors and tags.
+  bool covers(uint16_t face, std::wstring_view text) const;
+  bool shape_cluster(std::wstring_view text, bool emoji, ClusterGlyphs* out);
 
   IDWriteFactory* factory_ = nullptr;
   IDWriteFontCollection* collection_ = nullptr;
@@ -91,6 +128,9 @@ class TextMeasurer {
   Glyph ascii_[128] = {};
   bool ascii_known_[128] = {};
   std::unordered_map<char32_t, Glyph> cache_;
+  IDWriteTextAnalyzer* analyzer_ = nullptr;
+  std::unordered_map<std::wstring, ClusterGlyphs> clusters_;
+  bool fail_next_shaping_ = false;
 };
 
 }  // namespace geditor::win

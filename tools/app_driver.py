@@ -452,7 +452,8 @@ class App:
         return copy_data(self.hwnd, COPYDATA_CLIPBOARD_WRITE, text) == 1
 
     def fault(self, what: str) -> bool:
-        """'GFLT': "target", "font", "menu", "popup", "clipboard-read" or
+        """'GFLT': "target", "font", "menu", "popup", "shape" (the next
+        shaping of a grapheme cluster), "clipboard-read" or
         "clipboard-write"."""
         return inject_fault(self.hwnd, what)
 

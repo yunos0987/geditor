@@ -3,8 +3,7 @@
 #include <algorithm>
 #include <vector>
 
-#include "char_width.h"
-#include "unicode.h"
+#include "grapheme.h"
 
 namespace geditor::win {
 namespace {
@@ -17,15 +16,14 @@ struct Unit {
   int cells;
 };
 
+// The grapheme clusters of `s` (the core's segmentation and widths; TAB is
+// 1 cell here): the echo line is never cut inside a cluster.
 std::vector<Unit> split_units(std::wstring_view s) {
   std::vector<Unit> units;
-  size_t i = 0;
-  while (i < s.size()) {
-    size_t n = 0;
-    const char32_t c = decode_at(s, i, &n);
-    units.push_back(Unit{i, n, c == U'\t' ? 1 : char_width(c)});
-    i += n;
-  }
+  for_each_cluster(s, [&](const Cluster& c) {
+    units.push_back(Unit{c.offset, c.length, c.width});
+    return true;
+  });
   return units;
 }
 
@@ -146,6 +144,8 @@ MinibufferLine fit_minibuffer(std::wstring_view prompt, std::wstring_view input,
     ++column;
   }
   line.cursor_column = -1;
+  line.input_start = line.text.size();
+  line.input_column = column;
   const int limit = shown_prompt_cells + room + 1;  // = columns
   for (size_t i = first; i < units.size(); ++i) {
     const Unit& u = units[i];

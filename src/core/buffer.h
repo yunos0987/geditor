@@ -21,6 +21,11 @@ struct Buffer {
   std::wstring path;         // empty for an untitled buffer
   FileFormat format;         // new buffers: UTF-8 without BOM, LF
   bool edited_in_command = false;
+  // Editor::insert in the running command: point right after the inserted
+  // text (decision G4: point then snaps forward to the end of the cluster
+  // that the insertion joined).
+  bool inserted_in_command = false;
+  size_t insert_end = 0;
 
   bool modified() const { return undo.modified(); }
 
@@ -36,6 +41,8 @@ struct Buffer {
     path.clear();
     format = FileFormat();
     edited_in_command = false;
+    inserted_in_command = false;
+    insert_end = 0;
   }
 };
 

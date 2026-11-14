@@ -64,10 +64,7 @@ constexpr PlanRow kPlanRows[] = {
     {L"File > Encoding for Saving > shift_jis", kCmd, kCoding, L"shift_jis", kRad, false, L""},
     {L"File > Encoding for Saving > euc-jp", kCmd, kCoding, L"euc-jp", kRad, false, L""},
     {L"File > Encoding for Saving > iso-2022-jp", kCmd, kCoding, L"iso-2022-jp", kRad, false, L""},
-    {L"File > Encoding for Saving > windows-1252", kCmd, kCoding, L"windows-1252", kRad, false, L""},
-    {L"File > Encoding for Saving > gb18030", kCmd, kCoding, L"gb18030", kRad, false, L""},
-    {L"File > Encoding for Saving > big5", kCmd, kCoding, L"big5", kRad, false, L""},
-    {L"File > Encoding for Saving > euc-kr", kCmd, kCoding, L"euc-kr", kRad, false, L""},
+    // M3c (decision G9): windows-1252, gb18030, big5 and euc-kr were removed.
     {L"File > Line Endings ▶", kSub, nullptr, nullptr, kNo, true, L""},
     {L"File > Line Endings > LF", kCmd, "set-eol", L"lf", kRad, false, L""},
     {L"File > Line Endings > CRLF", kCmd, "set-eol", L"crlf", kRad, false, L""},

@@ -1,26 +1,31 @@
 // Cell-grid positions within a logical line, and the wrapping of logical
-// lines into screen rows (docs/PLAN.md 4.5 / 4.7). Columns are counted in
-// cells: wide characters take 2, TAB advances to the next stop.
+// lines into screen rows (docs/PLAN.md 4.5 / 4.7). The unit is the extended
+// grapheme cluster (grapheme.h): columns are counted in cells per cluster
+// (ClusterWidth), TAB advances to the next stop, and no position, row break
+// or column falls inside a cluster.
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include "grapheme.h"
 #include "piece_tree.h"
 
 namespace geditor {
 
-// Column (cells) of `offset` from the start of its line.
+// Column (cells) of `offset` from the start of its line: the cells of the
+// clusters that start before it.
 int column_at(const PieceTree& tree, size_t offset, int tab_width);
 
-// Offset in `line` of the character at `column`: the last position whose
-// column does not exceed `column` (a wide character that spans `column` is
-// not entered), clamped to the end of the line. Zero-width characters after
-// that position are skipped so that the cursor does not land before them.
+// Offset in `line` of the cluster at `column`: the last cluster start whose
+// column does not exceed `column` (a wide cluster that spans `column` is not
+// entered), clamped to the end of the line. Zero-width clusters after that
+// position are skipped so that the cursor does not land before them.
 size_t offset_at_column(const PieceTree& tree, size_t line, int column, int tab_width);
 
 // Offset of the next / previous code point (surrogate pairs are not split).
+// Cursor motion uses the cluster functions of grapheme.h instead.
 size_t next_char_offset(const PieceTree& tree, size_t offset);
 size_t prev_char_offset(const PieceTree& tree, size_t offset);
 // Code point starting at `offset` (0 at the end of the text).
@@ -37,12 +42,15 @@ struct RowPos {
   }
 };
 
-// One character of a screen row.
+// One cluster of a screen row.
 struct RowChar {
-  char32_t c = 0;
+  char32_t c = 0;      // its first code point
   size_t offset = 0;
-  int column = 0;  // cell column within the row
-  int width = 0;   // cells (0 for zero-width characters)
+  int column = 0;      // cell column within the row
+  int width = 0;       // cells (0 for zero-width clusters)
+  size_t length = 1;   // UTF-16 units of the cluster
+  int code_points = 1;
+  bool emoji = false;  // shown as an emoji (Cluster::emoji)
 };
 
 // What row_chars found about the row.
@@ -58,18 +66,20 @@ struct RowInfo {
 // implementation used by drawing, vertical motion, scrolling and the scroll
 // bar. Width 0 means no wrapping (one row per logical line).
 //
-// Rules (decision E3): wrapping is per character on cell boundaries; a
-// character goes to the next row when it does not fit in the cells left on
-// its row (a 2-cell character with 1 cell left goes to the next row);
-// zero-width characters stay on the row of the character before them; a TAB
+// Rules (decision E3, by cluster since M3c): wrapping is per cluster on cell
+// boundaries; a cluster goes to the next row when it does not fit in the
+// cells left on its row (a 2-cell cluster with 1 cell left goes to the next
+// row); zero-width clusters stay on the row of the cluster before them; a TAB
 // never starts a new row unless its row is full, and is cut to the cells left
 // (tab stops count from the start of the row); a row always holds at least
-// one character, so a character wider than the width gets a row of its own.
+// one cluster, so a cluster wider than the width gets a row of its own.
 //
 // Long lines (decision of PLAN 4.7): for a logical line of at least
-// kCheckpointInterval characters the wrap state is recorded every
-// kCheckpointInterval characters as the line is walked, and later walks start
-// from the nearest recorded state instead of the start of the line. Edits
+// kCheckpointInterval units the wrap state is recorded every
+// kCheckpointInterval units (at the next cluster start) as the line is
+// walked, and later walks start from the nearest recorded state instead of
+// the start of the line. A state holds the segmentation state too, so
+// segmentation runs only from the recorded state to the rows needed. Edits
 // reported through note_edit keep the states before the edit; any other
 // change of the text (seen through PieceTree::revision) drops them all.
 class WrapLayout {
@@ -121,27 +131,29 @@ class WrapLayout {
   // The last screen row of the buffer.
   RowPos last_row(const PieceTree& tree) const;
 
-  // Characters walked so far (tests check that long lines use the recorded
-  // states) and the states recorded for `line`.
+  // UTF-16 units walked (and segmented) so far (tests check that long lines
+  // use the recorded states) and the states recorded for `line`.
   size_t scanned() const { return scanned_; }
   void reset_scanned() const { scanned_ = 0; }
   size_t checkpoint_count(size_t line) const;
 
   // Offset where the trailing whitespace (spaces, TABs, U+3000) of `line`
-  // starts; the line end when there is none. Kept per line (up to 8 lines)
+  // starts, on a cluster boundary; the line end when there is none. Kept per
+  // line (up to 8 lines)
   // until the text changes: an edit reported through note_edit is looked
   // at from the line end back to the edit only, so drawing a row never
   // walks the whole whitespace tail of a long line again. Counted in
   // scanned().
   size_t trailing_start(const PieceTree& tree, size_t line) const;
 
-  // Internal wrap state before the character at `offset` (exposed for the
+  // Internal wrap state before the cluster at `offset` (exposed for the
   // implementation's helpers).
   struct State {
     size_t offset = 0;
     size_t row = 0;
     int column = 0;
-    int64_t logical = 0;  // column from the start of the logical line
+    int64_t logical = 0;       // column from the start of the logical line
+    GraphemeBreaker breaker;   // segmentation state before `offset`
   };
 
  private:
@@ -166,9 +178,9 @@ class WrapLayout {
   // The cache of a long line (nullptr for short lines).
   LineCache* cache_for(const PieceTree& tree, size_t line) const;
   // Walks from `from` to the line end (or until f returns false), calling
-  // f(c, offset, row, column, width, logical) for each character after its
-  // row break has been decided; records states into `cache`. Returns the
-  // state after the walk.
+  // f(cluster, row, column, width, logical) for each cluster after its row
+  // break has been decided; records states into `cache`. Returns the state
+  // after the walk.
   template <typename F>
   State walk(const PieceTree& tree, LineCache* cache, State from, size_t line_end, F&& f) const;
   // The latest recorded state of `line` that is not after (row, column).

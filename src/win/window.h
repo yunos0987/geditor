@@ -106,9 +106,16 @@ class MainWindow final : public Host {
   // Shows or removes the menu bar for the menu_bar setting (keeping the top
   // line), or refreshes its texts; a failed creation is reported.
   void apply_menu_bar();
-  // menu-bar-open after its command: the Win32 menu loop, or headless the
-  // pending menu (decision B7).
+  // menu-bar-open after its command: the Win32 menu loop with the File menu
+  // dropped down (decision G7; when the key that ran the command is still
+  // held, on its release), or headless the pending menu (decision B7).
   void enter_menu_bar();
+  // WM_NEXTMENU: Left / Right at the ends of the menu bar wrap around within
+  // it instead of moving to the system menu (decision G7).
+  void handle_next_menu(WPARAM key, MDINEXTMENU* next);
+  // WM_INITMENUPOPUP / WM_UNINITMENUPOPUP: which drop-down is open (state
+  // for the tools).
+  void note_menu_popup(HMENU menu, bool system_menu);
   // WM_CONTEXTMENU: `lparam` -1 for the keyboard (at the cursor), else the
   // screen position of the mouse.
   void open_context_menu(LPARAM lparam);
@@ -178,6 +185,17 @@ class MainWindow final : public Host {
   unsigned menu_loops_ = 0;      // WM_ENTERMENULOOP seen
   unsigned keymenu_count_ = 0;   // SC_KEYMENU / SC_MOUSEMENU seen
   std::wstring last_keymenu_;    // the last one: "keymenu <lParam>" / "mousemenu"
+  // Decision G7: the virtual key of the last key handled through the keymap,
+  // and the key whose release enters the menu bar (menu-bar-open ran while
+  // it was held; 0: none).
+  UINT last_key_vk_ = 0;
+  UINT menu_key_ = 0;
+  // The menu loop as the tools see it: active, the drop-down open now
+  // ("File", "Edit", "View", "System", "Submenu"; empty: none) and every
+  // drop-down opened in this loop ("File,Edit,...").
+  bool menu_loop_active_ = false;
+  std::wstring menu_popup_;
+  std::wstring menu_popups_;
   // ---- mouse ----
   bool dragging_ = false;
   POINT drag_point_{};   // the last mouse position of the drag (client pixels)
