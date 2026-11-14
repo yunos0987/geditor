@@ -15,9 +15,12 @@
 #include "headless.h"
 #include "ime.h"
 #include "measure.h"
+#include "menu_bar.h"
 #include "process.h"
 #include "question.h"
 #include "unicode.h"
+
+#include <windowsx.h>
 
 namespace geditor::win {
 namespace {
@@ -28,10 +31,13 @@ constexpr UINT kMsgDestroy = WM_APP + 1;     // Host::quit, after the current ca
 // From the settings watcher: wParam 0 = the file changed; 1 = watching
 // stopped (lParam: new std::wstring with the reason).
 constexpr UINT kMsgSettingsChanged = WM_APP + 2;
+constexpr UINT kMsgOpenMenu = WM_APP + 3;    // Host::open_menu_bar, after the command
 constexpr UINT_PTR kPendingKeysTimer = 1;   // echo prefix keys after 1 second
 constexpr UINT kPendingKeysDelayMs = 1000;
 constexpr UINT_PTR kRedrawTimer = 2;        // retry a frame that could not be drawn
 constexpr UINT kRedrawDelayMs = 500;
+constexpr UINT_PTR kDragScrollTimer = 3;    // a drag above / below the text scrolls
+constexpr UINT kDragScrollMs = 50;
 constexpr DWORD kToUnicodeNoStateChange = 0x4;  // Windows 10 1607 and later
 constexpr ULONG_PTR kCopyDataCapture = 0x50414347;  // 'GCAP': WM_COPYDATA screenshot
 // 'GFLT': WM_COPYDATA from tools/app_check.py; the payload (UTF-16) "target"
@@ -119,7 +125,8 @@ bool MainWindow::create(HINSTANCE instance, bool measure_startup, bool measure_i
 
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);
-  wc.style = CS_HREDRAW | CS_VREDRAW;
+  // CS_DBLCLKS: WM_LBUTTONDBLCLK for the double-click word selection.
+  wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
   wc.lpfnWndProc = window_proc;
   wc.hInstance = instance;
   wc.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
@@ -186,6 +193,10 @@ void MainWindow::apply_command_line(const CommandLine& command_line) {
   editor_.reload_settings();
   apply_font(false);
   mark_stage("settings");
+  // The menu bar is in the first frame (decision B8), with the key texts of
+  // the settings just read.
+  apply_menu_bar();
+  mark_stage("menu_bar");
   if (!command_line.errors.empty()) {
     std::wstring message;
     for (const std::wstring& e : command_line.errors) {
@@ -226,6 +237,13 @@ bool MainWindow::pre_translate(const MSG& msg) {
       translate_key_down(static_cast<unsigned>(msg.wParam), scan_code, mods, &layout_char, nullptr);
   if (!key) return false;
   if (passes_to_system_when_unbound(*key) && !editor_.key_is_bound(*key)) return false;
+  // Shift+F10 opens the context menu (decision B6, WM_CONTEXTMENU from
+  // DefWindowProc) unless S-<f10> itself is bound: shift translation would
+  // otherwise make it <f10> (menu-bar-open).
+  if (*key == Key{kKeyF1 + 9, kModShift} && editor_.pending_keys_text().empty() &&
+      editor_.keymap(KeymapKind::kGlobal).lookup(KeySequence{*key}).result == Keymap::Result::kUndefined) {
+    return false;
+  }
   start_input_measure();
   chars_.reset();
   handle_key(*key);
@@ -302,6 +320,12 @@ bool MainWindow::launch_new_window(const std::wstring& path, std::wstring& error
 
 void MainWindow::quit() {
   PostMessageW(hwnd_, kMsgDestroy, 0, 0);
+}
+
+void MainWindow::open_menu_bar() {
+  // After the command: the menu loop must not run inside the dispatch of the
+  // key (its WM_COMMAND runs another command).
+  PostMessageW(hwnd_, kMsgOpenMenu, 0, 0);
 }
 
 int MainWindow::visible_lines() {
@@ -402,9 +426,70 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wparam, LPARAM lparam) {
       // (the handled ones never get here), so no beep and no menu.
       if (wparam == L' ') break;
       return 0;
-    case WM_SYSCOMMAND:
-      // Alt alone: SC_KEYMENU with lParam 0 would enter the (absent) menu bar.
-      if ((wparam & 0xFFF0) == SC_KEYMENU && lparam == 0) return 0;
+    case WM_SYSCOMMAND: {
+      const WPARAM command = wparam & 0xFFF0;
+      if (command == SC_KEYMENU || command == SC_MOUSEMENU) {
+        ++keymenu_count_;
+        last_keymenu_ = command == SC_KEYMENU ? L"keymenu " + std::to_wstring(lparam) : L"mousemenu";
+        // Alt alone: SC_KEYMENU with lParam 0 would enter the menu bar
+        // (PLAN 4.2: only F10 and the mouse open it). Headless: no menu loop
+        // and no system menu at all (decision B7); the state shows the
+        // request.
+        if ((command == SC_KEYMENU && lparam == 0) || headless_) return 0;
+      }
+      break;
+    }
+    case WM_ENTERMENULOOP:
+      ++menu_loops_;
+      break;
+    case WM_INITMENUPOPUP:
+      // Decision B1 / B2 and PLAN 4.9: texts, grey items and marks of now.
+      update_menu(reinterpret_cast<HMENU>(wparam), editor_);
+      return 0;
+    case WM_COMMAND:
+      if (HIWORD(wparam) == 0 && lparam == 0) {
+        run_menu_command(LOWORD(wparam));
+        return 0;
+      }
+      break;
+    case WM_CONTEXTMENU:
+      if (lparam != -1) {
+        // The title bar and the borders keep the system menu (headless:
+        // none at all).
+        POINT p{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(hwnd_, &p);
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        if (!PtInRect(&rc, p)) {
+          if (headless_) return 0;
+          break;
+        }
+      }
+      open_context_menu(lparam);
+      return 0;
+    case kMsgOpenMenu:
+      enter_menu_bar();
+      return 0;
+    case WM_LBUTTONDOWN:
+      handle_left_down(POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}, (wparam & MK_SHIFT) != 0);
+      return 0;
+    case WM_LBUTTONDBLCLK:
+      handle_left_double_click(POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+      return 0;
+    case WM_MOUSEMOVE:
+      if (dragging_ && (wparam & MK_LBUTTON) != 0) handle_drag(POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+      return 0;
+    case WM_LBUTTONUP:
+      end_drag();
+      return 0;
+    case WM_CAPTURECHANGED:
+      if (reinterpret_cast<HWND>(lparam) != hwnd_) end_drag();
+      return 0;
+    case WM_MOUSEWHEEL:
+      handle_wheel(GET_WHEEL_DELTA_WPARAM(wparam));
+      return 0;
+    case WM_SETCURSOR:
+      if (LOWORD(lparam) == HTCLIENT && set_cursor_shape()) return TRUE;
       break;
     case WM_IME_STARTCOMPOSITION:
       place_ime();
@@ -425,6 +510,10 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wparam, LPARAM lparam) {
       if (wparam == kRedrawTimer) {
         KillTimer(hwnd_, kRedrawTimer);
         InvalidateRect(hwnd_, nullptr, FALSE);
+        return 0;
+      }
+      if (wparam == kDragScrollTimer) {
+        drag_scroll_step();
         return 0;
       }
       break;
@@ -466,6 +555,8 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wparam, LPARAM lparam) {
         append_message(L"Stopped watching the settings file: " + (reason ? *reason : std::wstring()));
       } else {
         editor_.reload_settings();
+        apply_menu_bar();  // decision B4, and the key texts of decision B1
+        ++settings_reloads_;
       }
       after_input();  // rebuilds the font when the settings changed it
       return 0;
@@ -505,6 +596,11 @@ void MainWindow::paint() {
     renderer_.discard_target();
     InvalidateRect(hwnd_, nullptr, FALSE);
     return;
+  }
+  if (SUCCEEDED(result)) {
+    // The tools wait for a frame drawn after a settings reload (GSTA).
+    ++frames_;
+    reloads_drawn_ = settings_reloads_;
   }
   if (FAILED(result) && !measure_startup_) {
     if (draw_error_ == S_OK) draw_error_ = result;
@@ -631,6 +727,14 @@ LRESULT MainWindow::handle_copy_data(const COPYDATASTRUCT* data) {
         renderer_.fail_next_font();
         return 1;
       }
+      if (*text == L"menu") {
+        fail_next_menu_ = true;
+        return 1;
+      }
+      if (*text == L"popup") {
+        fail_next_popup_ = true;
+        return 1;
+      }
       if (headless_ && *text == L"clipboard-read") {
         fail_clipboard_read_ = true;
         return 1;
@@ -696,6 +800,44 @@ bool MainWindow::write_state(const std::wstring& path) {
     text += state_line(L"clipboard", clipboard_has_text_ ? L"text" : L"empty");
     text += state_line(L"clipboard_text", clipboard_store_);
   }
+  // Point, mark and view (M3b checks).
+  const Buffer& b = editor_.buffer();
+  text += state_line(L"point", std::to_wstring(b.point));
+  text += state_line(L"mark", b.has_mark ? std::to_wstring(b.mark) : std::wstring(L"none"));
+  text += state_line(L"mark_active", b.mark_active ? L"1" : L"0");
+  text += state_line(L"top_line", std::to_wstring(editor_.top().line));
+  text += state_line(L"top_row", std::to_wstring(editor_.top().row));
+  text += state_line(L"minibuffer", editor_.minibuffer_active() ? L"1" : L"0");
+  if (b.text.length() <= 65536) text += state_line(L"text", b.text.text());
+  // The grid of the last frame in client pixels, for posting mouse messages.
+  {
+    RECT rc{};
+    GetClientRect(hwnd_, &rc);
+    const float scale = renderer_.dpi() / 96.0f;
+    const float height = static_cast<float>(rc.bottom - rc.top) / scale;
+    auto px = [&](float dip) { return std::to_wstring(dip * scale); };
+    text += state_line(L"line_height", px(renderer_.line_height()));
+    text += state_line(L"cell_width", px(renderer_.cell_width()));
+    text += state_line(L"text_left", px(renderer_.text_left(editor_)));
+    text += state_line(L"mode_line_top", px(renderer_.mode_line_top(height, editor_)));
+    text += state_line(L"text_rows", std::to_wstring(visible_lines()));
+    text += state_line(L"left_column", std::to_wstring(view_.left_column));
+    const POINT caret = caret_point();
+    text += state_line(L"caret_x", std::to_wstring(caret.x));
+    text += state_line(L"caret_bottom", std::to_wstring(caret.y));
+  }
+  text += state_line(L"dragging", dragging_ ? L"1" : L"0");
+  // Settings reloads applied by the watcher, the frames drawn, and the
+  // reloads that a drawn frame already shows.
+  text += state_line(L"settings_reloads", std::to_wstring(settings_reloads_));
+  text += state_line(L"frames", std::to_wstring(frames_));
+  text += state_line(L"reloads_drawn", std::to_wstring(reloads_drawn_));
+  // Menus: the bar as set on the window (GetMenu), the menu loops entered
+  // and the SC_KEYMENU / SC_MOUSEMENU requests seen.
+  text += state_line(L"menu_bar", GetMenu(hwnd_) != nullptr ? L"1" : L"0");
+  text += state_line(L"menu_loops", std::to_wstring(menu_loops_));
+  text += state_line(L"keymenu_count", std::to_wstring(keymenu_count_));
+  text += state_line(L"last_keymenu", last_keymenu_);
   text += state_line(L"rejected", std::to_wstring(rejected_requests_));
   text += state_line(L"last_rejected", last_rejected_);
   text += question_ != nullptr ? question_state(*question_) : state_line(L"question", L"none");
@@ -747,6 +889,8 @@ void MainWindow::start_settings_watcher() {
     // watcher only sees later changes.
     if (file_state(editor_.settings_path()) != settings_state_) {
       editor_.reload_settings();
+      apply_menu_bar();
+      ++settings_reloads_;
       after_input();
     }
     return;
@@ -941,6 +1085,237 @@ void MainWindow::place_ime() {
                     static_cast<LONG>(std::lround(view_.caret_y * scale))};
   place_ime_windows(hwnd_, caret, static_cast<int>(std::lround(view_.caret_height * scale)),
                     renderer_.font_family(), static_cast<int>(std::lround(renderer_.em() * scale)));
+}
+
+// ---- Menus ----
+
+void MainWindow::apply_menu_bar() {
+  HMENU current = GetMenu(hwnd_);
+  const bool wanted = editor_.config().menu_bar;
+  if (wanted == (current != nullptr)) {
+    // New settings may have changed the keys (decision B1).
+    if (current != nullptr) update_menu(current, editor_);
+    return;
+  }
+  // Decision B4: the top line stays where it is.
+  const RowPos top = editor_.top();
+  if (wanted) {
+    HMENU bar = nullptr;
+    if (fail_next_menu_) {
+      fail_next_menu_ = false;
+      SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    } else {
+      bar = create_menu_bar(editor_);
+    }
+    if (bar == nullptr) {
+      append_message(L"Cannot create the menu bar (error " + std::to_wstring(GetLastError()) + L")");
+      return;
+    }
+    if (!SetMenu(hwnd_, bar)) {
+      append_message(L"Cannot show the menu bar (error " + std::to_wstring(GetLastError()) + L")");
+      DestroyMenu(bar);
+      return;
+    }
+  } else {
+    SetMenu(hwnd_, nullptr);
+    DestroyMenu(current);
+  }
+  editor_.set_top(top);
+  editor_.ensure_point_visible();
+  update_scroll_bar();
+  InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::enter_menu_bar() {
+  HMENU bar = GetMenu(hwnd_);
+  if (bar == nullptr) {
+    // menu_bar is on (the command checked it) but the bar could not be made.
+    append_message(L"There is no menu bar to open");
+    after_input();
+    return;
+  }
+  if (!headless_) {
+    // PLAN 4.2: straight to DefWindowProc, past the Alt-alone filter of
+    // handle_message.
+    DefWindowProcW(hwnd_, WM_SYSCOMMAND, SC_KEYMENU, 0);
+    return;
+  }
+  MENUBARINFO info{};
+  info.cbSize = sizeof(info);
+  POINT position{};
+  if (GetMenuBarInfo(hwnd_, OBJID_MENU, 0, &info)) {
+    position = POINT{info.rcBar.left, info.rcBar.top};
+    ScreenToClient(hwnd_, &position);
+  }
+  const UINT id = ask_headless_menu(QuestionKind::kMenuBar, bar, position);
+  if (id != 0) PostMessageW(hwnd_, WM_COMMAND, id, 0);  // as the menu loop sends it
+}
+
+UINT MainWindow::ask_headless_menu(QuestionKind kind, HMENU menu, POINT position) {
+  // What WM_INITMENUPOPUP does before each menu opens, then the built HMENU
+  // as it is read back (decision B7).
+  update_menu(menu, editor_);
+  const Question question = menu_question(kind, read_menu(menu), position);
+  const int answer = ask_headless(question);
+  return answer == IDCANCEL || answer <= 0 ? 0 : static_cast<UINT>(answer);
+}
+
+POINT MainWindow::caret_point() const {
+  const float scale = renderer_.dpi() / 96.0f;
+  return POINT{static_cast<LONG>(std::lround(view_.caret_x * scale)),
+               static_cast<LONG>(std::lround((view_.caret_y + view_.caret_height) * scale))};
+}
+
+void MainWindow::open_context_menu(LPARAM lparam) {
+  // Decision B6: at the mouse, or at the cursor for the keyboard (Apps key,
+  // Shift+F10: lParam -1). Point and region do not move.
+  POINT client{};
+  POINT screen{};
+  if (lparam == -1) {
+    client = caret_point();
+    screen = client;
+    ClientToScreen(hwnd_, &screen);
+  } else {
+    screen = POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    client = screen;
+    ScreenToClient(hwnd_, &client);
+  }
+  HMENU popup = nullptr;
+  if (fail_next_menu_) {
+    fail_next_menu_ = false;
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+  } else {
+    popup = create_context_menu(editor_);
+  }
+  if (popup == nullptr) {
+    append_message(L"Cannot create the context menu (error " + std::to_wstring(GetLastError()) + L")");
+    after_input();
+    return;
+  }
+  UINT id = 0;
+  if (fail_next_popup_) {
+    // As if TrackPopupMenu had failed ('GFLT' "popup").
+    fail_next_popup_ = false;
+    append_message(L"Cannot show the context menu (error " + std::to_wstring(ERROR_INVALID_PARAMETER) + L")");
+  } else if (headless_) {
+    id = ask_headless_menu(QuestionKind::kContextMenu, popup, client);
+  } else {
+    SetLastError(ERROR_SUCCESS);
+    const BOOL chosen = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, hwnd_,
+                                       nullptr);
+    const DWORD error = GetLastError();
+    if (chosen != 0) {
+      id = static_cast<UINT>(chosen);
+    } else if (error != ERROR_SUCCESS) {
+      append_message(L"Cannot show the context menu (error " + std::to_wstring(error) + L")");
+    }
+  }
+  DestroyMenu(popup);
+  if (id != 0) {
+    run_menu_command(id);
+  } else {
+    after_input();
+  }
+}
+
+void MainWindow::run_menu_command(UINT id) {
+  const MenuItem* item = menu_item_for_command(id);
+  if (item == nullptr || item->kind != MenuItemKind::kCommand) {
+    reject_request(L"WM_COMMAND " + std::to_wstring(id) + L" is no menu command");
+    return;
+  }
+  if (!editor_.execute_menu_item(*item)) {
+    // A grey item: Windows never sends it; a tool may.
+    reject_request(L"menu item '" + menu_text_without_mnemonic(item->text) + L"' is disabled");
+    return;
+  }
+  after_input();
+}
+
+// ---- Mouse ----
+
+Renderer::Hit MainWindow::hit_at(POINT client) const {
+  RECT rc{};
+  GetClientRect(hwnd_, &rc);
+  const float scale = renderer_.dpi() / 96.0f;
+  return renderer_.hit_test(static_cast<float>(client.x) / scale, static_cast<float>(client.y) / scale,
+                            static_cast<float>(rc.right - rc.left) / scale,
+                            static_cast<float>(rc.bottom - rc.top) / scale, editor_, view_);
+}
+
+void MainWindow::handle_left_down(POINT client, bool shift) {
+  const Renderer::Hit hit = hit_at(client);
+  // Decision B5: the mode line and the echo area do nothing.
+  if (hit.area == Renderer::Hit::Area::kModeLine || hit.area == Renderer::Hit::Area::kEchoArea) return;
+  chars_.reset();
+  // The strip below the last whole row is the last row (R1): no scrolling.
+  if (editor_.mouse_press(editor_.offset_at_click(hit.row, hit.column), shift)) {
+    dragging_ = true;
+    drag_point_ = client;
+    SetCapture(hwnd_);
+  }
+  after_input();
+}
+
+void MainWindow::handle_left_double_click(POINT client) {
+  const Renderer::Hit hit = hit_at(client);
+  if (hit.area == Renderer::Hit::Area::kModeLine || hit.area == Renderer::Hit::Area::kEchoArea) return;
+  end_drag();
+  editor_.mouse_double_click(editor_.offset_at_click(hit.row, hit.column));
+  after_input();
+}
+
+void MainWindow::handle_drag(POINT client) {
+  drag_point_ = client;
+  const Renderer::Hit hit = hit_at(client);
+  const long long rows = std::max(1, visible_lines());
+  const int direction = hit.row < 0 ? -1 : hit.row >= rows ? 1 : 0;
+  const long long row = std::clamp<long long>(hit.row, 0, rows - 1);
+  editor_.mouse_drag(editor_.offset_at_screen(row, hit.column));
+  if (direction != 0 && drag_scroll_ == 0) SetTimer(hwnd_, kDragScrollTimer, kDragScrollMs, nullptr);
+  if (direction == 0 && drag_scroll_ != 0) KillTimer(hwnd_, kDragScrollTimer);
+  drag_scroll_ = direction;
+  after_input();
+}
+
+void MainWindow::drag_scroll_step() {
+  if (!dragging_ || drag_scroll_ == 0) {
+    KillTimer(hwnd_, kDragScrollTimer);
+    return;
+  }
+  editor_.scroll_by_rows(drag_scroll_);
+  const Renderer::Hit hit = hit_at(drag_point_);
+  const long long row = drag_scroll_ < 0 ? 0 : std::max(1, visible_lines()) - 1;
+  editor_.mouse_drag(editor_.offset_at_screen(row, hit.column));
+  after_input();
+}
+
+void MainWindow::end_drag() {
+  if (!dragging_) return;
+  dragging_ = false;
+  drag_scroll_ = 0;
+  KillTimer(hwnd_, kDragScrollTimer);
+  editor_.mouse_release();
+  if (GetCapture() == hwnd_) ReleaseCapture();
+}
+
+void MainWindow::handle_wheel(int delta) {
+  UINT lines = 3;
+  SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+  if (lines == 0) return;  // the user turned wheel scrolling off
+  const int per_notch = lines == WHEEL_PAGESCROLL ? std::max(1, visible_lines() - 2) : static_cast<int>(lines);
+  const long long rows = wheel_.add(delta, per_notch);
+  if (rows == 0) return;
+  editor_.scroll_by_rows(rows);
+  after_input();
+}
+
+bool MainWindow::set_cursor_shape() {
+  POINT p{};
+  if (!GetCursorPos(&p) || !ScreenToClient(hwnd_, &p)) return false;
+  const Renderer::Hit hit = hit_at(p);
+  SetCursor(LoadCursorW(nullptr, hit.area == Renderer::Hit::Area::kText ? IDC_IBEAM : IDC_ARROW));
+  return true;
 }
 
 }  // namespace geditor::win

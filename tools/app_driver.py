@@ -277,6 +277,29 @@ def windows_of_class(class_name: str) -> list:
 # The geditor processes that App started; started_windows() adds the
 # processes that they started (new windows).
 STARTED_PIDS = set()
+# The App objects made by this run (apps_using_settings() picks the live
+# ones that read a settings file).
+LIVE_APPS = []
+
+
+def apps_using_settings(settings: pathlib.Path) -> list:
+    """The running Apps started with --settings=`settings`."""
+    path = pathlib.Path(settings).resolve()
+    return [a for a in LIVE_APPS if a.settings == path and a.alive()]
+
+
+def wait_settings_applied(apps: list, before: dict, timeout_s: float = 10.0) -> bool:
+    """Waits until each App has applied a settings reload after `before`
+    (hwnd -> its "settings_reloads" then) and drawn a frame that shows it
+    (GSTA "reloads_drawn"). False when one does not within `timeout_s`."""
+    def applied():
+        for app in apps:
+            s = app.state()
+            reloads = int(s.get("settings_reloads", "0"))
+            if reloads <= before[app.hwnd] or int(s.get("reloads_drawn", "0")) < reloads:
+                return False
+        return True
+    return bool(wait_for(applied, timeout_s, 0.03))
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -361,6 +384,7 @@ class App:
                  width: int = 900, height: int = 500, settings: pathlib.Path | None = None):
         if settings is not None:
             args = [f"--settings={settings}", *args]
+        self.settings = pathlib.Path(settings).resolve() if settings is not None else None
         self.headless = HEADLESS
         if self.headless:
             args = ["--headless", *args]
@@ -376,6 +400,7 @@ class App:
             raise DriverError("geditor window did not appear")
         self.hwnd = windows[0]
         STARTED_PIDS.add(self.proc.pid)
+        LIVE_APPS.append(self)
         if self.headless:
             # A build without --headless shows its window and has no state
             # request: refuse it instead of checking a visible window.
@@ -427,8 +452,69 @@ class App:
         return copy_data(self.hwnd, COPYDATA_CLIPBOARD_WRITE, text) == 1
 
     def fault(self, what: str) -> bool:
-        """'GFLT': "target", "font", "clipboard-read" or "clipboard-write"."""
+        """'GFLT': "target", "font", "menu", "popup", "clipboard-read" or
+        "clipboard-write"."""
         return inject_fault(self.hwnd, what)
+
+    # ---- M3b: menus and mouse (posted messages, any mode) ----
+    def menu_bar(self) -> list:
+        """The real menu bar of the window (GetMenu), read back after a
+        WM_INITMENUPOPUP for every popup (as Windows sends it before a menu
+        opens): [MenuItem, ...] depth first; [] without a menu bar."""
+        return read_menu_bar(self.hwnd)
+
+    def menu_command(self, item_id: int):
+        """Posts the WM_COMMAND that the menu sends for item `item_id`."""
+        user32.PostMessageW(self.hwnd, WM_COMMAND, item_id, 0)
+
+    def cell_point(self, row: int, column: int, state: dict | None = None) -> tuple[int, int]:
+        """Client pixels of the middle of cell `column` (text area, 0 = the
+        first visible column; -1 = the gutter) on screen row `row`."""
+        s = state or self.state()
+        lh, cw, left = float(s["line_height"]), float(s["cell_width"]), float(s["text_left"])
+        x = left / 2 if column < 0 else left + (column + 0.5) * cw
+        return int(x), int((row + 0.5) * lh)
+
+    def mouse(self, message: int, x: int, y: int, flags: int = 0, pause_s: float = 0.05):
+        """Posts a mouse message at client pixels (x, y) with MK_* `flags`."""
+        user32.PostMessageW(self.hwnd, message, flags, ((y & 0xFFFF) << 16) | (x & 0xFFFF))
+        time.sleep(pause_s)
+
+    def click(self, x: int, y: int, shift: bool = False):
+        flags = MK_SHIFT if shift else 0
+        self.mouse(WM_LBUTTONDOWN, x, y, flags | MK_LBUTTON)
+        self.mouse(WM_LBUTTONUP, x, y, flags)
+
+    def double_click(self, x: int, y: int):
+        """The messages of a real double-click: down, up, double-click, up."""
+        self.click(x, y)
+        self.mouse(WM_LBUTTONDBLCLK, x, y, MK_LBUTTON)
+        self.mouse(WM_LBUTTONUP, x, y, 0)
+
+    def wheel(self, delta: int, x: int = 50, y: int = 50):
+        """WM_MOUSEWHEEL (lParam in screen pixels)."""
+        point = wt.POINT(x, y)
+        user32.ClientToScreen(self.hwnd, ctypes.byref(point))
+        user32.PostMessageW(self.hwnd, WM_MOUSEWHEEL, (delta & 0xFFFF) << 16,
+                            ((point.y & 0xFFFF) << 16) | (point.x & 0xFFFF))
+        time.sleep(0.1)
+
+    def right_click(self, x: int, y: int):
+        """WM_RBUTTONDOWN / WM_RBUTTONUP; DefWindowProc turns the second into
+        WM_CONTEXTMENU (screen position)."""
+        self.mouse(WM_RBUTTONDOWN, x, y, MK_RBUTTON)
+        self.mouse(WM_RBUTTONUP, x, y, 0)
+
+    def context_menu(self, x: int | None = None, y: int | None = None):
+        """WM_CONTEXTMENU at client pixels (x, y), or from the keyboard
+        (lParam -1) when x is None."""
+        if x is None:
+            user32.PostMessageW(self.hwnd, WM_CONTEXTMENU, self.hwnd, -1)
+            return
+        point = wt.POINT(x, y)
+        user32.ClientToScreen(self.hwnd, ctypes.byref(point))
+        user32.PostMessageW(self.hwnd, WM_CONTEXTMENU, self.hwnd,
+                            ((point.y & 0xFFFF) << 16) | (point.x & 0xFFFF))
 
     # ---- state ----
     def title(self) -> str:
@@ -691,14 +777,14 @@ def read_state(hwnd) -> dict:
             path.unlink()
         except OSError:
             pass
-    state = {"button": []}
+    state = {"button": [], "menu_item": []}
     for line in text.split("\n"):
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
         value = _unescape(value)
-        if key == "button":
-            state["button"].append(value)
+        if key in ("button", "menu_item"):
+            state[key].append(value)
         else:
             state[key] = value
     return state
@@ -794,8 +880,9 @@ class ForegroundSampler:
     The dialogs are scanned by a thread of their own (dialog_scans,
     dialog_scan_max_gap_s); the same thread checks that every headless
     geditor window (a "geditor.main" tool window) is off every monitor and
-    not iconic (window_checks, on_screen). start(), then stop() fills samples, max_gap_s,
-    gaps_over_50ms, long_gaps, foreground_hits, dialogs,
+    not iconic (window_checks, on_screen) and lists the visible menus and
+    popup menus (#32768) of those processes (menus, menu_scans). start(), then stop() fills samples,
+    max_gap_s, gaps_over_50ms, long_gaps, foreground_hits, dialogs, menus,
     foreground_windows and geditor_windows_seen."""
 
     def __init__(self, exe: pathlib.Path, interval_s: float = 0.02):
@@ -814,6 +901,10 @@ class ForegroundSampler:
         self.dialog_scan_max_gap_s = 0.0
         self.window_checks = 0
         self.on_screen = []
+        self.menus = []
+        self.menu_scans = 0
+        self.menus_any_process = 0
+        self.clipboard_changes = []
 
     def start(self):
         self.proc = subprocess.Popen(
@@ -882,7 +973,11 @@ def _sample_foreground(exe: str, interval_s: float):
 
     start = time.monotonic()
     dialogs = {}         # (hwnd, pid) -> first time
-    dialog_scans = {"count": 0, "max_gap_s": 0.0, "window_checks": 0}
+    menus = {}           # (hwnd, pid) -> first time, visible #32768 windows
+    # Changes of the clipboard sequence number: [time, sequence, owner pid,
+    # pids of the geditor.main windows then].
+    clipboard = {"last": user32.GetClipboardSequenceNumber(), "changes": []}
+    dialog_scans = {"count": 0, "max_gap_s": 0.0, "window_checks": 0, "menu_scans": 0}
     on_screen = []       # [time, hwnd, pid, rect, iconic] of a headless window on a monitor
 
     def dialog_scanner():
@@ -903,6 +998,38 @@ def _sample_foreground(exe: str, interval_s: float):
                         with lock:
                             if key[1] not in images:
                                 pending.add(key[1])
+            # Menus and popup menus (#32768): none of a geditor process may
+            # show (the headless menus are pending in the state instead).
+            menu = None
+            while True:
+                menu = user32.FindWindowExW(None, menu, "#32768", None)
+                if not menu:
+                    break
+                if user32.IsWindowVisible(menu):
+                    key = (menu, pid_of(menu))
+                    if key not in menus:
+                        menus[key] = round(time.monotonic() - start, 3)
+                        with lock:
+                            if key[1] not in images:
+                                pending.add(key[1])
+            dialog_scans["menu_scans"] += 1
+            # The real clipboard: who wrote it (GetClipboardOwner needs no
+            # OpenClipboard) and which geditor windows were open then.
+            sequence = user32.GetClipboardSequenceNumber()
+            if sequence != clipboard["last"]:
+                clipboard["last"] = sequence
+                owner = user32.GetClipboardOwner()
+                owner_pid = pid_of(owner) if owner else 0
+                geditors = []
+                window = None
+                while True:
+                    window = user32.FindWindowExW(None, window, "geditor.main", None)
+                    if not window:
+                        break
+                    geditors.append(pid_of(window))
+                clipboard["changes"].append([round(time.monotonic() - start, 3), sequence, owner_pid, geditors])
+                with lock:
+                    pending.update(p for p in [owner_pid, *geditors] if p and p not in images)
             # Every headless geditor window (a "geditor.main" tool window)
             # must stay off every monitor and must not be iconic.
             window = None
@@ -964,9 +1091,35 @@ def _sample_foreground(exe: str, interval_s: float):
     result["foreground_hits"] = [[t, hwnd, cls] for (hwnd, pid), (t, cls) in foregrounds.items()
                                  if cls == "geditor.main" or images.get(pid) == target]
     result["dialogs"] = [[t, hwnd, pid] for (hwnd, pid), t in dialogs.items() if images.get(pid) == target]
+    result["menus"] = [[t, hwnd, pid] for (hwnd, pid), t in menus.items() if images.get(pid) == target]
+    result["menu_scans"] = dialog_scans["menu_scans"]
+    result["menus_any_process"] = len(menus)
+    result["clipboard_changes"] = [
+        {"time": t, "sequence": seq, "owner_pid": pid, "owner_image": images.get(pid, "") if pid else "",
+         "geditor_alive": any(images.get(p) == target for p in geditors)}
+        for t, seq, pid, geditors in clipboard["changes"]]
     result["foreground_windows"] = len(foregrounds)
     result["geditor_windows_seen"] = len(seen)
     print(json.dumps(result), flush=True)
+
+
+def clipboard_verdict(changes: list, target: str) -> tuple[str, str]:
+    """("PASS" | "FAIL" | "INFO", evidence) for the changes of the real
+    clipboard that the sampler saw (clipboard_changes; `target` is the
+    normcased path of the geditor exe). FAIL when a geditor process owns the
+    new clipboard, or when the owner cannot be identified while a geditor of
+    the run was open; INFO when only other programs (the user) wrote it."""
+    if not changes:
+        return "PASS", "no change of the clipboard sequence number"
+    bad = [c for c in changes if c["owner_image"] == target or (not c["owner_image"] and c["geditor_alive"])]
+    owners = sorted({os.path.basename(c["owner_image"]) or f"pid {c['owner_pid']} (unknown)" for c in changes})
+    if bad:
+        return "FAIL", f"{len(bad)} of {len(changes)} changes by geditor or by an unknown owner while geditor " \
+                       f"was open: {bad[:5]}"
+    return "INFO", f"{len(changes)} changes by other programs: {', '.join(owners)}"
+
+
+user32.GetClipboardOwner.restype = wt.HWND
 
 
 def capture(hwnd, path: pathlib.Path) -> tuple[int, int, bytes]:
@@ -1106,6 +1259,104 @@ def send_dpi_changed(hwnd, dpi: int, rect: wt.RECT):
     a pointer into this process works."""
     suggested = wt.RECT(rect.left, rect.top, rect.right, rect.bottom)
     user32.SendMessageW(hwnd, WM_DPICHANGED, (dpi << 16) | dpi, ctypes.addressof(suggested))
+
+
+# ---- M3b: menus and mouse ----
+
+WM_COMMAND = 0x0111
+WM_INITMENUPOPUP = 0x0117
+WM_CONTEXTMENU = 0x007B
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_MOUSEWHEEL = 0x020A
+MK_LBUTTON = 0x0001
+MK_RBUTTON = 0x0002
+MK_SHIFT = 0x0004
+MIIM_STATE = 0x0001
+MIIM_ID = 0x0002
+MIIM_SUBMENU = 0x0004
+MIIM_STRING = 0x0040
+MIIM_FTYPE = 0x0100
+MFT_SEPARATOR = 0x0800
+MFT_RADIOCHECK = 0x0200
+MFS_DISABLED = 0x0003
+MFS_CHECKED = 0x0008
+
+
+class MENUITEMINFOW(ctypes.Structure):
+    _fields_ = [("cbSize", wt.UINT), ("fMask", wt.UINT), ("fType", wt.UINT), ("fState", wt.UINT),
+                ("wID", wt.UINT), ("hSubMenu", wt.HMENU), ("hbmpChecked", wt.HBITMAP),
+                ("hbmpUnchecked", wt.HBITMAP), ("dwItemData", ctypes.c_size_t), ("dwTypeData", wt.LPWSTR),
+                ("cch", wt.UINT), ("hbmpItem", wt.HBITMAP)]
+
+
+user32.GetMenu.argtypes = [wt.HWND]
+user32.GetMenu.restype = wt.HMENU
+user32.GetMenuItemCount.argtypes = [wt.HMENU]
+user32.GetMenuItemInfoW.argtypes = [wt.HMENU, wt.UINT, wt.BOOL, ctypes.POINTER(MENUITEMINFOW)]
+user32.ClientToScreen.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
+
+
+class MenuItem:
+    """One item of a real HMENU of another process (GetMenuItemInfoW)."""
+
+    def __init__(self, path, text, key, item_id, separator, submenu, enabled, checked, radio):
+        self.path, self.text, self.key, self.id = path, text, key, item_id
+        self.separator, self.submenu = separator, submenu
+        self.enabled, self.checked, self.radio = enabled, checked, radio
+
+    def line(self) -> str:
+        """The format of the headless menu state ("path TAB key TAB flags")."""
+        if self.separator:
+            flags = ["separator"]
+        else:
+            flags = (["submenu"] if self.submenu else []) + ["enabled" if self.enabled else "disabled"]
+            flags += (["checked"] if self.checked else []) + (["radio"] if self.radio else [])
+        return f"{self.path}\t{self.key}\t{' '.join(flags)}"
+
+
+def _read_menu(hwnd, menu, prefix: str, out: list):
+    for i in range(user32.GetMenuItemCount(menu)):
+        buffer = ctypes.create_unicode_buffer(256)
+        info = MENUITEMINFOW()
+        info.cbSize = ctypes.sizeof(MENUITEMINFOW)
+        info.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_SUBMENU | MIIM_STRING
+        info.dwTypeData = ctypes.cast(buffer, wt.LPWSTR)
+        info.cch = 256
+        if not user32.GetMenuItemInfoW(menu, i, True, ctypes.byref(info)):
+            raise DriverError(f"GetMenuItemInfoW failed (error {ctypes.get_last_error()})")
+        separator = bool(info.fType & MFT_SEPARATOR)
+        text, _, key = buffer.value.partition("\t")
+        key = key.replace("&&", "&")  # the menu text escapes a '&' of the key
+        name = "-" if separator else text.replace("&&", "\0").replace("&", "").replace("\0", "&")
+        path = f"{prefix} > {name}" if prefix else name
+        out.append(MenuItem(path, text, key, info.wID, separator, bool(info.hSubMenu),
+                            not info.fState & MFS_DISABLED, bool(info.fState & MFS_CHECKED),
+                            bool(info.fType & MFT_RADIOCHECK)))
+        if info.hSubMenu:
+            # What Windows sends before the popup opens.
+            user32.SendMessageW(hwnd, WM_INITMENUPOPUP, info.hSubMenu, i)
+            _read_menu(hwnd, info.hSubMenu, path, out)
+
+
+def read_menu_bar(hwnd) -> list:
+    bar = user32.GetMenu(hwnd)
+    if not bar:
+        return []
+    out = []
+    # The popups are refreshed (WM_INITMENUPOPUP) before their items are read.
+    for i in range(user32.GetMenuItemCount(bar)):
+        info = MENUITEMINFOW()
+        info.cbSize = ctypes.sizeof(MENUITEMINFOW)
+        info.fMask = MIIM_SUBMENU
+        if user32.GetMenuItemInfoW(bar, i, True, ctypes.byref(info)) and info.hSubMenu:
+            user32.SendMessageW(hwnd, WM_INITMENUPOPUP, info.hSubMenu, i)
+    _read_menu(hwnd, bar, "", out)
+    return out
 
 
 def inject_fault(hwnd, what: str) -> bool:

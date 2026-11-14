@@ -19,6 +19,8 @@
 
 namespace geditor {
 
+struct MenuItem;
+
 // Shown when a command needs the minibuffer while it is already active.
 inline constexpr wchar_t kRecursiveMinibufferMessage[] =
     L"Command attempted to use minibuffer while in minibuffer";
@@ -55,6 +57,41 @@ class Editor {
   // without a default key, and the window's close button). Unknown names
   // show a message.
   void execute_command(std::string_view name);
+  // Runs the command of a menu item (docs/PLAN.md 4.9) through the same
+  // dispatch as a key bound to it: one undo group, the prefix argument typed
+  // before it, "not implemented yet". Pending prefix keys are dropped. A
+  // disabled item (decision B2) runs nothing and returns false.
+  bool execute_menu_item(const MenuItem& item);
+
+  // ---- Mouse (decision B5) ----
+  // The offset that a click at screen row `row` of the window (0: the top
+  // row; rows below the last one: the end of the buffer) and cell column
+  // `column` of the text area (the horizontal scroll included; negative: the
+  // line-number gutter, the start of the row) points at: the character whose
+  // cells contain the column, the end of the line right of a line's last row,
+  // and the last character right of any other row (WrapLayout::offset_at).
+  size_t offset_at_screen(long long row, int column) const;
+  // The offset of a click (press, double-click, Shift+click) at `row`:
+  // like offset_at_screen with `row` clamped to the rows of the window
+  // [0, visible_lines() - 1]. The blank strip below the last whole row (a
+  // client height that is no multiple of the line height) counts as the
+  // last row, so that a click never scrolls the view.
+  size_t offset_at_click(long long row, int column);
+  // Left press at `offset`: point moves there and the mark is deactivated;
+  // with `shift` the region is extended instead, from the active mark or else
+  // from the old point. Like a key, it ends a typing undo group and pending
+  // prefix keys. Ignored (false) while the minibuffer is active.
+  bool mouse_press(size_t offset, bool shift);
+  // Dragging after mouse_press: the mark at the press position (or the
+  // extended region's mark), point at `offset`, the region active once point
+  // left the press position. False when no press is held.
+  bool mouse_drag(size_t offset);
+  void mouse_release() { mouse_pressed_ = false; }
+  bool mouse_pressed() const { return mouse_pressed_; }
+  // Double-click: selects the word at `offset` (the forward-word /
+  // backward-word definition), or the one character there when it is no word
+  // character. Ignored (false) while the minibuffer is active.
+  bool mouse_double_click(size_t offset);
 
   // ---- Settings (docs/PLAN.md 2 "settings errors", 4.3, 4.5) ----
   // The settings file; empty when there is none.
@@ -282,6 +319,12 @@ class Editor {
   RowPos max_top();
   // Moves point onto the screen rows [top_, top_ + visible) when it is off.
   void keep_point_on_screen();
+  // `offset` within the main buffer, not between the halves of a surrogate
+  // pair.
+  size_t clamp_main_offset(size_t offset) const;
+  // Starts a mouse action as a command of its own: clears the message and
+  // pending input and ends the typing undo group.
+  void begin_mouse_command();
 
   std::wstring default_directory() const;
   bool load_file(const std::wstring& path);
@@ -340,6 +383,11 @@ class Editor {
   ViewSetting<WhitespaceFlags> whitespace_view_;
   ViewSetting<WrapMode> wrap_view_;
   int text_scale_ = 0;
+
+  // Mouse (decision B5): the press being held and where the region starts.
+  bool mouse_pressed_ = false;
+  bool mouse_dragged_ = false;
+  size_t mouse_anchor_ = 0;
 
   MinibufferPurpose purpose_ = MinibufferPurpose::kNone;
   std::wstring prompt_;

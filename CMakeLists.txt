@@ -38,7 +38,9 @@ add_library(geditor_core STATIC
   src/core/key.cpp
   src/core/keymap.cpp
   src/core/layout.cpp
+  src/core/menu.cpp
   src/core/minibuffer.cpp
+  src/core/mouse.cpp
   src/core/path.cpp
   src/core/piece_tree.cpp
   src/core/undo.cpp
@@ -47,13 +49,15 @@ target_include_directories(geditor_core PUBLIC src/core)
 target_link_libraries(geditor_core PRIVATE geditor_options)
 
 # Pure logic of the Win32 layer (key translation, command line, clipboard
-# text, file access, process start): shared by the app and the unit tests.
+# text, file access, process start, the HMENUs of the menu model): shared by
+# the app and the unit tests.
 add_library(geditor_win_logic STATIC
   src/win/clipboard.cpp
   src/win/command_line.cpp
   src/win/echo_text.cpp
   src/win/file_io.cpp
   src/win/input.cpp
+  src/win/menu_bar.cpp
   src/win/process.cpp)
 target_include_directories(geditor_win_logic PUBLIC src/win)
 target_link_libraries(geditor_win_logic PUBLIC geditor_core PRIVATE geditor_options)

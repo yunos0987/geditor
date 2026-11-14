@@ -814,6 +814,16 @@ void text_scale_reset(Editor& ed) {
   ed.text_scale_adjust(0);
 }
 
+// F10 (PLAN 2 "menu bar"): the window opens its menu bar after this command;
+// with menu_bar: false there is none to open.
+void menu_bar_open(Editor& ed) {
+  if (!ed.config().menu_bar) {
+    ed.fail(L"Menu bar is hidden");
+    return;
+  }
+  ed.host().open_menu_bar();
+}
+
 // ---- Prefix argument and M-x ----
 
 void universal_argument(Editor& ed) {
@@ -922,7 +932,7 @@ constexpr CommandInfo kCommands[] = {
     {"kmacro-end-macro", nullptr},
     {"kmacro-start-macro", nullptr},
     {"mark-whole-buffer", &mark_whole_buffer},
-    {"menu-bar-open", nullptr},
+    {"menu-bar-open", &menu_bar_open},
     {"minibuffer-complete", &minibuffer_complete},
     {"negative-argument", &negative_argument, {}, true},
     {"newline", &newline},
@@ -983,6 +993,23 @@ const CommandInfo* find_command(std::string_view name) {
     if (name == c.name) return &c;
   }
   return nullptr;
+}
+
+void word_bounds_at(const PieceTree& text, size_t offset, size_t* from, size_t* to) {
+  const size_t n = text.length();
+  if (offset >= n) {
+    *from = n;
+    *to = n;
+    return;
+  }
+  if (class_at(text, offset) == WordClass::kNone) {
+    *from = offset;
+    *to = next_char_offset(text, offset);
+    return;
+  }
+  // The end of the word that holds `offset`, then back over the same word.
+  *to = forward_word_end(text, offset);
+  *from = backward_word_start(text, *to);
 }
 
 }  // namespace geditor

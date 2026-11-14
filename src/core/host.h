@@ -51,6 +51,9 @@ class Host {
   virtual bool launch_new_window(const std::wstring& path, std::wstring& error) = 0;
   // Closes the window and ends the process (after the current call returns).
   virtual void quit() = 0;
+  // menu-bar-open (F10): enters the menu bar after the current command
+  // returns, as the Win32 menu loop would (docs/PLAN.md 4.2).
+  virtual void open_menu_bar() = 0;
   // Number of text lines (screen rows) that fit in the window.
   virtual int visible_lines() = 0;
   // Number of whole cells across the text area, line numbers included.

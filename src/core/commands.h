@@ -6,6 +6,8 @@
 #include <span>
 #include <string_view>
 
+#include "piece_tree.h"
+
 namespace geditor {
 
 class Editor;
@@ -49,5 +51,11 @@ const CommandInfo* find_command(std::string_view name);
 
 // The 13 encoding names of docs/PLAN.md 2 "encodings that can be chosen".
 std::span<const wchar_t* const> encoding_names();
+
+// The word at `offset` as forward-word / backward-word see words: [from, to)
+// of the word whose characters include the one at `offset`. When that
+// character is no word character, [offset, the next character); at the end
+// of the text, the empty range there (double-click, decision B5).
+void word_bounds_at(const PieceTree& text, size_t offset, size_t* from, size_t* to);
 
 }  // namespace geditor

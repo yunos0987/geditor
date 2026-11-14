@@ -13,7 +13,9 @@ add_executable(geditor_tests
   test_key.cpp
   test_keymap.cpp
   test_layout_wrap.cpp
+  test_menu.cpp
   test_minibuffer.cpp
+  test_mouse.cpp
   test_mx.cpp
   test_piece_tree.cpp
   test_prefix_arg.cpp
@@ -30,6 +32,7 @@ add_executable(geditor_tests
   test_win_headless.cpp
   test_win_input.cpp
   test_win_logic.cpp
+  test_win_menu.cpp
   test_win_settings.cpp)
 target_link_libraries(geditor_tests PRIVATE
   geditor_options geditor_core geditor_win_logic geditor_text pcre2_16 user32)

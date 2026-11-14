@@ -17,15 +17,19 @@
 #include <commctrl.h>
 
 #include "host.h"
+#include "menu_bar.h"
 #include "path.h"
 
 namespace geditor::win {
 
-enum class QuestionKind { kOpenChoice, kSaveChanges, kYesNo };
+// kMenuBar / kContextMenu: a menu that would open in a visible window
+// (menu-bar-open, WM_CONTEXTMENU), pending in the headless channel instead
+// (decision B7); its buttons are the enabled command items.
+enum class QuestionKind { kOpenChoice, kSaveChanges, kYesNo, kMenuBar, kContextMenu };
 
 struct QuestionButton {
   int id;
-  const wchar_t* label;
+  std::wstring label;
 };
 
 struct Question {
@@ -34,6 +38,10 @@ struct Question {
   std::wstring content;      // the line below it; empty: none
   std::vector<QuestionButton> buttons;
   int default_button = 0;
+  // Menus: every item as read back from the built HMENU, and where the menu
+  // would open (client pixels).
+  std::vector<MenuEntry> menu;
+  POINT menu_position{};
 };
 
 // Button ids (IDCANCEL / IDYES / IDNO for the standard meanings).
@@ -72,11 +80,32 @@ inline Question yes_no_question(const std::wstring& question) {
   return q;
 }
 
+// A menu as a question: the buttons are the enabled command items, labelled
+// with their path ("Edit > Undo", or "Undo" in the right-click menu), and
+// "Cancel" (IDCANCEL, as Esc in a menu). Ids are the WM_COMMAND ids.
+inline Question menu_question(QuestionKind kind, std::vector<MenuEntry> entries, POINT position) {
+  Question q;
+  q.kind = kind;
+  q.instruction = kind == QuestionKind::kMenuBar ? L"Menu bar" : L"Context menu";
+  for (const MenuEntry& e : entries) {
+    if (!e.separator && !e.submenu && e.enabled && e.id != 0) {
+      q.buttons.push_back(QuestionButton{static_cast<int>(e.id), e.path});
+    }
+  }
+  q.buttons.push_back(QuestionButton{IDCANCEL, L"Cancel"});
+  q.default_button = IDCANCEL;
+  q.menu = std::move(entries);
+  q.menu_position = position;
+  return q;
+}
+
 inline const wchar_t* question_kind_name(QuestionKind kind) {
   switch (kind) {
     case QuestionKind::kOpenChoice: return L"open_choice";
     case QuestionKind::kSaveChanges: return L"save_changes";
     case QuestionKind::kYesNo: return L"yes_no";
+    case QuestionKind::kMenuBar: return L"menu_bar";
+    case QuestionKind::kContextMenu: return L"context_menu";
   }
   return L"unknown";
 }
@@ -123,7 +152,7 @@ inline std::optional<bool> yes_no_for(int id) {
 inline std::vector<TASKDIALOG_BUTTON> task_dialog_buttons(const Question& q) {
   std::vector<TASKDIALOG_BUTTON> buttons;
   buttons.reserve(q.buttons.size());
-  for (const QuestionButton& b : q.buttons) buttons.push_back(TASKDIALOG_BUTTON{b.id, b.label});
+  for (const QuestionButton& b : q.buttons) buttons.push_back(TASKDIALOG_BUTTON{b.id, b.label.c_str()});
   return buttons;
 }
 

@@ -215,7 +215,7 @@ constexpr LaterKey kLaterKeys[] = {
     {L"C-x RET r", "revert-buffer-with-coding-system"},
     {L"C-x RET c", "find-file-with-encoding"},
     {L"C-x RET e", "set-eol"},
-    {L"<f10>", "menu-bar-open"},
+    // <f10> menu-bar-open: implemented in M3b (test_menu.cpp).
     {L"C-x (", "kmacro-start-macro"},
     {L"<f3>", "kmacro-start-macro"},
     {L"C-x )", "kmacro-end-macro"},

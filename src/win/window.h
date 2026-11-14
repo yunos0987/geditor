@@ -14,11 +14,11 @@
 #include "file_io.h"
 #include "host.h"
 #include "input.h"
+#include "mouse.h"
+#include "question.h"
 #include "renderer.h"
 
 namespace geditor::win {
-
-struct Question;
 
 class MainWindow final : public Host {
  public:
@@ -54,6 +54,7 @@ class MainWindow final : public Host {
   bool ask_yes_no(const std::wstring& question) override;
   bool launch_new_window(const std::wstring& path, std::wstring& error) override;
   void quit() override;
+  void open_menu_bar() override;
   int visible_lines() override;
   int visible_columns() override;
   int dpi() override;
@@ -101,6 +102,35 @@ class MainWindow final : public Host {
   // because the program quits).
   int ask_headless(const Question& question);
 
+  // ---- Menus (docs/PLAN.md 4.9, decisions B1-B10) ----
+  // Shows or removes the menu bar for the menu_bar setting (keeping the top
+  // line), or refreshes its texts; a failed creation is reported.
+  void apply_menu_bar();
+  // menu-bar-open after its command: the Win32 menu loop, or headless the
+  // pending menu (decision B7).
+  void enter_menu_bar();
+  // WM_CONTEXTMENU: `lparam` -1 for the keyboard (at the cursor), else the
+  // screen position of the mouse.
+  void open_context_menu(LPARAM lparam);
+  // WM_COMMAND of a menu item: runs its command like the key bound to it.
+  void run_menu_command(UINT id);
+  // Headless: the menu as a pending question; returns the chosen WM_COMMAND
+  // id, 0 for Cancel.
+  UINT ask_headless_menu(QuestionKind kind, HMENU menu, POINT position);
+
+  // ---- Mouse (decision B5) ----
+  // The hit of a client point in physical pixels.
+  Renderer::Hit hit_at(POINT client) const;
+  void handle_left_down(POINT client, bool shift);
+  void handle_left_double_click(POINT client);
+  void handle_drag(POINT client);
+  void drag_scroll_step();
+  void end_drag();
+  void handle_wheel(int delta);
+  bool set_cursor_shape();
+  // The caret's bottom-left corner in client pixels (keyboard context menu).
+  POINT caret_point() const;
+
   HWND hwnd_ = nullptr;
   Renderer renderer_;
   Editor editor_;
@@ -140,6 +170,23 @@ class MainWindow final : public Host {
   int question_answer_ = 0;
   unsigned rejected_requests_ = 0;
   std::wstring last_rejected_;
+  // ---- menus ----
+  // One-shot failures ('GFLT' "menu": the next HMENU creation; "popup": the
+  // next context menu as if TrackPopupMenu had failed).
+  bool fail_next_menu_ = false;
+  bool fail_next_popup_ = false;
+  unsigned menu_loops_ = 0;      // WM_ENTERMENULOOP seen
+  unsigned keymenu_count_ = 0;   // SC_KEYMENU / SC_MOUSEMENU seen
+  std::wstring last_keymenu_;    // the last one: "keymenu <lParam>" / "mousemenu"
+  // ---- mouse ----
+  bool dragging_ = false;
+  POINT drag_point_{};   // the last mouse position of the drag (client pixels)
+  int drag_scroll_ = 0;  // -1 / +1 while the drag is above / below the text
+  WheelAccumulator wheel_;
+  // ---- frames and settings reloads (GSTA, for the tools) ----
+  unsigned settings_reloads_ = 0;  // reloads applied after the startup read
+  unsigned frames_ = 0;            // frames drawn successfully
+  unsigned reloads_drawn_ = 0;     // settings_reloads_ at the last drawn frame
 };
 
 }  // namespace geditor::win

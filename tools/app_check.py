@@ -1,4 +1,4 @@
-"""Real-app checks of geditor M1, M2 and M3a (run by hand; Windows only).
+"""Real-app checks of geditor M1, M2, M3a and M3b (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
@@ -15,7 +15,12 @@ the pixels (a vivid colour scheme tells the colours apart), run the View
 commands from M-x, text-scale, send WM_VSCROLL and a real WM_DPICHANGED
 (Windows copies its RECT into geditor), make a font / render target
 creation fail on purpose (WM_COPYDATA 'GFLT') and print the [C4] check
-table (item | screenshot | what is seen).
+table (item | screenshot | what is seen). The M3b checks (--only-m3b) post
+mouse messages at the cells that the state's grid gives (clicks, drags,
+double-clicks, Shift+clicks, the wheel), read the real menu bar of the
+window (GetMenu and GetMenuItemInfoW after WM_INITMENUPOPUP), invoke items
+with WM_COMMAND, and answer the menus that F10 and WM_CONTEXTMENU leave
+pending in the headless state ('GSTA' / 'GANS').
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
@@ -26,7 +31,8 @@ failures forced with 'GFLT'), and the questions are read and answered
 through 'GSTA' / 'GANS' instead of task dialogs. The real clipboard is
 never opened (its sequence number is compared before and after the run), a
 sampler checks every 20 ms that no geditor window is the foreground and
-that no geditor task dialog appears, and app_driver refuses the calls that
+that no geditor task dialog, menu or popup menu (#32768) appears, and
+app_driver refuses the calls that
 would take the user's screen, keyboard or clipboard. The checks that need
 the real screen are reported as SKIP "needs --visible"; --strict does not
 count them. The headless checks of the mode itself (window, guard,
@@ -793,9 +799,8 @@ def run_m2_checks(exe: pathlib.Path, out: pathlib.Path):
               f"bytes={data!r}")
 
         # [C6] A syntax error keeps the previous binding and shows the line.
-        settings.write_bytes(b'{\n  "keys": { "<f5>": ["insert-text", "BAD"] }\n'
-                             b'  "tab_width": 8\n}\n')
-        time.sleep(1.0)
+        write_settings(settings, b'{\n  "keys": { "<f5>": ["insert-text", "BAD"] }\n'
+                                 b'  "tab_width": 8\n}\n')
         shot = app.capture(shots / "m2_01_syntax_error.png")
         check("[C6] syntax error is shown in the echo area", echo_pixels(shot) > 0,
               f"echo text pixels={echo_pixels(shot)} (m2_01_syntax_error.png: "
@@ -809,10 +814,9 @@ def run_m2_checks(exe: pathlib.Path, out: pathlib.Path):
 
         # [C8] Several semantic errors expand the echo area; the next key
         # returns it to one line.
-        settings.write_bytes(b'{\n  "tab_widht": 4,\n  "colors": { "cursor": "red" },\n  "keys": {\n'
-                             b'    "C-c a": "no-such-command",\n    "C-x": "undo",\n'
-                             b'    "<f5>": ["insert-text", "M2OK"]\n  }\n}\n')
-        time.sleep(1.0)
+        write_settings(settings, b'{\n  "tab_widht": 4,\n  "colors": { "cursor": "red" },\n  "keys": {\n'
+                                 b'    "C-c a": "no-such-command",\n    "C-x": "undo",\n'
+                                 b'    "<f5>": ["insert-text", "M2OK"]\n  }\n}\n')
         shot = app.capture(shots / "m2_02_expanded_echo.png")
         top1, _ = mode_line_rows(shot)
         rows = round((top0 - top1) / line_px) + 1 if line_px else 0
@@ -909,8 +913,7 @@ def run_m2_checks(exe: pathlib.Path, out: pathlib.Path):
         # row; the last echo line counts the hidden errors.
         app.resize(900, 200)
         time.sleep(0.4)
-        settings.write_bytes(("{\n" + "".join(f'  "bad{i}": 1,\n' for i in range(12)) + "}\n").encode())
-        time.sleep(1.0)
+        write_settings(settings, ("{\n" + "".join(f'  "bad{i}": 1,\n' for i in range(12)) + "}\n").encode())
         shot = app.capture(shots / "m2_09_small_window.png")
         top, line_px = mode_line_rows(shot)
         height = shot[1]
@@ -1025,8 +1028,31 @@ class M3aRun:
 
 
 def apply_settings(settings: pathlib.Path, items: dict, wait_s: float = 1.0):
-    settings.write_bytes(settings_json(items))
-    time.sleep(wait_s)  # the watcher waits 200 ms, then the frame
+    write_settings(settings, settings_json(items), wait_s)
+
+
+def write_settings(settings: pathlib.Path, data: bytes, wait_s: float = 1.0):
+    """Writes the settings file and waits until every running App that reads
+    it has applied the reload and drawn a frame with it (GSTA
+    "settings_reloads" / "reloads_drawn"), not for a fixed time: a busy PC
+    can take longer than any sleep (R4). The count must then stay the same
+    for 0.3 s (the watcher can see one save as two changes). Without such
+    an App, it sleeps `wait_s`."""
+    apps = d.apps_using_settings(settings)
+    before = {app.hwnd: int(app.state().get("settings_reloads", "0")) for app in apps}
+    settings.write_bytes(data)
+    if not apps:
+        time.sleep(wait_s)  # the watcher waits 200 ms, then the frame
+        return
+    if not d.wait_settings_applied(apps, before, 15.0):
+        raise d.DriverError(f"the settings change was not applied within 15 s ({settings.name})")
+    while True:
+        counts = {app.hwnd: int(app.state()["settings_reloads"]) for app in apps}
+        time.sleep(0.3)
+        if all(int(app.state()["settings_reloads"]) == counts[app.hwnd] for app in apps):
+            break
+        if not d.wait_settings_applied(apps, {h: c for h, c in counts.items()}, 15.0):
+            raise d.DriverError(f"a repeated settings reload was not drawn within 15 s ({settings.name})")
 
 
 def run_m3a_checks(exe: pathlib.Path, out: pathlib.Path):
@@ -1850,6 +1876,731 @@ def run_headless_checks(exe: pathlib.Path, out: pathlib.Path):
           " | ".join(lines))
 
 
+# ---- M3b: menus, the right-click menu and the mouse ----
+
+# The command items of PLAN 4.9 with the key text of decision B1 (built-in
+# keys, no settings) and whether the command is implemented in M3b (else
+# grey). tests/test_menu.cpp holds the same table for the core model.
+M3B_ITEMS = [
+    ("File > Open...", "C-x C-f", True), ("File > Open with Encoding...", "C-x RET c", False),
+    ("File > Reopen with Encoding...", "C-x RET r", False), ("File > Save", "C-M-s", True),
+    ("File > Save As...", "C-x C-w", True),
+    *[(f"File > Encoding for Saving > {name}", "", False) for name in (
+        "utf-8", "utf-8-bom", "utf-16le", "utf-16le-bom", "utf-16be", "utf-16be-bom", "shift_jis", "euc-jp",
+        "iso-2022-jp", "windows-1252", "gb18030", "big5", "euc-kr")],
+    ("File > Line Endings > LF", "", False), ("File > Line Endings > CRLF", "", False),
+    ("File > Line Endings > CR", "", False), ("File > Read Only", "C-x C-q", True),
+    ("File > Settings", "", True), ("File > Exit", "C-M-w", True),
+    ("Edit > Undo", "C-M-z", True), ("Edit > Redo", "C-M-y", True), ("Edit > Cut", "C-M-x", True),
+    ("Edit > Copy", "C-M-c", True), ("Edit > Paste", "C-M-v", True), ("Edit > Select All", "C-M-a", True),
+    ("Edit > Find...", "C-M-f", False), ("Edit > Replace...", "C-M-h", False),
+    ("Edit > Go to Line...", "C-M-g", False),
+    ("View > Line Numbers", "", True), ("View > Line Ending Marks", "", True),
+    ("View > Whitespace Marks", "", True), ("View > Wrap > None", "", True), ("View > Wrap > Window", "", True),
+    ("View > Wrap > Fixed", "", True), ("View > Wrap > Max", "", True), ("View > Zoom In", "C-x C-+", True),
+    ("View > Zoom Out", "C-x C--", True), ("View > Reset Zoom", "C-x C-0", True),
+]
+M3B_CONTEXT = ["Undo", "Redo", "-", "Cut", "Copy", "Paste", "Select All"]
+
+
+class M3bRun:
+    """Helpers of the M3b checks: screenshots and the state of one app."""
+
+    def __init__(self, app, out: pathlib.Path):
+        self.app = app
+        self.shots = out / "shots"
+        self.shot_names = []
+
+    def shot(self, name: str):
+        self.shot_names.append(name)
+        return self.app.capture(self.shots / name)
+
+    def state(self) -> dict:
+        return self.app.state()
+
+    def cell(self, row: int, column: int) -> tuple[int, int]:
+        return self.app.cell_point(row, column)
+
+    def items(self) -> dict:
+        return {item.path: item for item in self.app.menu_bar()}
+
+
+def pmt(state: dict) -> str:
+    return (f"point={state.get('point')} mark={state.get('mark')} active={state.get('mark_active')} "
+            f"top={state.get('top_line')}/{state.get('top_row')}")
+
+
+def wheel_lines() -> int:
+    lines = wt.UINT(3)
+    d.user32.SystemParametersInfoW(0x0068, 0, ctypes.byref(lines), 0)  # SPI_GETWHEELSCROLLLINES
+    return lines.value
+
+
+def run_m3b_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C3]-[C6] and [C10] of the M3b packet on the real app (headless: posted
+    mouse messages, the pending menus of the state, WM_COMMAND)."""
+    work = out / "files_m3b"
+    work.mkdir(parents=True, exist_ok=True)
+    settings = work / "settings.json"
+    wrap10 = {"wrap": {"mode": "fixed", "column": 10}}
+    settings.write_bytes(settings_json(wrap10))
+    doc = work / "m3b.txt"
+    lines = ["hello word",            # line 1, offset 0: exactly 10 cells
+             "a + b",                 # line 2, offset 11
+             "あいう",                # line 3, offset 17: full width
+             "0123456789abcdefghij",  # line 4, offset 21: two rows
+             "漢字かな"]              # line 5, offset 42
+    lines += [f"line{i:02d}" for i in range(6, 81)]
+    original = "\n".join(lines) + "\n"
+    doc.write_bytes(original.encode("utf-8"))
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings)
+    run = M3bRun(app, out)
+    try:
+        record("INFO", "M3b input mode", app.use_input())
+        time.sleep(0.4)
+        s0 = run.state()
+        record("INFO", "M3b grid", f"line height {s0['line_height']}px cell {s0['cell_width']}px text left "
+               f"{s0['text_left']}px rows {s0['text_rows']} mode line top {s0['mode_line_top']}px "
+               f"wheel lines {wheel_lines()}")
+        run_m3b_mouse(app, run, original)
+        run_m3b_strip(app, run, original)
+        run_m3b_context(app, run, original, settings, wrap10)
+        run_m3b_menu_bar(app, run, settings, wrap10)
+    finally:
+        app.kill()
+    record("INFO", "[C5] screenshots", ", ".join(run.shot_names))
+    for name, reason in [
+        ("[C6] F10 and a mouse click open the real menu loop (look, mnemonics, Esc)",
+         "a real menu loop shows on the screen; headless records the menu instead"),
+        ("[C6] Alt+Space opens the system menu", "the system menu shows on the screen; headless swallows SC_KEYMENU"),
+        ("[C4] the real right-click popup (look, position at the mouse)",
+         "TrackPopupMenu shows on the screen; headless records the popup instead"),
+        ("[C5] the mouse cursor is an I-beam over text and an arrow elsewhere",
+         "WM_SETCURSOR reads the real cursor position (GetCursorPos)"),
+    ]:
+        needs_visible(name, reason)
+
+
+def run_m3b_mouse(app, run: M3bRun, original: str):
+    keys = app.keys
+    # ---- clicks (decision B5) ----
+    cases = [
+        ("click on ASCII (row 0, cell 3)", 0, 3, 3, "m3b_01_click_ascii.png"),
+        ("click on the left half of a full-width character (row 2, cell 2: 'い')", 2, 2, 18,
+         "m3b_02_click_wide_left.png"),
+        ("click on the right half of a full-width character (row 2, cell 3: 'い')", 2, 3, 18,
+         "m3b_03_click_wide_right.png"),
+        ("click right of the line end (row 1, cell 8)", 1, 8, 16, "m3b_04_click_past_end.png"),
+        ("click in the reserved last cell of a full row (row 0, cell 10: the line end)", 0, 10, 10,
+         "m3b_05_click_reserved_end.png"),
+        ("click in the reserved last cell of a wrapped row (row 3, cell 10: before its last character)", 3, 10,
+         30, "m3b_06_click_reserved_wrapped.png"),
+        ("click on a continuation row (row 4, cell 2)", 4, 2, 33, "m3b_07_click_continuation.png"),
+        ("click in the line-number gutter (row 4: the row start)", 4, -1, 31, "m3b_08_click_gutter.png"),
+    ]
+    for name, row, column, expected, shot in cases:
+        x, y = run.cell(row, column)
+        app.click(x, y)
+        time.sleep(0.15)
+        state = run.state()
+        run.shot(shot)
+        check(f"[C5] {name}", state["point"] == str(expected) and state["mark_active"] == "0",
+              f"posted at ({x}, {y}): {pmt(state)} expected point {expected} ({shot})")
+
+    # Below the last line: the end of the buffer (the last line recentred).
+    s = run.state()
+    x, y = run.cell(int(s["text_rows"]) - 1, 2)
+    keys("M-> C-l")
+    time.sleep(0.2)
+    app.click(x, y)
+    time.sleep(0.15)
+    state = run.state()
+    run.shot("m3b_09_click_below_last_line.png")
+    check("[C5] click below the last line goes to the end of the buffer",
+          state["point"] == str(len(original)), f"posted at ({x}, {y}): {pmt(state)} length {len(original)} "
+          "(m3b_09_click_below_last_line.png)")
+
+    # ---- drag ----
+    keys("M-<")
+    time.sleep(0.2)
+    x0, y0 = run.cell(0, 2)
+    x1, y1 = run.cell(2, 2)
+    app.mouse(d.WM_LBUTTONDOWN, x0, y0, d.MK_LBUTTON)
+    app.mouse(d.WM_MOUSEMOVE, (x0 + x1) // 2, (y0 + y1) // 2, d.MK_LBUTTON)
+    app.mouse(d.WM_MOUSEMOVE, x1, y1, d.MK_LBUTTON)
+    time.sleep(0.15)
+    during = run.state()
+    run.shot("m3b_10_drag_rows.png")
+    app.mouse(d.WM_LBUTTONUP, x1, y1)
+    state = run.state()
+    check("[C5] drag selection across rows: mark at the press, point follows, region shown live",
+          during["mark"] == "2" and during["point"] == "18" and during["mark_active"] == "1" and
+          during["dragging"] == "1" and state["dragging"] == "0" and state["point"] == "18",
+          f"during: {pmt(during)} dragging={during['dragging']}; after release: {pmt(state)} "
+          "(m3b_10_drag_rows.png: highlighted from 'llo word' to 'あ')")
+
+    # Beyond the bottom: the view scrolls on a timer while held, stops on release.
+    keys("M-<")
+    time.sleep(0.2)
+    s = run.state()
+    x, y = run.cell(0, 0)
+    below = int(float(s["mode_line_top"])) + 4
+    app.mouse(d.WM_LBUTTONDOWN, x, y, d.MK_LBUTTON)
+    app.mouse(d.WM_MOUSEMOVE, x, below, d.MK_LBUTTON)
+    time.sleep(0.5)
+    top_a = int(run.state()["top_line"])
+    time.sleep(0.4)
+    held = run.state()
+    run.shot("m3b_11_drag_autoscroll.png")
+    app.mouse(d.WM_LBUTTONUP, x, below)
+    released = run.state()
+    time.sleep(0.5)
+    later = run.state()
+    check("[C5] a drag below the text scrolls by rows while held and stops on release",
+          0 < top_a < int(held["top_line"]) and held["mark"] == "0" and held["mark_active"] == "1" and
+          released["top_line"] == later["top_line"] and later["dragging"] == "0" and
+          later["point"] == released["point"],
+          f"top 0 -> {top_a} (0.5 s) -> {held['top_line']} (0.9 s), released at {released['top_line']}, "
+          f"0.5 s later {later['top_line']}; {pmt(later)} (m3b_11_drag_autoscroll.png)")
+
+    # The negative: dragging from inside the selection makes a new one.
+    keys("M-< C-x h")
+    time.sleep(0.2)
+    x0, y0 = run.cell(0, 2)
+    x1, y1 = run.cell(1, 1)
+    app.mouse(d.WM_LBUTTONDOWN, x0, y0, d.MK_LBUTTON)
+    app.mouse(d.WM_MOUSEMOVE, x1, y1, d.MK_LBUTTON)
+    app.mouse(d.WM_LBUTTONUP, x1, y1)
+    time.sleep(0.15)
+    state = run.state()
+    run.shot("m3b_12_drag_inside_selection.png")
+    check("[C5] (negative) a drag from inside the selection starts a new selection and moves no text",
+          state["mark"] == "2" and state["point"] == "12" and state["mark_active"] == "1" and
+          state["text"] == original and state["modified"] == "0",
+          f"{pmt(state)} text unchanged={state['text'] == original} modified={state['modified']} "
+          "(m3b_12_drag_inside_selection.png)")
+
+    # ---- double-click ----
+    for name, row, column, mark, point, shot in [
+            ("on a word selects the word ('hello')", 0, 1, 0, 5, "m3b_13_double_click_word.png"),
+            ("on a non-word character selects that character ('+')", 1, 2, 13, 14,
+             "m3b_14_double_click_symbol.png"),
+            ("on kanji selects the kanji word (as M-f)", 5, 1, 42, 44, "m3b_15_double_click_kanji.png")]:
+        x, y = run.cell(row, column)
+        app.double_click(x, y)
+        time.sleep(0.15)
+        state = run.state()
+        run.shot(shot)
+        check(f"[C5] double-click {name}", state["mark"] == str(mark) and state["point"] == str(point) and
+              state["mark_active"] == "1", f"{pmt(state)} expected {mark}..{point} ({shot})")
+
+    # ---- Shift+click ----
+    x, y = run.cell(0, 0)
+    app.click(x, y)
+    x, y = run.cell(0, 5)
+    app.click(x, y, shift=True)
+    time.sleep(0.15)
+    state = run.state()
+    run.shot("m3b_16_shift_click_no_mark.png")
+    check("[C5] Shift+click without an active mark extends from the old point",
+          state["mark"] == "0" and state["point"] == "5" and state["mark_active"] == "1",
+          f"{pmt(state)} (m3b_16_shift_click_no_mark.png)")
+    keys("M-< C-SPC C-f C-f")
+    x, y = run.cell(1, 2)
+    app.click(x, y, shift=True)
+    time.sleep(0.15)
+    state = run.state()
+    run.shot("m3b_17_shift_click_mark.png")
+    check("[C5] Shift+click with an active mark extends from that mark",
+          state["mark"] == "0" and state["point"] == "13" and state["mark_active"] == "1",
+          f"{pmt(state)} (m3b_17_shift_click_mark.png)")
+
+    # ---- wheel ----
+    lines = wheel_lines()
+    # The screen rows of the file: line 4 has two (wrap at 10), the others one.
+    text_lines = original.split("\n")
+    rows = [(i, r) for i, line in enumerate(text_lines) for r in range(2 if i == 3 else 1)]
+    starts = [sum(len(t) + 1 for t in text_lines[:i]) + 10 * r for i, r in rows]
+    keys("M-<")
+    time.sleep(0.2)
+    app.wheel(-120)
+    down = run.state()
+    run.shot("m3b_18_wheel_down.png")
+    app.wheel(120)
+    up = run.state()
+    step = -(120 // (2 * lines)) if 0 < lines <= 60 else -60
+    app.wheel(step)
+    half = run.state()
+    app.wheel(step)
+    whole = run.state()
+    run.shot("m3b_19_wheel_partial.png")
+    ok = 0 < lines <= 60
+    expected_top = rows[lines] if ok else None
+    check("[C5] wheel down / up scroll by the rows of a notch; point moves only to stay visible",
+          ok and (int(down["top_line"]), int(down["top_row"])) == expected_top and
+          down["point"] == str(starts[lines]) and up["top_line"] == "0" and up["point"] == down["point"],
+          f"SPI_GETWHEELSCROLLLINES={lines}: down top={down['top_line']} point={down['point']}; "
+          f"up top={up['top_line']} point={up['point']} (m3b_18_wheel_down.png)")
+    check("[C5] wheel: partial deltas accumulate into a row",
+          ok and half["top_line"] == "0" and whole["top_line"] == "1",
+          f"two deltas of {step}: top {up['top_line']} -> {half['top_line']} -> {whole['top_line']} "
+          "(m3b_19_wheel_partial.png)")
+
+    # ---- the undo group, and clicks that do nothing ----
+    keys("M-<")
+    app.type("XY")
+    x, y = run.cell(1, 0)
+    app.click(x, y)
+    app.type("Z")
+    keys("C-/")
+    time.sleep(0.2)
+    state = run.state()
+    run.shot("m3b_20_click_undo_group.png")
+    ok = state["text"].startswith("XYhello word\na + b")
+    keys("C-/")
+    time.sleep(0.2)
+    restored = run.state()["text"] == original
+    check("[C5] a click ends the typing undo group (type, click, type, C-/ undoes the second run only)",
+          ok and restored, f"after C-/: {state['text'][:22]!r}; second C-/ restores the file: {restored} "
+          "(m3b_20_click_undo_group.png)")
+
+    keys("M-< C-f C-f")
+    time.sleep(0.2)
+    before = run.state()
+    top = float(before["mode_line_top"])
+    lh = float(before["line_height"])
+    x, _ = run.cell(0, 3)
+    app.click(x, int(top + lh / 2))
+    mode = run.state()
+    app.click(x, int(top + lh * 1.5))
+    echo = run.state()
+    keys("M-x")
+    x2, y2 = run.cell(1, 2)
+    app.click(x2, y2)
+    app.double_click(x2, y2)
+    mini = run.state()
+    run.shot("m3b_21_click_minibuffer.png")
+    keys("C-g")
+    check("[C5] clicks in the mode line or the echo area and while the minibuffer is active do nothing",
+          mode["point"] == before["point"] == echo["point"] == mini["point"] == "2" and mini["minibuffer"] == "1"
+          and mini["mark_active"] == "0",
+          f"before {pmt(before)}; mode line {pmt(mode)}; echo area {pmt(echo)}; minibuffer {pmt(mini)} "
+          "(m3b_21_click_minibuffer.png)")
+
+
+def run_m3b_strip(app, run: M3bRun, original: str):
+    """R1: client heights that are no multiple of the line height leave a
+    blank strip between the last whole row and the mode line. A press,
+    double-click or Shift+click there acts on the last whole row and does
+    not scroll."""
+    text_lines = original.split("\n")
+    rows = [(i, r) for i, line in enumerate(text_lines) for r in range(2 if i == 3 else 1)]
+    starts = [sum(len(t) + 1 for t in text_lines[:i]) + 10 * r for i, r in rows]
+    width, _ = d.client_size(app.hwnd)
+    rect = d.window_rect(app.hwnd)
+    frame_w = (rect.right - rect.left) - width
+    frame_h = (rect.bottom - rect.top) - d.client_size(app.hwnd)[1]
+    try:
+        for client_height in (305, 310, 315):
+            app.resize(width + frame_w, client_height + frame_h)
+            time.sleep(0.3)
+            app.keys("M-<")
+            time.sleep(0.2)
+            s = run.state()
+            got_height = d.client_size(app.hwnd)[1]
+            lh, n = float(s["line_height"]), int(s["text_rows"])
+            strip_top, strip_bottom = n * lh, float(s["mode_line_top"])
+            if strip_bottom - strip_top < 2:
+                record("INFO", f"[R1] client height {got_height}px", f"no strip (rows {n} x {lh}px, mode line top "
+                       f"{strip_bottom}px)")
+                continue
+            y = int((strip_top + strip_bottom) / 2)
+            x, _ = run.cell(0, 2)
+            last = starts[n - 1]
+            app.click(x, y)
+            time.sleep(0.15)
+            pressed = run.state()
+            shot = f"m3b_29_strip_{got_height}.png"
+            run.shot(shot)
+            app.double_click(x, y)
+            time.sleep(0.15)
+            double = run.state()
+            app.keys("C-g M-<")
+            app.click(x, y, shift=True)
+            time.sleep(0.15)
+            shifted = run.state()
+            check(f"[R1] client height {got_height}px: a click in the strip below the last row "
+                  f"({strip_top:.0f}-{strip_bottom:.0f}px) acts on the last row and does not scroll",
+                  pressed["top_line"] == double["top_line"] == shifted["top_line"] == "0" and
+                  pressed["point"] == str(last + 2) and double["mark"] == str(last) and
+                  double["mark_active"] == "1" and shifted["mark"] == "0" and shifted["point"] == str(last + 2),
+                  f"posted at ({x}, {y}), {n} rows of {lh}px; press: {pmt(pressed)} (expected point {last + 2}); "
+                  f"double-click: {pmt(double)}; Shift+click: {pmt(shifted)} ({shot})")
+    finally:
+        app.resize(rect.right - rect.left, rect.bottom - rect.top)
+        time.sleep(0.3)
+
+
+def answer_menu(app, label: str) -> tuple[dict | None, bool]:
+    question = app.wait_question(3.0)
+    if question is None:
+        return None, False
+    return question, app.answer(label)
+
+
+def run_m3b_context(app, run: M3bRun, original: str, settings: pathlib.Path, wrap10: dict):
+    keys = app.keys
+    # Right-click inside an active region: point and mark do not move.
+    keys("M-< C-SPC C-f C-f C-f")
+    time.sleep(0.2)
+    before = run.state()
+    x, y = run.cell(1, 2)
+    app.right_click(x, y)
+    question = app.wait_question(3.0)
+    pending = run.state()
+    run.shot("m3b_22_right_click_region.png")
+    items = pending.get("menu_item", [])
+    check("[C4] right-click inside the region: a pending context menu at the mouse; point and mark unchanged",
+          question is not None and question.get("question") == "context_menu" and
+          (before["point"], before["mark"], before["mark_active"]) == (pending["point"], pending["mark"],
+                                                                       pending["mark_active"]) == ("3", "0", "1")
+          and pending.get("menu_x") == str(x) and pending.get("menu_y") == str(y) and
+          [i.split("\t")[0] for i in items] == M3B_CONTEXT,
+          f"before {pmt(before)}; pending {pmt(pending)} at ({pending.get('menu_x')}, {pending.get('menu_y')}) "
+          f"click ({x}, {y}); items={items}")
+    wrong = app.answer("Frobnicate")
+    state = run.state()
+    check("[C10] a menu answer that names no item is rejected and logged; the menu stays",
+          not wrong and state.get("question") == "context_menu" and
+          "no button 'Frobnicate'" in state.get("last_rejected", ""),
+          f"accepted={wrong} question={state.get('question')} last_rejected={state.get('last_rejected')!r}")
+    accepted = app.answer("Copy")
+    time.sleep(0.3)
+    state = run.state()
+    check("[C4] context menu Copy copies the region (private clipboard)",
+          accepted and state.get("clipboard_text") == "hel" and state["question"] == "none",
+          f"clipboard={state.get('clipboard_text')!r} {pmt(state)}")
+
+    keys("M-< C-SPC C-f C-f C-f")
+    app.right_click(*run.cell(0, 1))
+    _, accepted = answer_menu(app, "Cut")
+    time.sleep(0.3)
+    cut = run.state()
+    app.right_click(*run.cell(0, 1))
+    _, accepted2 = answer_menu(app, "Paste")
+    time.sleep(0.3)
+    pasted = run.state()
+    app.right_click(*run.cell(0, 1))
+    _, accepted3 = answer_menu(app, "Undo")
+    time.sleep(0.3)
+    undone = run.state()
+    run.shot("m3b_23_context_undo.png")
+    check("[C4] context menu Cut / Paste / Undo run their commands",
+          accepted and accepted2 and accepted3 and cut["text"] == original[3:] and
+          cut.get("clipboard_text") == "hel" and pasted["text"] == "hel" + original[3:] and
+          undone["text"] == original[3:],
+          f"cut: {cut['text'][:12]!r} clipboard {cut.get('clipboard_text')!r}; paste: {pasted['text'][:12]!r}; "
+          f"undo: {undone['text'][:12]!r}")
+    keys("C-/")
+    app.right_click(*run.cell(3, 1))
+    _, accepted = answer_menu(app, "Select All")
+    time.sleep(0.3)
+    state = run.state()
+    run.shot("m3b_24_context_select_all.png")
+    check("[C4] context menu Select All selects the buffer",
+          accepted and state["text"] == original and state["mark"] == "0" and
+          state["point"] == str(len(original)) and state["mark_active"] == "1", pmt(state))
+
+    # From the keyboard (lParam -1): at the cursor.
+    keys("M-< C-n C-f C-f")
+    time.sleep(0.3)
+    before = run.state()
+    app.context_menu()
+    question = app.wait_question(3.0)
+    pending = run.state()
+    app.answer("Cancel")
+    check("[C4] a keyboard WM_CONTEXTMENU (lParam -1) opens at the cursor",
+          question is not None and pending.get("menu_x") == before["caret_x"] and
+          pending.get("menu_y") == before["caret_bottom"] and pending["point"] == before["point"],
+          f"menu at ({pending.get('menu_x')}, {pending.get('menu_y')}), cursor bottom-left "
+          f"({before['caret_x']}, {before['caret_bottom']})")
+
+    # Forced failures are reported.
+    app.fault("menu")
+    app.right_click(*run.cell(0, 1))
+    time.sleep(0.3)
+    created = run.state()
+    app.fault("popup")
+    app.right_click(*run.cell(0, 1))
+    time.sleep(0.3)
+    shown = run.state()
+    run.shot("m3b_25_context_failure.png")
+    check("[C10] a failed context menu creation / TrackPopupMenu is reported in the echo area",
+          created["message"].startswith("Cannot create the context menu (error ") and
+          shown["message"].endswith(")") and "Cannot show the context menu (error " in shown["message"] and
+          shown["question"] == "none",
+          f"menu fault: {created['message']!r}; popup fault: {shown['message']!r} (m3b_25_context_failure.png)")
+
+    # With menu_bar: false the context menu still opens.
+    apply_settings(settings, {**wrap10, "menu_bar": False})
+    state = run.state()
+    hidden = d.user32.GetMenu(app.hwnd)
+    keys("M-< C-SPC C-f")
+    app.right_click(*run.cell(1, 1))
+    question, accepted = answer_menu(app, "Copy")
+    time.sleep(0.3)
+    copied = run.state()
+    check("[C4] with menu_bar: false the context menu still works",
+          state["menu_bar"] == "0" and not hidden and question is not None and accepted and
+          copied.get("clipboard_text") == "h",
+          f"menu_bar={state['menu_bar']} GetMenu={hidden} clipboard={copied.get('clipboard_text')!r}")
+    apply_settings(settings, wrap10)
+
+
+def run_m3b_menu_bar(app, run: M3bRun, settings: pathlib.Path, wrap10: dict):
+    keys = app.keys
+    keys("C-g M-<")
+    time.sleep(0.2)
+    # [C3] The real HMENU (GetMenu, after WM_INITMENUPOPUP) has the core's
+    # texts, key texts, grey states and marks.
+    items = run.items()
+    titles = [i.path for i in app.menu_bar() if " > " not in i.path]
+    problems = []
+    for path, key, implemented in M3B_ITEMS:
+        item = items.get(path)
+        if item is None:
+            problems.append(f"missing {path}")
+        elif item.key != key or item.enabled != implemented:
+            problems.append(f"{path}: key {item.key!r} enabled {item.enabled}")
+    marks = {p: items[p].checked for p in ("View > Line Numbers", "View > Line Ending Marks",
+                                           "View > Whitespace Marks", "View > Wrap > Fixed", "View > Wrap > Max",
+                                           "View > Wrap > None") if p in items}
+    radios = [p for p, i in items.items() if i.radio]
+    count = len(app.menu_bar())
+    check("[C3] the real menu bar (GetMenu after WM_INITMENUPOPUP) has the core's texts, keys, grey items and "
+          "marks for File, Edit and View",
+          titles == ["File", "Edit", "View"] and not problems and count == 56 and
+          marks == {"View > Line Numbers": True, "View > Line Ending Marks": True, "View > Whitespace Marks": True,
+                    "View > Wrap > Fixed": True, "View > Wrap > Max": False, "View > Wrap > None": False} and
+          len(radios) == 20,
+          f"titles={titles} items={count} (3 titles + 53 PLAN rows) problems={problems[:5]} marks={marks} "
+          f"radio items={len(radios)} "
+          f"(e.g. {items['Edit > Undo'].text!r} {items['Edit > Undo'].key!r})")
+    check("[C6] not implemented items are grey in the HMENU",
+          all(not items[p].enabled for p, _, implemented in M3B_ITEMS if not implemented and p in items),
+          "grey: " + ", ".join(p for p, _, implemented in M3B_ITEMS if not implemented)[:200])
+
+    # Invoking items through the WM_COMMAND id of the real menu.
+    app.menu_command(items["View > Line Numbers"].id)
+    app.menu_command(items["View > Wrap > None"].id)
+    time.sleep(0.3)
+    after = run.items()
+    state = run.state()
+    run.shot("m3b_26_menu_command_view.png")
+    check("[C3] WM_COMMAND of View items runs them; the marks follow on the next WM_INITMENUPOPUP",
+          not after["View > Line Numbers"].checked and after["View > Wrap > None"].checked and
+          not after["View > Wrap > Fixed"].checked and state["message"] == "Wrap: none",
+          f"Line Numbers checked={after['View > Line Numbers'].checked} None={after['View > Wrap > None'].checked} "
+          f"Fixed={after['View > Wrap > Fixed'].checked} message={state['message']!r} "
+          "(m3b_26_menu_command_view.png: no line numbers, no wrap)")
+    app.menu_command(items["View > Line Numbers"].id)
+    app.menu_command(items["View > Wrap > Fixed"].id)
+    # An edit ends the redo history: Redo then fails.
+    keys("M-<")
+    app.type("Q")
+    keys("DEL")
+    app.menu_command(items["Edit > Redo"].id)
+    time.sleep(0.3)
+    from_menu = run.state()["message"]
+    keys("M-x")
+    app.type("redo")
+    keys("RET")
+    time.sleep(0.3)
+    from_mx = run.state()["message"]
+    check("[C10] a menu command that fails shows its message like M-x",
+          from_menu == from_mx == "No further redo information",
+          f"menu: {from_menu!r}; M-x: {from_mx!r}")
+    rejected = int(run.state()["rejected"])
+    app.menu_command(items["Edit > Go to Line..."].id)
+    time.sleep(0.3)
+    state = run.state()
+    check("[C10] WM_COMMAND of a grey item runs nothing and is logged",
+          int(state["rejected"]) == rejected + 1 and "is disabled" in state["last_rejected"] and
+          state["minibuffer"] == "0", f"rejected {rejected} -> {state['rejected']}: {state['last_rejected']!r}")
+
+    # While the minibuffer is active every item is grey.
+    keys("M-x")
+    time.sleep(0.2)
+    grey = run.items()
+    keys("C-g")
+    check("[C3] while the minibuffer is active every item of the HMENU is grey",
+          all(not i.enabled for i in grey.values() if not i.separator and i.id != 0 and " > " in i.path),
+          f"enabled while in the minibuffer: {[p for p, i in grey.items() if i.enabled and ' > ' in p][:5]}")
+
+    # [C6] F10 records a pending menu-bar menu (the items of the real HMENU).
+    keys("M-<")
+    keys("<f10>")
+    question = app.wait_question(3.0)
+    pending = run.state()
+    real = [i.line() for i in app.menu_bar()]
+    check("[C6] F10 records a pending menu-bar menu with the items of the real HMENU",
+          question is not None and pending["question"] == "menu_bar" and pending["menu_item"] == real and
+          pending["menu_loops"] == "0", f"question={pending.get('question')} items={len(pending['menu_item'])} "
+          f"same as GetMenu={pending['menu_item'] == real} menu_loops={pending['menu_loops']}")
+    app.answer("Edit > Select All")
+    time.sleep(0.3)
+    state = run.state()
+    check("[C6] answering the pending menu bar runs the item through WM_COMMAND",
+          state["question"] == "none" and state["mark"] == "0" and state["mark_active"] == "1" and
+          int(state["point"]) > 100, pmt(state))
+
+    # Alt+F is forward-word; Alt alone enters no menu.
+    keys("M-<")
+    keys("M-f")
+    time.sleep(0.2)
+    alt_f = run.state()
+    app._post_key_raw(d.VK_MENU)
+    time.sleep(0.3)
+    alt = run.state()
+    check("[C6] posted Alt+F runs forward-word and enters no menu; Alt alone enters no menu",
+          alt_f["point"] == "5" and alt_f["question"] == alt["question"] == "none" and
+          alt["menu_loops"] == "0" and alt["last_keymenu"] in ("", "keymenu 0"),
+          f"after M-f {pmt(alt_f)}; after Alt: question={alt['question']} menu_loops={alt['menu_loops']} "
+          f"keymenu requests={alt['keymenu_count']} last={alt['last_keymenu']!r}")
+
+    # menu_bar: false hides the bar; F10 says so; turning it on restores it
+    # with the same top line.
+    keys("M-< C-v")
+    time.sleep(0.2)
+    top0 = run.state()["top_line"]
+    apply_settings(settings, {**wrap10, "menu_bar": False})
+    off = run.state()
+    hidden = d.user32.GetMenu(app.hwnd)
+    keys("<f10>")
+    time.sleep(0.3)
+    f10 = run.state()
+    run.shot("m3b_27_menu_bar_hidden.png")
+    apply_settings(settings, wrap10)
+    on = run.state()
+    shown = d.user32.GetMenu(app.hwnd)
+    run.shot("m3b_28_menu_bar_back.png")
+    check("[C6] menu_bar: false removes the bar (GetMenu NULL) and F10 shows 'Menu bar is hidden'; back on, "
+          "the bar returns with the top line unchanged",
+          off["menu_bar"] == "0" and not hidden and f10["message"] == "Menu bar is hidden" and
+          f10["question"] == "none" and on["menu_bar"] == "1" and bool(shown) and
+          off["top_line"] == on["top_line"] == top0 != "0",
+          f"off: GetMenu={hidden} top={off['top_line']}; F10 message={f10['message']!r}; on: GetMenu={shown} "
+          f"top={on['top_line']} (was {top0}) (m3b_27/m3b_28)")
+
+    # A failed HMENU creation is reported.
+    apply_settings(settings, {**wrap10, "menu_bar": False})
+    app.fault("menu")
+    apply_settings(settings, wrap10)
+    failed = run.state()
+    apply_settings(settings, {**wrap10, "menu_bar": False})
+    apply_settings(settings, wrap10)
+    again = run.state()
+    check("[C10] a failed menu bar creation is reported in the echo area; the next reload builds it",
+          failed["menu_bar"] == "0" and "Cannot create the menu bar (error " in failed["message"] and
+          again["menu_bar"] == "1", f"message={failed['message']!r} menu_bar {failed['menu_bar']} -> "
+          f"{again['menu_bar']}")
+    # Shift+F10 (posted) goes to DefWindowProc and the context menu.
+    keys("S-<f10>")
+    question = app.wait_question(2.0)
+    if question is not None:
+        app.answer("Cancel")
+    record("INFO", "[C4] posted Shift+F10", f"question={question and question.get('question')} "
+           "(DefWindowProc makes WM_CONTEXTMENU of Shift+F10 when the key is not bound)")
+
+
+def check_clipboard_attribution(exe: pathlib.Path):
+    """R3 self-check of d.clipboard_verdict with made-up sampler records (the
+    real clipboard is never written here: the user may be at the desktop)."""
+    target = os.path.normcase(str(exe))
+    edge = os.path.normcase(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+
+    def change(owner_image, geditor_alive, pid=1234):
+        return {"time": 1.0, "sequence": 10, "owner_pid": pid, "owner_image": owner_image,
+                "geditor_alive": geditor_alive}
+
+    cases = {
+        "no change": ([], "PASS"),
+        "the user copies in Edge while geditor runs": ([change(edge, True)], "INFO"),
+        "geditor owns the clipboard": ([change(target, True)], "FAIL"),
+        "geditor owns it after the run's windows closed": ([change(target, False)], "FAIL"),
+        "unknown owner while a geditor of the run is open": ([change("", True, 0)], "FAIL"),
+        "unknown owner while no geditor is open": ([change("", False, 0)], "INFO"),
+        "Edge, then geditor": ([change(edge, True), change(target, True)], "FAIL"),
+    }
+    got = {name: d.clipboard_verdict(changes, target)[0] for name, (changes, _) in cases.items()}
+    check("[R3] clipboard attribution: FAIL only for a geditor owner (or an unknown owner while geditor "
+          "is open), INFO with the owner's name otherwise (made-up owners)",
+          all(got[name] == want for name, (_, want) in cases.items()) and
+          "msedge.exe" in d.clipboard_verdict([change(edge, True)], target)[1],
+          f"verdicts={got}")
+
+
+def run_m3b_visible_checks(exe: pathlib.Path, out: pathlib.Path):
+    """--visible: the real menu loop (F10), the system menu (Alt+Space) and the
+    real right-click popup, captured with PrintWindow. They need an unlocked
+    desktop where geditor can take the foreground (SendInput)."""
+    work = out / "files_m3b_visible"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = no_settings(out)
+    doc = work / "v.txt"
+    doc.write_bytes(b"hello world\nsecond line\n")
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings)
+    names = ["[C6] F10 and a mouse click open the real menu loop (look, mnemonics, Esc)",
+             "[C6] Alt+Space opens the system menu",
+             "[C4] the real right-click popup (look, position at the mouse)"]
+    try:
+        if app.use_input() != "sendinput":
+            for name in names:
+                record("SKIP", name, "geditor cannot take the foreground (locked desktop or --input post)")
+            return
+
+        def menu_window():
+            found = d.wait_for(lambda: d.windows_of(app.proc.pid, "#32768"), 3.0)
+            time.sleep(0.4)
+            return found[0] if found else None
+
+        app.keys("<f10>")
+        time.sleep(0.3)
+        app.keys("<down>")  # drop the File menu down
+        menu = menu_window()
+        if menu:
+            d.capture(menu, shots / "m3b_v1_f10_file_menu.png")
+        app.keys("ESC")
+        app.keys("ESC")
+        time.sleep(0.3)
+        state = app.state()
+        check(names[0], bool(menu) and int(state["menu_loops"]) >= 1,
+              f"#32768 window={menu} menu_loops={state['menu_loops']} (m3b_v1_f10_file_menu.png: File menu "
+              "with key texts and grey items)")
+        app.keys("M-SPC")
+        menu = menu_window()
+        if menu:
+            d.capture(menu, shots / "m3b_v2_system_menu.png")
+        app.keys("ESC")
+        time.sleep(0.3)
+        check(names[1], bool(menu), f"#32768 window={menu} last_keymenu={app.state()['last_keymenu']!r} "
+              "(m3b_v2_system_menu.png)")
+        x, y = app.cell_point(0, 3)
+        app.right_click(x, y)
+        menu = menu_window()
+        if menu:
+            d.capture(menu, shots / "m3b_v3_context_menu.png")
+        app.keys("ESC")
+        time.sleep(0.3)
+        state = app.state()
+        check(names[2], bool(menu) and state["point"] == "0",
+              f"#32768 window={menu} point={state['point']} (m3b_v3_context_menu.png: Undo .. Select All with "
+              "key texts)")
+    finally:
+        app.kill()
+
+
 # ---- --only-visible: the checks that need the real screen ----
 
 def run_visible_checks(exe: pathlib.Path, out: pathlib.Path):
@@ -1952,6 +2703,8 @@ def main() -> int:
                         help="run only the M2 settings checks")
     parser.add_argument("--only-m3a", action="store_true",
                         help="run only the M3a display checks")
+    parser.add_argument("--only-m3b", action="store_true",
+                        help="run only the M3b menu, context menu and mouse checks")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -1973,12 +2726,16 @@ def main() -> int:
     # (no open needed) shows that nothing wrote to it.
     saved = None if d.HEADLESS else clipboard_text()
     sequence0 = d.user32.GetClipboardSequenceNumber()
-    only = args.only_retry1 or args.only_m2 or args.only_m3a or args.only_headless or args.only_visible
+    only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_headless or
+            args.only_visible)
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
         sampler = d.ForegroundSampler(exe, 0.02)
         sampler.start()
+        # From now on the sampler sees every change of the clipboard.
+        sequence0 = d.user32.GetClipboardSequenceNumber()
+        check_clipboard_attribution(exe)
     try:
         if args.only_visible:
             run_visible_checks(exe, out)
@@ -1990,6 +2747,11 @@ def main() -> int:
             run_m2_checks(exe, out)
         if not only or args.only_m3a:
             run_m3a_checks(exe, out)
+        if not only or args.only_m3b:
+            if d.HEADLESS:
+                run_m3b_checks(exe, out)
+            else:
+                run_m3b_visible_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)
@@ -2002,8 +2764,17 @@ def main() -> int:
             sampler.stop()
     if sampler is not None:
         sequence1 = d.user32.GetClipboardSequenceNumber()
-        check("[C4] the real clipboard was not written (GetClipboardSequenceNumber)", sequence0 == sequence1,
-              f"sequence number {sequence0} -> {sequence1} (its text is not read: that would open it)")
+        # R3: the user may copy something meanwhile; a change counts against
+        # geditor only when a geditor process owns the clipboard (or the
+        # owner is unknown while a geditor of the run was open).
+        verdict, why = d.clipboard_verdict(sampler.clipboard_changes, os.path.normcase(str(exe)))
+        if sequence0 != sequence1 and not sampler.clipboard_changes:
+            verdict, why = "FAIL", "the sequence number changed but the sampler saw no change"
+        check("[C4] the real clipboard was not written by geditor (GetClipboardSequenceNumber, "
+              "GetClipboardOwner)", verdict != "FAIL",
+              f"sequence number {sequence0} -> {sequence1}: {why} (its text is not read: that would open it)")
+        if verdict == "INFO":
+            record("INFO", "[C4] the real clipboard changed during the run", why)
         check("[C2] (b) no geditor window was ever the foreground window",
               not sampler.foreground_hits and sampler.geditor_windows_seen > 0 and sampler.gaps_over_50ms == 0,
               f"{sampler.samples} samples of GetForegroundWindow (a process of its own, every 20 ms), "
@@ -2019,6 +2790,10 @@ def main() -> int:
         check("[C5] no task dialog (#32770) of a geditor process appeared", not sampler.dialogs,
               f"{sampler.dialog_scans} scans of the visible #32770 windows (every 20 ms, longest gap "
               f"{sampler.dialog_scan_max_gap_s * 1000:.0f} ms), dialogs={sampler.dialogs[:5]}")
+        check("[M3b C8] no menu or popup menu (#32768) of a geditor process appeared",
+              not sampler.menus and sampler.menu_scans > 0,
+              f"{sampler.menu_scans} scans of the visible #32768 windows (every 20 ms, in the sampler process), "
+              f"geditor menus={sampler.menus[:5]}, visible #32768 of any process={sampler.menus_any_process}")
     passed = sum(1 for s, _ in results if s == "PASS")
     failed = sum(1 for s, _ in results if s == "FAIL")
     skipped = sum(1 for s, _ in results if s == "SKIP")

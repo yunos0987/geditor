@@ -5,6 +5,7 @@
 
 #include "commands.h"
 #include "layout.h"
+#include "menu.h"
 #include "path.h"
 #include "unicode.h"
 
@@ -188,6 +189,23 @@ void Editor::execute_command(std::string_view name) {
   cancel_pending_input();
   key_display_.clear();
   dispatch(command_binding(std::string(name)), false);
+}
+
+bool Editor::execute_menu_item(const MenuItem& item) {
+  if (item.kind != MenuItemKind::kCommand || !menu_item_enabled(*this, item)) return false;
+  message_.clear();
+  message_is_settings_ = false;
+  // Prefix keys end; a prefix argument typed before the menu applies to the
+  // item, as to a key bound to its command.
+  pending_.clear();
+  pending_display_.clear();
+  meta_pending_ = false;
+  quoted_insert_pending_ = false;
+  key_display_.clear();
+  Binding binding;
+  binding.calls.push_back(menu_item_call(item));
+  dispatch(binding, false);
+  return true;
 }
 
 void Editor::cancel_pending_input() {
@@ -852,12 +870,99 @@ void Editor::text_scale_adjust(int steps) {
   message_ = L"Text scale " + std::wstring(text_scale_ > 0 ? L"+" : L"") + std::to_wstring(text_scale_);
 }
 
-void Editor::set_point(size_t offset) {
+size_t Editor::clamp_main_offset(size_t offset) const {
   offset = std::min(offset, main_.text.length());
   if (offset > 0 && offset < main_.text.length() && is_low_surrogate(main_.text.char_at(offset)) &&
       is_high_surrogate(main_.text.char_at(offset - 1))) {
     --offset;
   }
+  return offset;
+}
+
+void Editor::begin_mouse_command() {
+  message_.clear();
+  message_is_settings_ = false;
+  cancel_pending_input();
+  quoted_insert_pending_ = false;
+  // As set_point: the typing undo group and the goal column end here.
+  main_.undo.begin_command(main_.point, false);
+  main_.undo.end_command(main_.point);
+}
+
+size_t Editor::offset_at_screen(long long row, int column) const {
+  const WrapLayout& l = layout();
+  const PieceTree& t = main_.text;
+  RowPos pos = top_;
+  if (row > 0) {
+    if (l.forward_rows(t, &pos, static_cast<size_t>(row)) < static_cast<size_t>(row)) return t.length();
+  } else if (row < 0) {
+    l.backward_rows(t, &pos, static_cast<size_t>(-row));
+  }
+  return l.offset_at(t, pos.line, pos.row, std::max(0, column));
+}
+
+size_t Editor::offset_at_click(long long row, int column) {
+  return offset_at_screen(std::clamp<long long>(row, 0, visible_lines() - 1), column);
+}
+
+bool Editor::mouse_press(size_t offset, bool shift) {
+  if (minibuffer_active()) return false;
+  begin_mouse_command();
+  offset = clamp_main_offset(offset);
+  if (shift) {
+    if (!(main_.mark_active && main_.has_mark)) {
+      main_.has_mark = true;
+      main_.mark = main_.point;
+    }
+    main_.mark_active = true;
+    mouse_anchor_ = main_.mark;
+    mouse_dragged_ = true;
+    last_command_ = "mouse-extend-region";
+  } else {
+    main_.mark_active = false;
+    mouse_anchor_ = offset;
+    mouse_dragged_ = false;
+    last_command_ = "mouse-set-point";
+  }
+  main_.point = offset;
+  mouse_pressed_ = true;
+  ensure_point_visible();
+  return true;
+}
+
+bool Editor::mouse_drag(size_t offset) {
+  if (!mouse_pressed_ || minibuffer_active()) return false;
+  offset = clamp_main_offset(offset);
+  if (!mouse_dragged_ && offset == mouse_anchor_) return true;
+  mouse_dragged_ = true;
+  main_.has_mark = true;
+  main_.mark = mouse_anchor_;
+  main_.mark_active = true;
+  main_.point = offset;
+  last_command_ = "mouse-drag-region";
+  ensure_point_visible();
+  return true;
+}
+
+bool Editor::mouse_double_click(size_t offset) {
+  if (minibuffer_active()) return false;
+  begin_mouse_command();
+  offset = clamp_main_offset(offset);
+  size_t from = offset;
+  size_t to = offset;
+  word_bounds_at(main_.text, offset, &from, &to);
+  main_.has_mark = true;
+  main_.mark = from;
+  main_.point = to;
+  main_.mark_active = from != to;
+  mouse_pressed_ = false;
+  last_command_ = "mouse-select-word";
+  ensure_point_visible();
+  return true;
+}
+
+void Editor::set_point(size_t offset) {
+  offset = clamp_main_offset(offset);
   // A click is a command of its own: it ends a typing group and the goal
   // column of consecutive vertical motion.
   Buffer& b = current();

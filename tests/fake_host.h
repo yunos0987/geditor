@@ -75,6 +75,8 @@ class FakeHost : public geditor::Host {
   bool ask_yes_no(const std::wstring& question) override;
   bool launch_new_window(const std::wstring& path, std::wstring& error) override;
   void quit() override { ++quit_calls; }
+  void open_menu_bar() override { ++menu_bar_opens; }
+  int menu_bar_opens = 0;
   int visible_lines() override;
   int visible_columns() override { return columns; }
   int dpi() override { return display_dpi; }

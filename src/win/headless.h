@@ -5,13 +5,21 @@
 // Requests (dwData: four ASCII letters, little-endian; payload UTF-16):
 //   'GCAP' path   draw the current frame into a BMP file (any mode)
 //   'GFLT' name   make the next "target" / "font" creation fail (any mode),
+//                 the next HMENU creation ("menu") or context menu
+//                 ("popup", as if TrackPopupMenu failed) fail (any mode),
 //                 or the next "clipboard-read" / "clipboard-write" of the
 //                 private clipboard fail (headless only)
 //   'GSTA' path   write the state (state_line lines, UTF-16LE) to a file
 //   'GCBW' text   put `text` (CRLF line ends, as on the real clipboard) into
 //                 the private clipboard (headless only)
-//   'GANS' label  press the button `label` of the pending question
+//   'GANS' label  press the button `label` of the pending question, or
+//                 choose the item `label` ("Edit > Undo"; "Undo" in the
+//                 right-click menu; "Cancel") of the pending menu
 //                 (headless only)
+// Headless menus (decision B7): menu-bar-open (F10) and WM_CONTEXTMENU do
+// not show a menu; the menu is pending in the state as a question
+// ("menu_bar" / "context_menu") with every item of the built HMENU
+// (menu_item lines) and its position (menu_x, menu_y).
 // A request that is not understood returns 0, is counted in the state
 // ("rejected", "last_rejected") and goes to OutputDebugString.
 #pragma once
@@ -85,8 +93,29 @@ inline std::wstring state_line(std::wstring_view key, std::wstring_view value) {
   return line;
 }
 
+// One menu item for the tools: "path TAB key text TAB flags", the flags
+// being "separator", "submenu", "enabled" or "disabled", then "checked" and
+// "radio" when they apply, separated by spaces.
+inline std::wstring menu_entry_text(const MenuEntry& e) {
+  std::wstring flags;
+  auto add = [&](const wchar_t* flag) {
+    if (!flags.empty()) flags += L' ';
+    flags += flag;
+  };
+  if (e.separator) {
+    add(L"separator");
+  } else {
+    if (e.submenu) add(L"submenu");
+    add(e.enabled ? L"enabled" : L"disabled");
+    if (e.checked) add(L"checked");
+    if (e.radio) add(L"radio");
+  }
+  return e.path + L"\t" + e.key_text + L"\t" + flags;
+}
+
 // The pending question as the tools read it: its kind, the text and the
-// button labels exactly as the task dialog shows them, and the default.
+// button labels exactly as the task dialog shows them, and the default; for
+// a menu also its position and every item (menu_x, menu_y, menu_item).
 inline std::wstring question_state(const Question& q) {
   std::wstring text = state_line(L"question", question_kind_name(q.kind));
   text += state_line(L"instruction", q.instruction);
@@ -94,6 +123,11 @@ inline std::wstring question_state(const Question& q) {
   for (const QuestionButton& b : q.buttons) text += state_line(L"button", b.label);
   for (const QuestionButton& b : q.buttons) {
     if (b.id == q.default_button) text += state_line(L"default", b.label);
+  }
+  if (q.kind == QuestionKind::kMenuBar || q.kind == QuestionKind::kContextMenu) {
+    text += state_line(L"menu_x", std::to_wstring(q.menu_position.x));
+    text += state_line(L"menu_y", std::to_wstring(q.menu_position.y));
+    for (const MenuEntry& e : q.menu) text += state_line(L"menu_item", menu_entry_text(e));
   }
   return text;
 }

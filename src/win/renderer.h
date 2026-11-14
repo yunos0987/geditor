@@ -74,7 +74,27 @@ class Renderer {
   // capped so that the mode line and one text row stay visible.
   int echo_rows(float height_dip, const Editor& editor) const;
   float line_height() const { return measurer_.line_height(); }
+  float cell_width() const { return measurer_.cell_width(); }
   float em() const { return measurer_.em(); }
+
+  // Where a point of the client area (DIPs) is in the frame that paint
+  // draws (decision B5): the area, the screen row counted from the top row
+  // (negative above the client area) and the cell column of the text area
+  // (the horizontal scroll included; -1 in the line-number gutter). Rows and
+  // columns are cells of the grid only; the core maps them to offsets
+  // through WrapLayout (Editor::offset_at_screen).
+  struct Hit {
+    enum class Area { kText, kGutter, kModeLine, kEchoArea };
+    Area area = Area::kText;
+    long long row = 0;
+    int column = 0;
+  };
+  Hit hit_test(float x_dip, float y_dip, float width_dip, float height_dip, const Editor& editor,
+               const ViewState& view) const;
+  // The left edge of the text area (right of the gutter) and the top of the
+  // mode line, in DIPs.
+  float text_left(const Editor& editor) const;
+  float mode_line_top(float height_dip, const Editor& editor) const;
   const wchar_t* font_family() const { return measurer_.family(); }
 
  private:

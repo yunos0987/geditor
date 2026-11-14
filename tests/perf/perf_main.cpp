@@ -113,6 +113,7 @@ class PerfHost : public geditor::Host {
   bool ask_yes_no(const std::wstring&) override { return false; }
   bool launch_new_window(const std::wstring&, std::wstring&) override { return false; }
   void quit() override {}
+  void open_menu_bar() override {}
   int visible_lines() override { return 40; }
   int visible_columns() override { return 120; }
   int dpi() override { return 96; }

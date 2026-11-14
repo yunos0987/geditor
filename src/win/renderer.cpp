@@ -116,6 +116,38 @@ int Renderer::echo_rows(float height_dip, const Editor& editor) const {
   return editor.echo_line_count(max_echo_rows(total));
 }
 
+float Renderer::text_left(const Editor& editor) const {
+  return kMarginDip + static_cast<float>(editor.gutter_columns()) * measurer_.cell_width();
+}
+
+float Renderer::mode_line_top(float height_dip, const Editor& editor) const {
+  const float lh = measurer_.line_height();
+  return height_dip - static_cast<float>(echo_rows(height_dip, editor) + 1) * lh;
+}
+
+Renderer::Hit Renderer::hit_test(float x_dip, float y_dip, float width_dip, float height_dip,
+                                 const Editor& editor, const ViewState& view) const {
+  (void)width_dip;
+  Hit hit;
+  const float lh = measurer_.line_height();
+  const float cw = measurer_.cell_width();
+  const float mode_y = mode_line_top(height_dip, editor);
+  if (y_dip >= mode_y + lh) {
+    hit.area = Hit::Area::kEchoArea;
+  } else if (y_dip >= mode_y) {
+    hit.area = Hit::Area::kModeLine;
+  }
+  hit.row = lh > 0 ? static_cast<long long>(std::floor(y_dip / lh)) : 0;
+  const float x0 = text_left(editor);
+  if (x_dip < x0 || cw <= 0) {
+    if (hit.area == Hit::Area::kText) hit.area = Hit::Area::kGutter;
+    hit.column = -1;
+  } else {
+    hit.column = static_cast<int>(std::floor((x_dip - x0) / cw)) + view.left_column;
+  }
+  return hit;
+}
+
 bool Renderer::ensure_target(HWND hwnd) {
   if (hwnd_target_ != nullptr) return true;
   if (d2d_factory_ == nullptr) return false;
