@@ -10,7 +10,12 @@
 //                 or the next "clipboard-read" / "clipboard-write" of the
 //                 private clipboard fail (headless only); "shape": the next
 //                 shaping of a cluster; "color": the next colour glyph (any
-//                 mode, M3d decision D3)
+//                 mode, M3d decision D3); "file-info": the next reading of
+//                 a file's time and attributes; "save-inspect", "save-link",
+//                 "save-temp-create", "save-temp-write", "save-flush",
+//                 "save-replace", "save-move", "save-backup",
+//                 "save-in-place": that step of the next save (any mode,
+//                 M4a decision F4)
 //   'GRDW' count  draw `count` frames at once (1..1000) and put their times
 //                 into the state (redraw_* lines; any mode, M3d [C4])
 //   'GSTA' path   write the state (state_line lines, UTF-16LE) to a file

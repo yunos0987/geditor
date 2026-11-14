@@ -115,6 +115,9 @@ bool Editor::load_file(const std::wstring& path) {
   if (kind == FileKind::kNone) {
     main_.reset();
     main_.path = path;
+    main_.format.eol = new_file_eol();
+    disk_known_ = true;
+    disk_ = FileInfo();
     top_ = RowPos();
     goal_column_ = 0;
     if (!settings_path_.empty() && same_path(path, settings_path_)) {
@@ -125,6 +128,11 @@ bool Editor::load_file(const std::wstring& path) {
     message_ = L"(New file)";
     return true;
   }
+  // The time, size and attributes before the bytes: a change in between is
+  // seen as a change at the next save (decision F2).
+  FileInfo info;
+  std::wstring info_error;
+  const bool info_known = host_.file_info(path, info, info_error);
   std::string bytes;
   std::wstring error;
   if (!host_.read_file(path, bytes, error)) {
@@ -140,24 +148,42 @@ bool Editor::load_file(const std::wstring& path) {
       message_ = path + L": not valid UTF-8 (byte " + std::to_wstring(decoded.error_offset) +
                  L"); not opened";
       return false;
-    case DecodeStatus::kMixedEol:
-      message_ = path + L": mixed line ends; not opened";
-      return false;
-    case DecodeStatus::kCrEol:
-      message_ = path + L": CR line ends are not supported yet; not opened";
-      return false;
     case DecodeStatus::kTooLarge:
       message_ = path + L": file too large; not opened";
       return false;
   }
   main_.reset();
-  main_.text = PieceTree(std::move(decoded.text), std::move(decoded.line_feeds));
+  // A file without line ends uses new_file.eol (decision F1).
+  const Eol eol = default_eol_of(decoded.eol_counts, new_file_eol());
+  main_.text = make_piece_tree(decoded);
   main_.format = decoded.format;
+  main_.format.eol = eol;
   main_.path = path;
   top_ = RowPos();
   goal_column_ = 0;
   message_.clear();
+  disk_known_ = info_known;
+  disk_ = info_known ? info : FileInfo();
+  // A file with the read-only attribute opens in read-only-mode (F6).
+  main_.read_only = info_known && info.read_only;
+  if (!info_known) {
+    message_ = L"Cannot read the time and attributes of " + path + L": " + info_error +
+               L" (changes on disk will not be noticed)";
+  }
   return true;
+}
+
+Eol Editor::new_file_eol() const {
+  Eol eol = Eol::kLf;
+  parse_eol(config_.new_file_eol, &eol);
+  return eol;
+}
+
+bool Editor::saved_before(const std::wstring& path) const {
+  for (const std::wstring& p : saved_paths_) {
+    if (same_path(p, path)) return true;
+  }
+  return false;
 }
 
 bool Editor::save_to(const std::wstring& path) {
@@ -167,15 +193,44 @@ bool Editor::save_to(const std::wstring& path) {
     fail(kind == FileKind::kError ? cannot_access(path) : path + L" is a directory");
     return false;
   }
-  const std::string bytes = encode_utf8(main_.text, main_.format);
+  FileInfo now;
   std::wstring error;
-  if (!host_.write_file(path, bytes, error)) {
+  if (!host_.file_info(path, now, error)) {
+    fail(L"Cannot write " + path + L": reading the file time: " + error);
+    return false;
+  }
+  // Decision F2: the file of this buffer changed on disk since it was read
+  // or saved. A file deleted on disk is saved as new without asking.
+  const bool same_file = !main_.path.empty() && same_path(path, main_.path);
+  if (same_file && disk_known_ && now.exists &&
+      (!disk_.exists || now.size != disk_.size || now.write_time != disk_.write_time)) {
+    if (!host_.ask_yes_no(file_name_of(path) + L" has changed on disk since it was read; save anyway?")) {
+      fail(L"Not saved");
+      return false;
+    }
+  }
+  // Decision F3: "<file>~" on the first save of an existing file.
+  const bool backup = config_.backup && now.exists && !saved_before(path);
+  const std::string bytes = encode_utf8(main_.text, main_.format);
+  error.clear();
+  if (!host_.save_file(path, bytes, backup, error)) {
     fail(L"Cannot write " + path + (error.empty() ? std::wstring() : L": " + error));
     return false;
   }
+  const std::wstring note = error;
+  if (!saved_before(path)) saved_paths_.push_back(path);
   main_.path = path;
   main_.undo.mark_saved();
   message_ = L"Wrote " + path;
+  if (!note.empty()) message_ += L" (" + note + L")";
+  // The new state on disk for the next check.
+  FileInfo after;
+  std::wstring after_error;
+  disk_known_ = host_.file_info(path, after, after_error);
+  disk_ = disk_known_ ? after : FileInfo();
+  if (!disk_known_) {
+    message_ += L"; cannot read its time: " + after_error + L" (changes on disk will not be noticed)";
+  }
   return true;
 }
 

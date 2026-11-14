@@ -688,8 +688,17 @@ std::wstring Editor::mode_line() const {
   const bool modified = main_.modified();
   const wchar_t* flag = main_.read_only ? (modified ? L"%*" : L"%%") : (modified ? L"**" : L"--");
   return std::wstring(L"-") + flag + L" " + buffer_name() + L"  " + encoding_name(main_.format) + L" " +
-         eol_name(main_.format.eol) + L"  L" + std::to_wstring(point_line() + 1) + L" C" +
+         eol_text() + L"  L" + std::to_wstring(point_line() + 1) + L" C" +
          std::to_wstring(point_column()) + L"  wrap:" + wrap_mode_name(wrap_mode());
+}
+
+size_t Editor::other_line_ends() const {
+  return main_.text.line_feed_count() - main_.text.eol_count(main_.format.eol);
+}
+
+std::wstring Editor::eol_text() const {
+  const std::wstring name = eol_name(main_.format.eol);
+  return other_line_ends() > 0 ? L"Mixed(" + name + L")" : name;
 }
 
 size_t Editor::point_line() const {
@@ -715,6 +724,11 @@ void Editor::apply_view_settings() {
   eol_marks_view_.reload(config_.eol_marks_show);
   whitespace_view_.reload(whitespace_flags(config_));
   wrap_view_.reload(config_.wrap_mode);
+  // A buffer that is still new and empty takes new_file.eol (decision F1).
+  if (main_.text.length() == 0 && main_.undo.undo_count() == 0 && main_.undo.redo_count() == 0 &&
+      !(disk_known_ && disk_.exists)) {
+    main_.format.eol = new_file_eol();
+  }
 }
 
 DisplayOptions Editor::display_options() const {
@@ -1044,7 +1058,8 @@ bool Editor::insert_at(Buffer& b, size_t offset, std::wstring_view text) {
     if (eol != std::wstring_view::npos) text = text.substr(0, eol);
   }
   if (text.empty()) return true;
-  const PieceList pieces = b.text.insert(offset, text);
+  // New line ends get the default line end (PLAN 2 "newly entered line ends").
+  const PieceList pieces = b.text.insert(offset, text, b.format.eol);
   note_text_edit(b, offset, text.size(), 0);
   b.undo.record_insert(offset, pieces);
   adjust_markers(b, offset, text.size(), 0);
@@ -1092,10 +1107,39 @@ bool Editor::erase(Buffer& b, size_t from, size_t to) {
   return true;
 }
 
+void Editor::set_eol(Eol eol) {
+  Buffer& b = main_;
+  if (!check_writable(b)) return;
+  const size_t others = b.text.line_feed_count() - b.text.eol_count(eol);
+  if (others == 0 && b.format.eol == eol) {
+    message_ = std::wstring(L"Line endings are already ") + eol_name(eol);
+    return;
+  }
+  PieceList before;
+  PieceList after;
+  if (others > 0) {
+    // The same text in the same pieces, with the new line end: no text is
+    // copied, and undo puts the old pieces back.
+    before = b.text.pieces();
+    after = before;
+    for (Piece& p : after) p.eol = eol;
+    b.text.assign_pieces(after);
+  }
+  b.undo.record_eol_change(std::move(before), std::move(after), b.format.eol, eol);
+  b.format.eol = eol;
+  b.edited_in_command = true;
+  message_ = std::wstring(L"Line endings: ") + eol_name(eol);
+}
+
+void Editor::toggle_read_only() {
+  main_.read_only = !main_.read_only;
+  message_ = main_.read_only ? L"Read-only mode enabled" : L"Read-only mode disabled";
+}
+
 bool Editor::undo(Buffer& b) {
   MarkFollower follower(b, &b == &main_ ? &wrap_ : nullptr);
   size_t point = b.point;
-  if (!b.undo.undo(b.text, &follower, &point)) return false;
+  if (!b.undo.undo(b.text, &follower, &point, &b.format.eol)) return false;
   b.point = std::min(point, b.text.length());
   b.edited_in_command = true;
   return true;
@@ -1104,7 +1148,7 @@ bool Editor::undo(Buffer& b) {
 bool Editor::redo(Buffer& b) {
   MarkFollower follower(b, &b == &main_ ? &wrap_ : nullptr);
   size_t point = b.point;
-  if (!b.undo.redo(b.text, &follower, &point)) return false;
+  if (!b.undo.redo(b.text, &follower, &point, &b.format.eol)) return false;
   b.point = std::min(point, b.text.length());
   b.edited_in_command = true;
   return true;

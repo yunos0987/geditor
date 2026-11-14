@@ -95,9 +95,14 @@ class PerfHost : public geditor::Host {
     bytes = *bytes_;
     return true;
   }
-  bool write_file(const std::wstring&, std::string_view, std::wstring& error) override {
+  bool save_file(const std::wstring&, std::string_view, bool, std::wstring& error) override {
     error = L"read-only perf host";
     return false;
+  }
+  bool file_info(const std::wstring& path, geditor::FileInfo& info, std::wstring&) override {
+    info = geditor::FileInfo();
+    info.exists = path == kPath;
+    return true;
   }
   geditor::FileKind file_kind(const std::wstring& path) override {
     return path == kPath ? geditor::FileKind::kFile : geditor::FileKind::kNone;
@@ -145,7 +150,7 @@ int main() {
       tree = geditor::PieceTree();
       const auto t0 = Clock::now();
       geditor::DecodedText decoded = geditor::decode_utf8(bytes);
-      geditor::PieceTree built(std::move(decoded.text), std::move(decoded.line_feeds));
+      geditor::PieceTree built = geditor::make_piece_tree(decoded);
       runs.push_back(ms_since(t0));
       if (decoded.status != geditor::DecodeStatus::kOk) {
         std::printf("decode failed\n");

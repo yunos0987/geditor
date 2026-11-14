@@ -102,9 +102,10 @@ WhitespaceFlags whitespace_flags(const Config& config);
 // them when the file enables none.
 WhitespaceFlags shown_whitespace_flags(const WhitespaceFlags& file);
 
-// The end-of-line mark of a logical line (PLAN 4.7, M3: files whose lines all
-// use the buffer's line end). None on the last line (it has no line end) or
-// when marks are off.
+// The end-of-line mark of a logical line (PLAN 4.7): the symbol of the line's
+// own line end, in "eol" when it is the default line end `eol` and in
+// "eol_other" otherwise. None on the last line (it has no line end) or when
+// marks are off.
 struct EolMark {
   bool shown = false;
   std::wstring symbol;
@@ -143,7 +144,8 @@ struct DisplayRow {
   EolMark eol;             // shown on the last row, at end_column
 };
 
-// Builds row `pos` for the visible columns [left, left + columns).
+// Builds row `pos` for the visible columns [left, left + columns). `eol` is
+// the buffer's default line end.
 void build_display_row(const PieceTree& tree, const WrapLayout& layout, Eol eol,
                        const DisplayOptions& options, RowPos pos, int left, int columns,
                        DisplayRow* out);

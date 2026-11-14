@@ -143,6 +143,11 @@ class Editor {
   bool key_is_bound(const Key& key) const;
   // "-** name  UTF-8 LF  L12 C5  wrap:max".
   std::wstring mode_line() const;
+  // The line-end part of the mode line (decision F8): "LF", "CRLF", "CR",
+  // or "Mixed(<default>)" while some line end differs from the default.
+  std::wstring eol_text() const;
+  // Line ends of the main buffer that differ from its default line end.
+  size_t other_line_ends() const;
   size_t top_line() const { return top_.line; }
   size_t point_line() const;
   // Column of point from the start of its logical line (the mode line's C).
@@ -270,6 +275,13 @@ class Editor {
   // history) and runs it with the prefix argument typed before M-x.
   void execute_extended_command();
 
+  // set-eol (decision F7): every line end of the main buffer becomes `eol`,
+  // which also becomes the default, as one undo group. Nothing changes (and
+  // the buffer stays unmodified) when both already are `eol`.
+  void set_eol(Eol eol);
+  // read-only-mode (C-x C-q, decision F6).
+  void toggle_read_only();
+
   // File commands
   void find_file();
   // Opens the settings file like find-file; a missing file opens as a new
@@ -329,6 +341,11 @@ class Editor {
   std::wstring default_directory() const;
   bool load_file(const std::wstring& path);
   bool save_to(const std::wstring& path);
+  // The line end of new buffers and of files without any (new_file.eol).
+  Eol new_file_eol() const;
+  // True when `path` was saved by this process before (decision F3: only the
+  // first save of a file makes "<file>~").
+  bool saved_before(const std::wstring& path) const;
   void finish_write_file(const std::wstring& input);
   void run_after_save();
   void open_after_choice(const std::wstring& path);
@@ -395,6 +412,13 @@ class Editor {
 
   AfterSave after_save_ = AfterSave::kNone;
   std::wstring after_save_path_;
+
+  // The file of the main buffer as it was when read or last saved (decision
+  // F2); `disk_known_` is false when that could not be read.
+  bool disk_known_ = false;
+  FileInfo disk_;
+  // Files saved by this process (decision F3).
+  std::vector<std::wstring> saved_paths_;
 };
 
 }  // namespace geditor

@@ -68,22 +68,24 @@ TEST(file_invalid_utf8_is_refused_and_buffer_unchanged) {
   CHECK(s.message().find(L"not valid UTF-8") != std::wstring::npos);
 }
 
-TEST(file_mixed_eol_is_refused_and_buffer_unchanged) {
+// M1 refused mixed and CR-only line ends; M4a opens them and keeps each
+// line's line end (test_m4a_eol.cpp has the rules).
+TEST(file_mixed_eol_opens_in_m4a) {
   Session s;
   s.load(L"keep");
   s.host.add_file(L"C:\\work\\mixed.txt", "a\nb\r\nc");
   open_with_dialog(s, L"C:\\work\\mixed.txt");
-  CHECK_EQ(s.text(), std::wstring(L"keep"));
-  CHECK(s.message().find(L"mixed line ends") != std::wstring::npos);
+  CHECK_EQ(s.text(), std::wstring(L"a\nb\nc"));
+  CHECK_EQ(s.ed.eol_text(), std::wstring(L"Mixed(CRLF)"));
 }
 
-TEST(file_cr_only_is_refused_and_buffer_unchanged) {
+TEST(file_cr_only_opens_in_m4a) {
   Session s;
   s.host.add_file(L"C:\\work\\cr.txt", "a\rb\r");
   s.ed.request_open(L"C:\\work\\cr.txt");  // untitled empty buffer: no dialog
-  CHECK_EQ(s.ed.buffer().path, std::wstring());
-  CHECK_EQ(s.text(), std::wstring());
-  CHECK(s.message().find(L"CR line ends") != std::wstring::npos);
+  CHECK_EQ(s.ed.buffer().path, std::wstring(L"C:\\work\\cr.txt"));
+  CHECK_EQ(s.text(), std::wstring(L"a\nb\n"));
+  CHECK_EQ(s.ed.eol_text(), std::wstring(L"CR"));
 }
 
 // ---- find-file ----

@@ -16,6 +16,9 @@ add_executable(geditor_tests
   test_keymap.cpp
   test_m3c_keys.cpp
   test_m3c_retry1.cpp
+  test_m4a_eol.cpp
+  test_m4a_menu.cpp
+  test_m4a_save.cpp
   test_layout_wrap.cpp
   test_menu.cpp
   test_minibuffer.cpp
@@ -37,6 +40,7 @@ add_executable(geditor_tests
   test_win_input.cpp
   test_win_logic.cpp
   test_win_menu.cpp
+  test_win_save.cpp
   test_win_settings.cpp)
 target_link_libraries(geditor_tests PRIVATE
   geditor_options geditor_core geditor_win_logic geditor_text pcre2_16 user32)

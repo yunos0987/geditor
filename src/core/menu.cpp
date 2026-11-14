@@ -225,7 +225,13 @@ bool menu_item_checked(const Editor& editor, const MenuItem& item) {
     WrapMode mode = WrapMode::kNone;
     return item.argument != nullptr && parse_wrap_mode(item.argument, &mode) && mode == editor.wrap_mode();
   }
-  // File menu (Encoding for Saving, Line Endings, Read Only): M4-9.
+  // File menu (M4-9): Line Endings marks the default line end (also of a
+  // mixed file), Read Only follows read-only-mode. Encoding for Saving: M4b.
+  if (command == "set-eol") {
+    Eol eol = Eol::kLf;
+    return item.argument != nullptr && parse_eol(item.argument, &eol) && eol == editor.buffer().format.eol;
+  }
+  if (command == "read-only-mode") return editor.buffer().read_only;
   return false;
 }
 

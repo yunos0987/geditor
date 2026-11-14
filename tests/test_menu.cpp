@@ -66,9 +66,10 @@ constexpr PlanRow kPlanRows[] = {
     {L"File > Encoding for Saving > iso-2022-jp", kCmd, kCoding, L"iso-2022-jp", kRad, false, L""},
     // M3c (decision G9): windows-1252, gb18030, big5 and euc-kr were removed.
     {L"File > Line Endings ▶", kSub, nullptr, nullptr, kNo, true, L""},
-    {L"File > Line Endings > LF", kCmd, "set-eol", L"lf", kRad, false, L""},
-    {L"File > Line Endings > CRLF", kCmd, "set-eol", L"crlf", kRad, false, L""},
-    {L"File > Line Endings > CR", kCmd, "set-eol", L"cr", kRad, false, L""},
+    // M4a: set-eol is implemented (the items are enabled).
+    {L"File > Line Endings > LF", kCmd, "set-eol", L"lf", kRad, true, L""},
+    {L"File > Line Endings > CRLF", kCmd, "set-eol", L"crlf", kRad, true, L""},
+    {L"File > Line Endings > CR", kCmd, "set-eol", L"cr", kRad, true, L""},
     {L"File > ─", kSep, nullptr, nullptr, kNo, false, L""},
     {L"File > Read Only", kCmd, "read-only-mode", nullptr, kChk, true, L"C-x C-q"},
     {L"File > ─", kSep, nullptr, nullptr, kNo, false, L""},
@@ -323,14 +324,15 @@ TEST(menu_view_marks_follow_commands_and_settings) {
   CHECK(checked(s, L"View > Line Numbers"));
 }
 
-TEST(menu_file_marks_wait_for_m4) {
+// M4a computes Read Only and Line Endings (M4-9, test_m4a_menu.cpp); the
+// Encoding for Saving marks wait for M4b.
+TEST(menu_file_encoding_marks_wait_for_m4b) {
   Session s;
   s.load(L"abc");
   s.keys(L"C-x C-q");
   CHECK(s.ed.buffer().read_only);
-  // M4-9: the File menu's marks are not computed in M3b.
-  CHECK(!checked(s, L"File > Read Only"));
-  CHECK(!checked(s, L"File > Line Endings > LF"));
+  CHECK(checked(s, L"File > Read Only"));
+  CHECK(checked(s, L"File > Line Endings > LF"));
   CHECK(!checked(s, L"File > Encoding for Saving > utf-8"));
 }
 

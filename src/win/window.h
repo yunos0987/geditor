@@ -43,7 +43,8 @@ class MainWindow final : public Host {
 
   // ---- Host ----
   bool read_file(const std::wstring& path, std::string& bytes, std::wstring& error) override;
-  bool write_file(const std::wstring& path, std::string_view bytes, std::wstring& error) override;
+  bool save_file(const std::wstring& path, std::string_view bytes, bool backup, std::wstring& error) override;
+  bool file_info(const std::wstring& path, FileInfo& info, std::wstring& error) override;
   FileKind file_kind(const std::wstring& path) override;
   bool list_directory(const std::wstring& dir, std::vector<DirEntry>& entries) override;
   std::wstring current_directory() override;
@@ -185,6 +186,9 @@ class MainWindow final : public Host {
   // next context menu as if TrackPopupMenu had failed).
   bool fail_next_menu_ = false;
   bool fail_next_popup_ = false;
+  // One-shot save failures ('GFLT' "save-..." and "file-info", M4a).
+  SaveFault fail_next_save_ = SaveFault::kNone;
+  bool fail_next_file_info_ = false;
   unsigned menu_loops_ = 0;      // WM_ENTERMENULOOP seen
   unsigned keymenu_count_ = 0;   // SC_KEYMENU / SC_MOUSEMENU seen
   std::wstring last_keymenu_;    // the last one: "keymenu <lParam>" / "mousemenu"

@@ -31,11 +31,17 @@ class UndoHistory {
 
   void record_insert(size_t offset, const PieceList& pieces);
   void record_erase(size_t offset, PieceList pieces);
+  // set-eol (decision F7): the whole text went from the pieces `before` to
+  // `after` (same text, other line ends; both empty when no line end
+  // changed) and the buffer's default line end from `eol_before` to
+  // `eol_after`.
+  void record_eol_change(PieceList before, PieceList after, Eol eol_before, Eol eol_after);
 
   // Return false when there is nothing to undo/redo. `point` receives the
-  // cursor position to restore.
-  bool undo(PieceTree& tree, EditListener* listener, size_t* point);
-  bool redo(PieceTree& tree, EditListener* listener, size_t* point);
+  // cursor position to restore; `default_eol` (when not null) the default
+  // line end that an undone or redone set-eol restores.
+  bool undo(PieceTree& tree, EditListener* listener, size_t* point, Eol* default_eol = nullptr);
+  bool redo(PieceTree& tree, EditListener* listener, size_t* point, Eol* default_eol = nullptr);
 
   // The current state becomes the saved state.
   void mark_saved();
@@ -52,6 +58,11 @@ class UndoHistory {
     bool insert = false;
     size_t offset = 0;
     PieceList pieces;
+    // set-eol: `pieces` before and `pieces_after` after (whole text).
+    bool eol_change = false;
+    PieceList pieces_after;
+    Eol eol_before = Eol::kLf;
+    Eol eol_after = Eol::kLf;
   };
   struct Group {
     uint64_t id = 0;

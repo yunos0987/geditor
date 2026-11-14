@@ -14,7 +14,7 @@ std::string round_trip(const std::string& bytes) {
   DecodedText d = geditor::decode_utf8(bytes);
   CHECK(d.status == DecodeStatus::kOk);
   const geditor::FileFormat format = d.format;
-  PieceTree t(std::move(d.text), std::move(d.line_feeds));
+  PieceTree t = geditor::make_piece_tree(d);
   return geditor::encode_utf8(t, format);
 }
 
@@ -72,11 +72,14 @@ TEST(encoding_invalid_utf8_is_refused) {
   CHECK_EQ(geditor::decode_utf8("abc\x80").error_offset, size_t{3});
 }
 
-TEST(encoding_mixed_and_cr_line_ends_are_refused) {
-  CHECK(geditor::decode_utf8("a\nb\r\nc").status == DecodeStatus::kMixedEol);
-  CHECK(geditor::decode_utf8("a\rb\nc").status == DecodeStatus::kMixedEol);
-  CHECK(geditor::decode_utf8("a\rb\rc").status == DecodeStatus::kCrEol);
-  CHECK(geditor::decode_utf8("trailing cr\r").status == DecodeStatus::kCrEol);
+// M1 refused mixed and CR-only line ends; M4a keeps them line by line.
+TEST(encoding_mixed_and_cr_line_ends_are_kept) {
+  for (const char* s : {"a\nb\r\nc", "a\rb\nc", "a\rb\rc", "trailing cr\r"}) {
+    CHECK(geditor::decode_utf8(s).status == DecodeStatus::kOk);
+    CHECK_EQ(round_trip(s), std::string(s));
+  }
+  CHECK(geditor::decode_utf8("a\rb\rc").format.eol == Eol::kCr);
+  CHECK_EQ(geditor::decode_utf8("a\rb\rc").text, std::wstring(L"a\nb\nc"));
 }
 
 TEST(encoding_long_ascii_fast_path_keeps_line_feeds) {

@@ -57,9 +57,24 @@ DecodedText decode_utf8(std::string_view bytes) {
   result.line_feeds.reserve(bytes.size() / 64 + 16);
   wchar_t* const out_begin = result.text.data();
   wchar_t* out = out_begin;
-  size_t lf_count = 0;
-  size_t crlf_count = 0;
-  size_t cr_count = 0;
+  // Line ends: each kind becomes one '\n'. A new run starts right after the
+  // last '\n' of the previous kind.
+  result.eol_runs.push_back(EolRun{0, Eol::kLf});
+  bool any_line_end = false;
+  size_t after_last_line_end = 0;
+  auto line_end = [&](Eol kind) {
+    const size_t at = static_cast<size_t>(out - out_begin);
+    result.line_feeds.push_back(static_cast<uint32_t>(at));
+    ++result.eol_counts[static_cast<size_t>(kind)];
+    if (!any_line_end) {
+      result.eol_runs.back().eol = kind;
+      any_line_end = true;
+    } else if (result.eol_runs.back().eol != kind) {
+      result.eol_runs.push_back(EolRun{after_last_line_end, kind});
+    }
+    after_last_line_end = at + 1;
+    *out++ = L'\n';
+  };
 
   while (p < end) {
     const unsigned char b = *p;
@@ -86,20 +101,20 @@ DecodedText decode_utf8(std::string_view bytes) {
     }
     if (b < 0x80) {
       if (b == '\n') {
-        result.line_feeds.push_back(static_cast<uint32_t>(out - out_begin));
-        ++lf_count;
+        line_end(Eol::kLf);
+        ++p;
       } else if (b == '\r') {
         if (p + 1 < end && p[1] == '\n') {
-          result.line_feeds.push_back(static_cast<uint32_t>(out - out_begin));
-          ++crlf_count;
-          *out++ = L'\n';
+          line_end(Eol::kCrLf);
           p += 2;
-          continue;
+        } else {
+          line_end(Eol::kCr);
+          ++p;
         }
-        ++cr_count;
+      } else {
+        *out++ = static_cast<wchar_t>(b);
+        ++p;
       }
-      *out++ = static_cast<wchar_t>(b);
-      ++p;
       continue;
     }
     char32_t c = 0;
@@ -129,6 +144,7 @@ DecodedText decode_utf8(std::string_view bytes) {
       result.error_offset = static_cast<size_t>(p - begin);
       result.text.clear();
       result.line_feeds.clear();
+      result.eol_runs.clear();
       return result;
     }
     if (c < 0x10000) {
@@ -141,27 +157,29 @@ DecodedText decode_utf8(std::string_view bytes) {
     p += n;
   }
   result.text.resize(static_cast<size_t>(out - out_begin));
-
-  const int kinds = (lf_count > 0 ? 1 : 0) + (crlf_count > 0 ? 1 : 0) + (cr_count > 0 ? 1 : 0);
-  if (kinds > 1) {
-    result.status = DecodeStatus::kMixedEol;
-  } else if (cr_count > 0) {
-    result.status = DecodeStatus::kCrEol;
-  }
-  if (result.status != DecodeStatus::kOk) {
-    result.text.clear();
-    result.line_feeds.clear();
-    return result;
-  }
-  result.format.eol = crlf_count > 0 ? Eol::kCrLf : Eol::kLf;
+  result.format.eol = default_eol_of(result.eol_counts, Eol::kLf);
   return result;
+}
+
+Eol default_eol_of(const size_t counts[3], Eol none) {
+  const size_t lf = counts[static_cast<size_t>(Eol::kLf)];
+  const size_t crlf = counts[static_cast<size_t>(Eol::kCrLf)];
+  const size_t cr = counts[static_cast<size_t>(Eol::kCr)];
+  if (lf == 0 && crlf == 0 && cr == 0) return none;
+  // Ties: CRLF > LF > CR.
+  if (crlf >= lf && crlf >= cr) return Eol::kCrLf;
+  if (lf >= cr) return Eol::kLf;
+  return Eol::kCr;
+}
+
+PieceTree make_piece_tree(DecodedText& decoded) {
+  return PieceTree(std::move(decoded.text), std::move(decoded.line_feeds), decoded.eol_runs);
 }
 
 std::string encode_utf8(const PieceTree& tree, const FileFormat& format) {
   std::string out;
-  out.reserve(tree.length() + tree.line_feed_count() + 3);
+  out.reserve(tree.length() + tree.eol_count(Eol::kCrLf) + 3);
   if (format.bom) out.append("\xEF\xBB\xBF");
-  const bool crlf = format.eol == Eol::kCrLf;
   wchar_t pending_high = 0;
   auto put = [&out](char32_t c) {
     if (c < 0x80) {
@@ -180,7 +198,7 @@ std::string encode_utf8(const PieceTree& tree, const FileFormat& format) {
       out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
     }
   };
-  tree.for_each_chunk(0, tree.length(), [&](std::wstring_view chunk) {
+  tree.for_each_chunk_eol(0, tree.length(), [&](std::wstring_view chunk, Eol eol) {
     for (const wchar_t w : chunk) {
       if (pending_high != 0) {
         if (is_low_surrogate(w)) {
@@ -192,7 +210,16 @@ std::string encode_utf8(const PieceTree& tree, const FileFormat& format) {
         pending_high = 0;
       }
       if (w < 0x80) {
-        if (w == L'\n' && crlf) out.push_back('\r');
+        if (w == L'\n') {
+          if (eol == Eol::kLf) {
+            out.push_back('\n');
+          } else if (eol == Eol::kCrLf) {
+            out.append("\r\n");
+          } else {
+            out.push_back('\r');
+          }
+          continue;
+        }
         out.push_back(static_cast<char>(w));
       } else if (is_high_surrogate(w)) {
         pending_high = w;
@@ -209,7 +236,31 @@ std::string encode_utf8(const PieceTree& tree, const FileFormat& format) {
 }
 
 const wchar_t* eol_name(Eol eol) {
-  return eol == Eol::kCrLf ? L"CRLF" : L"LF";
+  switch (eol) {
+    case Eol::kCrLf: return L"CRLF";
+    case Eol::kCr: return L"CR";
+    case Eol::kLf: break;
+  }
+  return L"LF";
+}
+
+const wchar_t* eol_setting_name(Eol eol) {
+  switch (eol) {
+    case Eol::kCrLf: return L"crlf";
+    case Eol::kCr: return L"cr";
+    case Eol::kLf: break;
+  }
+  return L"lf";
+}
+
+bool parse_eol(std::wstring_view name, Eol* eol) {
+  for (const Eol e : {Eol::kLf, Eol::kCrLf, Eol::kCr}) {
+    if (name == eol_setting_name(e)) {
+      *eol = e;
+      return true;
+    }
+  }
+  return false;
 }
 
 const wchar_t* encoding_name(const FileFormat& format) {

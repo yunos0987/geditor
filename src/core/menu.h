@@ -81,8 +81,10 @@ struct MenuItemState {
 // Decision B2: disabled when the command is registered as not implemented
 // yet, or while the minibuffer is active; nothing else greys an item. Check
 // and radio marks of the View menu follow the view state of the window
-// (toggle-* / set-wrap-mode and the settings); the File menu's marks arrive
-// with M4 (M4-9) and are off until then.
+// (toggle-* / set-wrap-mode and the settings). In the File menu, Line
+// Endings marks the buffer's default line end and Read Only follows
+// read-only-mode (M4-9); Encoding for Saving arrives with M4b and is off
+// until then.
 MenuItemState menu_item_state(const Editor& editor, const MenuItem& item, const MenuKeyTexts& keys);
 bool menu_item_enabled(const Editor& editor, const MenuItem& item);
 bool menu_item_checked(const Editor& editor, const MenuItem& item);

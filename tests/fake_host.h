@@ -19,7 +19,19 @@ class FakeHost : public geditor::Host {
   struct Entry {
     bool is_directory = false;
     std::string bytes;
+    unsigned long long write_time = 0;  // a tick of `clock` at the last write
+    bool read_only = false;
   };
+
+  // The safe-save steps of Host::save_file that a test can make fail once
+  // (decision F4). The fake changes nothing when a step fails.
+  enum class SaveStep { kNone, kTempWrite, kFlush, kReplace, kMove, kBackup };
+  SaveStep fail_step = SaveStep::kNone;
+  // Paths (any case) whose file_info fails.
+  std::set<std::wstring> info_error_paths;
+  // Every save_file call: the path and whether a backup was asked for.
+  std::vector<std::pair<std::wstring, bool>> saves;
+  unsigned long long clock = 1;
 
   // Keys are lower-cased paths; `names` keeps the original spelling.
   std::map<std::wstring, Entry> files;
@@ -51,6 +63,7 @@ class FakeHost : public geditor::Host {
   int open_dialogs = 0;
   int save_dialogs = 0;
   int yes_no_dialogs = 0;
+  std::vector<std::wstring> yes_no_questions;  // the text of each yes/no question
   std::vector<std::wstring> launched;
   std::vector<std::wstring> written;
   int quit_calls = 0;
@@ -62,8 +75,16 @@ class FakeHost : public geditor::Host {
   bool has_file(const std::wstring& path) const;
   std::string file(const std::wstring& path) const;
 
+  // Changes a file as another program would: new bytes and a new write time.
+  void touch_file(const std::wstring& path, const std::string& bytes);
+  void set_read_only(const std::wstring& path, bool read_only);
+  void remove_file(const std::wstring& path);
+
   bool read_file(const std::wstring& path, std::string& bytes, std::wstring& error) override;
-  bool write_file(const std::wstring& path, std::string_view bytes, std::wstring& error) override;
+  // Writes `bytes` as `path` (fail_writes: "disk full"); save_file uses it.
+  bool write_file(const std::wstring& path, std::string_view bytes, std::wstring& error);
+  bool save_file(const std::wstring& path, std::string_view bytes, bool backup, std::wstring& error) override;
+  bool file_info(const std::wstring& path, geditor::FileInfo& info, std::wstring& error) override;
   geditor::FileKind file_kind(const std::wstring& path) override;
   bool list_directory(const std::wstring& dir, std::vector<geditor::DirEntry>& entries) override;
   std::wstring current_directory() override { return cwd; }

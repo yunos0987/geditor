@@ -45,7 +45,9 @@ constexpr DWORD kToUnicodeNoStateChange = 0x4;  // Windows 10 1607 and later
 constexpr ULONG_PTR kCopyDataCapture = 0x50414347;  // 'GCAP': WM_COPYDATA screenshot
 // 'GFLT': WM_COPYDATA from tools/app_check.py; the payload (UTF-16) "target"
 // or "font" makes the next render target / font creation fail ("shape": the
-// next shaping of a grapheme cluster; "color": the next colour glyph).
+// next shaping of a grapheme cluster; "color": the next colour glyph;
+// "file-info": the next Host::file_info; "save-...": one step of the next
+// save, file_io.h SaveFault).
 constexpr ULONG_PTR kCopyDataFault = 0x544C4647;
 // 'GRDW': WM_COPYDATA from tools/app_check.py; the payload (UTF-16) is a
 // number of frames to draw at once (M3d [C4]); their times go to the state.
@@ -300,9 +302,28 @@ bool MainWindow::read_file(const std::wstring& path, std::string& bytes, std::ws
   return win::read_file(path, bytes, error);
 }
 
-bool MainWindow::write_file(const std::wstring& path, std::string_view bytes,
-                            std::wstring& error) {
-  return win::write_file(path, bytes, error);
+bool MainWindow::save_file(const std::wstring& path, std::string_view bytes, bool backup,
+                           std::wstring& error) {
+  const SaveFault fault = fail_next_save_;
+  fail_next_save_ = SaveFault::kNone;
+  return win::save_file(path, bytes, backup, error, fault);
+}
+
+bool MainWindow::file_info(const std::wstring& path, FileInfo& info, std::wstring& error) {
+  info = FileInfo();
+  if (fail_next_file_info_) {
+    // 'GFLT' "file-info": as if the attributes could not be read.
+    fail_next_file_info_ = false;
+    error = error_text(ERROR_ACCESS_DENIED);
+    return false;
+  }
+  FileState state;
+  if (!read_file_state(path, state, error)) return false;
+  info.exists = state.exists;
+  info.size = state.size;
+  info.write_time = state.write_time;
+  info.read_only = state.read_only;
+  return true;
 }
 
 FileKind MainWindow::file_kind(const std::wstring& path) {
@@ -874,6 +895,18 @@ LRESULT MainWindow::handle_copy_data(const COPYDATASTRUCT* data) {
         InvalidateRect(hwnd_, nullptr, FALSE);  // the colour glyphs on screen are looked up again
         return 1;
       }
+      if (*text == L"file-info") {
+        fail_next_file_info_ = true;
+        return 1;
+      }
+      {
+        bool known = false;
+        const SaveFault fault = save_fault_from_name(*text, &known);
+        if (known) {
+          fail_next_save_ = fault;
+          return 1;
+        }
+      }
       if (headless_ && *text == L"clipboard-read") {
         fail_clipboard_read_ = true;
         return 1;
@@ -945,6 +978,13 @@ bool MainWindow::write_state(const std::wstring& path) {
   text += state_line(L"message", editor_.message());
   text += state_line(L"modified", editor_.buffer().modified() ? L"1" : L"0");
   text += state_line(L"length", std::to_wstring(editor_.buffer().text.length()));
+  // Line ends and read-only (M4a): the mode line, its line-end part, the
+  // default line end, and read-only-mode.
+  text += state_line(L"mode_line", editor_.mode_line());
+  text += state_line(L"eol", editor_.eol_text());
+  text += state_line(L"eol_default", eol_name(editor_.buffer().format.eol));
+  text += state_line(L"read_only", editor_.buffer().read_only ? L"1" : L"0");
+  text += state_line(L"path", editor_.buffer().path);
   if (headless_) {
     text += state_line(L"clipboard", clipboard_has_text_ ? L"text" : L"empty");
     text += state_line(L"clipboard_text", clipboard_store_);

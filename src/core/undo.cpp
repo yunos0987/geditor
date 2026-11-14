@@ -57,7 +57,7 @@ void UndoHistory::record_insert(size_t offset, const PieceList& pieces) {
     Piece& tail = last.pieces.back();
     const Piece& p = pieces.front();
     if (last.offset + total_length(last.pieces) == offset && tail.buffer == p.buffer &&
-        tail.start + tail.length == p.start) {
+        tail.start + tail.length == p.start && tail.eol == p.eol) {
       tail.length += p.length;
       tail.line_feeds += p.line_feeds;
       if (!in_command_) open_ = false;
@@ -83,11 +83,29 @@ void UndoHistory::record_erase(size_t offset, PieceList pieces) {
   if (!in_command_) open_ = false;
 }
 
-bool UndoHistory::undo(PieceTree& tree, EditListener* listener, size_t* point) {
+void UndoHistory::record_eol_change(PieceList before, PieceList after, Eol eol_before, Eol eol_after) {
+  if (!open_ || !in_command_) open_group();
+  Op op;
+  op.eol_change = true;
+  op.pieces = std::move(before);
+  op.pieces_after = std::move(after);
+  op.eol_before = eol_before;
+  op.eol_after = eol_after;
+  undo_.back().ops.push_back(std::move(op));
+  if (!in_command_) open_ = false;
+}
+
+bool UndoHistory::undo(PieceTree& tree, EditListener* listener, size_t* point, Eol* default_eol) {
   if (undo_.empty()) return false;
   Group g = std::move(undo_.back());
   undo_.pop_back();
   for (auto it = g.ops.rbegin(); it != g.ops.rend(); ++it) {
+    if (it->eol_change) {
+      // The text is the same: no listener call (marks and wrap rows stay).
+      if (!it->pieces.empty() || !it->pieces_after.empty()) tree.assign_pieces(it->pieces);
+      if (default_eol != nullptr) *default_eol = it->eol_before;
+      continue;
+    }
     const size_t n = total_length(it->pieces);
     if (it->insert) {
       tree.erase(it->offset, n);
@@ -104,11 +122,16 @@ bool UndoHistory::undo(PieceTree& tree, EditListener* listener, size_t* point) {
   return true;
 }
 
-bool UndoHistory::redo(PieceTree& tree, EditListener* listener, size_t* point) {
+bool UndoHistory::redo(PieceTree& tree, EditListener* listener, size_t* point, Eol* default_eol) {
   if (redo_.empty()) return false;
   Group g = std::move(redo_.back());
   redo_.pop_back();
   for (const Op& op : g.ops) {
+    if (op.eol_change) {
+      if (!op.pieces.empty() || !op.pieces_after.empty()) tree.assign_pieces(op.pieces_after);
+      if (default_eol != nullptr) *default_eol = op.eol_after;
+      continue;
+    }
     const size_t n = total_length(op.pieces);
     if (op.insert) {
       tree.insert_pieces(op.offset, op.pieces);

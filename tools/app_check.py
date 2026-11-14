@@ -1,4 +1,4 @@
-"""Real-app checks of geditor M1, M2, M3a, M3b and M3c (run by hand; Windows only).
+"""Real-app checks of geditor M1, M2, M3a - M3d and M4a (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
@@ -25,7 +25,14 @@ pending in the headless state ('GSTA' / 'GANS'). The M3c checks
 a ZWJ family, a flag, a keycap, か + U+3099), DEL and undo by cluster, a
 failed shaping ('GFLT' "shape") and a cluster without glyphs, and F10 in
 the headless state; with --visible, F10 through SendInput drops the File
-menu down (Left / Right / Esc, read from the state's menu_popup).
+menu down (Left / Right / Esc, read from the state's menu_popup). The M4a
+checks (--only-m4a) open a file with mixed line ends and look at the colour
+of each end-of-line mark, read the File menu's Line Endings and Read Only
+marks, save (the bytes of each line end, "<file>~", the external-change
+question, a deleted file), make each step of the save fail ('GFLT'
+"save-..." / "file-info"), open a file with the read-only attribute, round
+trip utf-8 / utf-8-bom with four kinds of line ends, and save through a hard
+link and (when it can be created) a symbolic link.
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
@@ -436,6 +443,10 @@ def run_checks(exe: pathlib.Path, out: pathlib.Path):
         if question:
             time.sleep(0.5)
         check("opened the read-only file", app.title() == "readonly.txt - geditor", f"title={app.title()!r}")
+        # M4a (decision F6): the read-only attribute turns read-only-mode on;
+        # C-x C-q turns it off so that the buffer can be edited.
+        app.keys("C-x C-q")
+        time.sleep(0.2)
         app.type("X")
         app.keys("C-x C-s")
         time.sleep(0.3)
@@ -1893,8 +1904,8 @@ def run_headless_checks(exe: pathlib.Path, out: pathlib.Path):
 # ---- M3b: menus, the right-click menu and the mouse ----
 
 # The command items of PLAN 4.9 with the key text of decision B1 (built-in
-# keys, no settings) and whether the command is implemented in M3b (else
-# grey). tests/test_menu.cpp holds the same table for the core model.
+# keys, no settings) and whether the command is implemented now (else grey;
+# M3b, and set-eol since M4a). tests/test_menu.cpp holds the same table for the core model.
 M3B_ITEMS = [
     ("File > Open...", "C-x C-f", True), ("File > Open with Encoding...", "C-x RET c", False),
     ("File > Reopen with Encoding...", "C-x RET r", False), ("File > Save", "C-M-s", True),
@@ -1902,8 +1913,9 @@ M3B_ITEMS = [
     *[(f"File > Encoding for Saving > {name}", "", False) for name in (
         "utf-8", "utf-8-bom", "utf-16le", "utf-16le-bom", "utf-16be", "utf-16be-bom", "shift_jis", "euc-jp",
         "iso-2022-jp")],
-    ("File > Line Endings > LF", "", False), ("File > Line Endings > CRLF", "", False),
-    ("File > Line Endings > CR", "", False), ("File > Read Only", "C-x C-q", True),
+    # set-eol: implemented in M4a.
+    ("File > Line Endings > LF", "", True), ("File > Line Endings > CRLF", "", True),
+    ("File > Line Endings > CR", "", True), ("File > Read Only", "C-x C-q", True),
     ("File > Settings", "", True), ("File > Exit", "C-M-w", True),
     ("Edit > Undo", "C-M-z", True), ("Edit > Redo", "C-M-y", True), ("Edit > Cut", "C-M-x", True),
     ("Edit > Copy", "C-M-c", True), ("Edit > Paste", "C-M-v", True), ("Edit > Select All", "C-M-a", True),
@@ -3211,6 +3223,350 @@ def run_m3d_visible_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
 
+# ---- M4a: line ends, saving and read-only ----
+
+M4A_COLORS = {
+    "background": "#000000", "foreground": "#ff0000", "cursor": "#ffffff", "selection": "#400040",
+    "whitespace": "#ffff00", "eol": "#00ff00", "eol_other": "#0000ff",
+}
+# Line ends of the mixed sample: CRLF twice, LF and CR once: Mixed(CRLF).
+M4A_MIXED = b"line1\r\nline2\nline3\rline4\r\nlast"
+M4A_LINES = [("line1", "CRLF"), ("line2", "LF"), ("line3", "CR"), ("line4", "CRLF"), ("last", None)]
+
+
+def wait_state(app, predicate, timeout_s: float = 3.0) -> dict:
+    """The state once predicate(state) holds (the last state otherwise)."""
+    found = d.wait_for(lambda: (lambda s: s if predicate(s) else None)(app.state()), timeout_s)
+    return found if found is not None else app.state()
+
+
+def temporaries(folder: pathlib.Path) -> list[str]:
+    return sorted(p.name for p in folder.iterdir() if ".geditor-tmp" in p.name or ".geditor-old" in p.name)
+
+
+def lit_mask(shot, box) -> frozenset:
+    """The lit pixels of `box` relative to its corner (the shape of a symbol)."""
+    w, h, px = shot
+    x0, y0, x1, y1 = box
+    cells = set()
+    for y in range(max(0, y0), min(h, y1)):
+        for x in range(max(0, x0), min(w, x1)):
+            i = (y * w + x) * 4
+            if max(px[i], px[i + 1], px[i + 2]) > 60:
+                cells.add((x - x0, y - y0))
+    return frozenset(cells)
+
+
+def menu_items(app) -> dict:
+    return {item.path: item for item in app.menu_bar()}
+
+
+def run_m4a_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C2] (real app part), [C4], [C5], [C6] (headless capture), [C7] and
+    [C10] of the M4a packet on the real app."""
+    work = out / "files_m4a"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    settings.write_bytes(settings_json({"colors": M4A_COLORS, "line_numbers": False}))
+    names = []
+
+    # [C6]: the three symbols, eol / eol_other and Mixed(CRLF) (M4-8).
+    mixed = work / "m4a_mixed.txt"
+    mixed.write_bytes(M4A_MIXED)
+    app = d.App(exe, [str(mixed)], cwd=work, settings=settings, height=400)
+    try:
+        record("INFO", "M4a input mode", app.use_input())
+        # The cursor stays at the start of the buffer, away from the marks.
+        state = wait_state(app, lambda s: s.get("eol") == "Mixed(CRLF)")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m4a_01_mixed_marks.png")
+        names.append("m4a_01_mixed_marks.png")
+        rows, masks = [], []
+        ok = True
+        for row, (text, kind) in enumerate(M4A_LINES):
+            box = cell_box(state, row, len(text), 2)
+            green, blue = count_where(shot, is_green, box), count_where(shot, is_blue, box)
+            masks.append(lit_mask(shot, box))
+            want_green = kind == "CRLF"
+            want_blue = kind in ("LF", "CR")
+            ok = ok and (green > 0) == want_green and (blue > 0) == want_blue
+            rows.append(f"row {row} ({kind or 'none'}): eol px {green}, eol_other px {blue}")
+        distinct = len({masks[0], masks[1], masks[2]}) == 3 and masks[0] == masks[3] and not masks[4]
+        check("[M4a C6] mixed file: CRLF lines (the default) in eol, the LF and CR lines in eol_other",
+              ok, "; ".join(rows) + " (m4a_01_mixed_marks.png: green ↵ on rows 1 and 4, blue ↓ and ← on 2 and 3)")
+        check("[M4a C6] the three symbols differ (↵ ↓ ←) and no mark after the last line",
+              distinct, f"lit px per mark {[len(m) for m in masks]}")
+        check("[M4a C6] the mode line says Mixed(CRLF)",
+              "UTF-8 Mixed(CRLF)" in state.get("mode_line", "") and state.get("eol_default") == "CRLF",
+              f"mode_line={state.get('mode_line')!r}")
+        mode_px = count_where(shot, is_lit, (0, int(float(state["mode_line_top"])), shot[0],
+                                             int(float(state["mode_line_top"]) + float(state["line_height"]))))
+        record("INFO", "[M4a C6] mode line drawn", f"{mode_px} lit px in the mode line row (m4a_01_mixed_marks.png)")
+
+        # [C7]: the real menu bar marks the default and enables these items.
+        items = menu_items(app)
+        radio = {k: items[f"File > Line Endings > {k}"] for k in ("LF", "CRLF", "CR")}
+        enc = [i for p, i in items.items() if p.startswith("File > Encoding for Saving > ")]
+        check("[M4a C7] File > Line Endings marks CRLF (the default of the mixed file); LF / CRLF / CR and "
+              "Read Only enabled; Encoding for Saving items disabled",
+              radio["CRLF"].checked and not radio["LF"].checked and not radio["CR"].checked and
+              all(i.enabled and i.radio for i in radio.values()) and items["File > Read Only"].enabled and
+              not items["File > Read Only"].checked and enc and not any(i.enabled for i in enc),
+              "; ".join(i.line() for i in radio.values()) + f"; {items['File > Read Only'].line()}; "
+              f"{len(enc)} encoding items, enabled {[i.path for i in enc if i.enabled]}")
+
+        # set-eol from the menu: every mark the default colour; undo brings the mix back.
+        app.menu_command(radio["LF"].id)
+        state = wait_state(app, lambda s: s.get("eol") == "LF")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m4a_02_set_eol_lf.png")
+        names.append("m4a_02_set_eol_lf.png")
+        greens = [count_where(shot, is_green, cell_box(state, r, len(t), 2)) for r, (t, _) in enumerate(M4A_LINES[:4])]
+        blues = [count_where(shot, is_blue, cell_box(state, r, len(t), 2)) for r, (t, _) in enumerate(M4A_LINES[:4])]
+        items = menu_items(app)
+        check("[M4a C7] File > Line Endings > LF runs set-eol: LF everywhere in eol colour, modified, LF marked",
+              state.get("eol") == "LF" and state.get("modified") == "1" and all(g > 0 for g in greens) and
+              not any(blues) and items["File > Line Endings > LF"].checked,
+              f"eol={state.get('eol')} modified={state.get('modified')} message={state.get('message')!r}; "
+              f"eol px {greens}, eol_other px {blues} (m4a_02_set_eol_lf.png)")
+        app.keys("C-/")
+        state = wait_state(app, lambda s: s.get("eol") == "Mixed(CRLF)")
+        check("[M4a C3] one undo restores the mixed line ends and the default",
+              state.get("eol") == "Mixed(CRLF)" and state.get("modified") == "0",
+              f"eol={state.get('eol')} modified={state.get('modified')}")
+
+        # [C3] typed newline and pasted CRLF / CR text get the default (CRLF).
+        app.set_clipboard("p\r\nq\rr")
+        app.keys("M-> RET C-y")
+        state = wait_state(app, lambda s: s.get("modified") == "1" and s.get("text", "").endswith("r"))
+        # [C4] save: "<file>~" on the first save, the bytes per line end.
+        app.keys("C-x C-s")
+        state = wait_state(app, lambda s: s.get("modified") == "0")
+        expected = M4A_MIXED + b"\r\np\r\nq\r\nr"
+        backup = pathlib.Path(str(mixed) + "~")
+        check("[M4a C2/C3] saved: every other line keeps its line end; typed and pasted line ends are CRLF",
+              mixed.read_bytes() == expected, f"bytes={mixed.read_bytes()!r} message={state.get('message')!r}")
+        check("[M4a C4] the first save makes <file>~ with the old content; no temporary file is left",
+              backup.exists() and backup.read_bytes() == M4A_MIXED and not temporaries(work),
+              f"{backup.name}={backup.read_bytes() if backup.exists() else None!r} temporaries={temporaries(work)}")
+        app.type("2")
+        app.keys("C-x C-s")
+        state = wait_state(app, lambda s: s.get("modified") == "0")
+        check("[M4a C4] the second save does not touch <file>~",
+              backup.read_bytes() == M4A_MIXED and mixed.read_bytes() == expected + b"2",
+              f"{backup.name}={backup.read_bytes()!r}")
+
+        # [C3] copy writes CRLF to the (private) clipboard whatever each line's own line end.
+        app.keys("M-< C-n C-SPC C-n C-n M-w")
+        clip = app.clipboard()
+        check("[M4a C3] copying the LF and CR lines puts CRLF on the clipboard",
+              clip == "line2\r\nline3\r\n", f"clipboard_text={clip!r}")
+        app.keys("C-g")
+
+        # [C4] external change: the question, No writes nothing, Yes saves.
+        mixed.write_bytes(b"changed elsewhere, a longer text\n")
+        app.keys("M->")
+        app.type("3")
+        app.keys("C-x C-s")
+        question = answer(app, "No", timeout_s=3.0)
+        state = wait_state(app, lambda s: s.get("question") == "none" and s.get("message") == "Not saved")
+        check("[M4a C4] a file changed on disk asks before saving; No writes nothing and says 'Not saved'",
+              question is not None and question.get("question") == "yes_no" and
+              question.get("instruction") == "m4a_mixed.txt has changed on disk since it was read; save anyway?" and
+              mixed.read_bytes() == b"changed elsewhere, a longer text\n" and state.get("modified") == "1",
+              f"{describe(question)} message={state.get('message')!r} bytes={mixed.read_bytes()!r}")
+        app.keys("C-x C-s")
+        question = answer(app, "Yes", timeout_s=3.0)
+        state = wait_state(app, lambda s: s.get("modified") == "0")
+        check("[M4a C4] Yes saves over the changed file",
+              question is not None and mixed.read_bytes() == expected + b"23" and state.get("modified") == "0",
+              f"{describe(question)} message={state.get('message')!r}")
+
+        # [C4] a file deleted on disk is saved as new without a question.
+        mixed.unlink()
+        app.type("4")
+        app.keys("C-x C-s")
+        state = wait_state(app, lambda s: s.get("modified") == "0")
+        check("[M4a C4] a deleted file is saved as new without a question",
+              mixed.exists() and mixed.read_bytes() == expected + b"234" and state.get("question") == "none",
+              f"message={state.get('message')!r} question={state.get('question')}")
+    finally:
+        app.kill()
+
+    # [C4] / [C10]: every step of the save failing ('GFLT' "save-..."): the
+    # reason in the echo area, the file and <file>~ unchanged, no temporary
+    # file, the buffer still modified.
+    fault_dir = work / "faults"
+    fault_dir.mkdir(exist_ok=True)
+    target = fault_dir / "f.txt"
+    target.write_bytes(b"original\r\n")
+    old_backup = fault_dir / "f.txt~"
+    old_backup.write_bytes(b"older backup")
+    faults = [
+        ("save-backup", "making the backup: Access is denied"),
+        ("save-inspect", "reading the file attributes: Access is denied"),
+        ("save-link", "resolving the link: The name of the file cannot be resolved"),
+        ("save-temp-create", "creating the temporary file: Access is denied"),
+        ("save-temp-write", "writing the temporary file: The disk is full"),
+        ("save-flush", "flushing the temporary file: The disk is full"),
+        ("save-replace", "replacing the file: Access is denied"),
+        ("file-info", "reading the file time: Access is denied"),
+    ]
+    app = d.App(exe, [str(target)], cwd=fault_dir, settings=settings, height=400)
+    try:
+        app.use_input()
+        app.type("x")
+        wait_state(app, lambda s: s.get("modified") == "1")
+        for i, (fault, step) in enumerate(faults):
+            app.fault(fault)
+            app.keys("C-x C-s")
+            want = f"Cannot write {target}: {step}"
+            state = wait_state(app, lambda s, w=want: s.get("message") == w)
+            if i == 0:
+                app.capture(shots / "m4a_03_save_failed.png")
+                names.append("m4a_03_save_failed.png")
+            check(f"[M4a C4/C10] '{fault}' fails the save with the step and the reason; nothing changes",
+                  state.get("message") == want and target.read_bytes() == b"original\r\n" and
+                  old_backup.read_bytes() == b"older backup" and not temporaries(fault_dir) and
+                  state.get("modified") == "1" and state.get("mode_line", "").startswith("-**"),
+                  f"message={state.get('message')!r} bytes={target.read_bytes()!r} "
+                  f"{old_backup.name}={old_backup.read_bytes()!r} temporaries={temporaries(fault_dir)}"
+                  + (" (m4a_03_save_failed.png)" if i == 0 else ""))
+        app.keys("C-x C-s")
+        state = wait_state(app, lambda s: s.get("modified") == "0")
+        check("[M4a C4] after the failures the save works and makes <file>~ (the first successful save)",
+              target.read_bytes() == b"xoriginal\r\n" and old_backup.read_bytes() == b"original\r\n" and
+              not temporaries(fault_dir), f"message={state.get('message')!r}")
+    finally:
+        app.kill()
+
+    # A new file: the move step fails, then works; no <file>~.
+    new_file = fault_dir / "new.txt"
+    app = d.App(exe, [str(new_file)], cwd=fault_dir, settings=settings, height=400)
+    try:
+        app.use_input()
+        app.type("n")
+        app.keys("RET")
+        app.fault("save-move")
+        app.keys("C-x C-s")
+        want = f"Cannot write {new_file}: moving the temporary file: Access is denied"
+        state = wait_state(app, lambda s: s.get("message") == want)
+        check("[M4a C4/C10] a new file: 'save-move' fails with the reason, no file and no temporary file",
+              state.get("message") == want and not new_file.exists() and not temporaries(fault_dir) and
+              state.get("modified") == "1", f"message={state.get('message')!r}")
+        app.keys("C-x C-s")
+        state = wait_state(app, lambda s: s.get("modified") == "0")
+        check("[M4a C4] the new file is then saved with the default line end (LF) and without <file>~",
+              new_file.read_bytes() == b"n\n" and not pathlib.Path(str(new_file) + "~").exists(),
+              f"bytes={new_file.read_bytes() if new_file.exists() else None!r}")
+    finally:
+        app.kill()
+
+    # [C5]: a file with the read-only attribute opens read-only (%%).
+    ro = work / "m4a_readonly.txt"
+    ro.write_bytes(b"locked\r\n")
+    os.chmod(ro, stat.S_IREAD)
+    app = d.App(exe, [str(ro)], cwd=work, settings=settings, height=400)
+    try:
+        app.use_input()
+        state = wait_state(app, lambda s: s.get("read_only") == "1")
+        items = menu_items(app)
+        app.type("x")
+        state = wait_state(app, lambda s: s.get("message") == "Buffer is read-only")
+        app.capture(shots / "m4a_04_read_only.png")
+        names.append("m4a_04_read_only.png")
+        check("[M4a C5] the read-only attribute: read-only-mode (%%), Read Only checked, typing refused",
+              state.get("read_only") == "1" and state.get("mode_line", "").startswith("-%%") and
+              items["File > Read Only"].checked and state.get("message") == "Buffer is read-only" and
+              state.get("text") == "locked\n" and state.get("modified") == "0",
+              f"mode_line={state.get('mode_line')!r} message={state.get('message')!r} "
+              f"{items['File > Read Only'].line()} (m4a_04_read_only.png)")
+        app.keys("C-x C-q")
+        app.type("x")
+        app.keys("C-x C-s")
+        want = f"Cannot write {ro}: Access is denied (the file is read-only)"
+        state = wait_state(app, lambda s: s.get("message") == want)
+        check("[M4a C5] C-x C-q turns it off; saving then fails with the reason and the file is unchanged",
+              state.get("message") == want and ro.read_bytes() == b"locked\r\n" and state.get("modified") == "1" and
+              state.get("read_only") == "0" and not menu_items(app)["File > Read Only"].checked,
+              f"message={state.get('message')!r} bytes={ro.read_bytes()!r}")
+    finally:
+        app.kill()
+        os.chmod(ro, stat.S_IREAD | stat.S_IWRITE)
+
+    # [C2]: utf-8 / utf-8-bom x LF / CRLF / CR / mixed, load -> save in the app.
+    combos = []
+    for bom in (False, True):
+        for kind, ends in (("lf", ["\n"] * 3), ("crlf", ["\r\n"] * 3), ("cr", ["\r"] * 3),
+                           ("mixed", ["\n", "\r\n", "\r"])):
+            body = f"日本語{ends[0]}😀 x{ends[1]}{ends[2]}last".encode("utf-8")
+            data = (b"\xef\xbb\xbf" if bom else b"") + body
+            path = work / f"m4a_rt_{'bom' if bom else 'nobom'}_{kind}.txt"
+            path.write_bytes(data)
+            app = d.App(exe, [str(path)], cwd=work, settings=settings, height=300)
+            try:
+                app.use_input()
+                app.keys("M->")
+                app.type("z")
+                app.keys("DEL C-x C-s")
+                state = wait_state(app, lambda s: s.get("modified") == "0" and s.get("message", "").startswith("Wrote"))
+                combos.append((path.name, path.read_bytes() == data, state.get("eol")))
+            finally:
+                app.kill()
+    check("[M4a C2] utf-8 and utf-8-bom x LF / CRLF / CR / mixed: load -> edit -> undo by DEL -> save gives "
+          "the same bytes", all(ok for _, ok, _ in combos), "; ".join(f"{n} {'same' if ok else 'DIFFERENT'} ({e})"
+                                                                 for n, ok, e in combos))
+
+    # [C4] F5: a hard link keeps both names in sync; a symbolic link stays a link.
+    links = work / "links"
+    links.mkdir(exist_ok=True)
+    a, b = links / "a.txt", links / "b.txt"
+    a.write_bytes(b"old\n")
+    if b.exists():
+        b.unlink()
+    made = kernel32.CreateHardLinkW(str(b), str(a), None)
+    app = d.App(exe, [str(a)], cwd=links, settings=settings, height=300)
+    try:
+        app.use_input()
+        app.type("H")
+        app.keys("C-x C-s")
+        wait_state(app, lambda s: s.get("modified") == "0")
+        nlink = os.stat(a).st_nlink
+        check("[M4a C4] a hard link: both names get the new content, they stay linked, <file>~ is a copy",
+              bool(made) and a.read_bytes() == b"Hold\n" and b.read_bytes() == b"Hold\n" and nlink == 2 and
+              pathlib.Path(str(a) + "~").read_bytes() == b"old\n",
+              f"links={nlink} a={a.read_bytes()!r} b={b.read_bytes()!r}")
+    finally:
+        app.kill()
+    real, link = links / "real.txt", links / "link.txt"
+    real.write_bytes(b"target\n")
+    try:
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        os.symlink(real, link)
+        symlink_error = None
+    except OSError as exc:
+        symlink_error = str(exc)
+    if symlink_error is not None:
+        record("SKIP", "[M4a C4] a symbolic link stays a link with its target updated",
+               f"symbolic links cannot be created here ({symlink_error}); needs Developer Mode or "
+               "SeCreateSymbolicLinkPrivilege")
+    else:
+        app = d.App(exe, [str(link)], cwd=links, settings=settings, height=300)
+        try:
+            app.use_input()
+            app.type("S")
+            app.keys("C-x C-s")
+            wait_state(app, lambda s: s.get("modified") == "0")
+            check("[M4a C4] a symbolic link stays a link with its target updated",
+                  link.is_symlink() and real.read_bytes() == b"Starget\n" and
+                  pathlib.Path(str(real) + "~").read_bytes() == b"target\n", f"target={real.read_bytes()!r}")
+        finally:
+            app.kill()
+    record("INFO", "[M4a] screenshots", ", ".join(names))
+
+
 # ---- --only-visible: the checks that need the real screen ----
 
 def run_visible_checks(exe: pathlib.Path, out: pathlib.Path):
@@ -3319,6 +3675,8 @@ def main() -> int:
                         help="run only the M3c grapheme cluster and F10 checks")
     parser.add_argument("--only-m3d", action="store_true",
                         help="run only the M3d colour emoji, redraw benchmark and F10 wrap-around checks")
+    parser.add_argument("--only-m4a", action="store_true",
+                        help="run only the M4a line end, save and read-only checks")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -3341,7 +3699,7 @@ def main() -> int:
     saved = None if d.HEADLESS else clipboard_text()
     sequence0 = d.user32.GetClipboardSequenceNumber()
     only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_m3c or
-            args.only_m3d or args.only_headless or args.only_visible)
+            args.only_m3d or args.only_m4a or args.only_headless or args.only_visible)
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
@@ -3376,6 +3734,8 @@ def main() -> int:
                 run_m3d_checks(exe, out)
             else:
                 run_m3d_visible_checks(exe, out)
+        if not only or args.only_m4a:
+            run_m4a_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)

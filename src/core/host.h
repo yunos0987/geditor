@@ -21,13 +21,38 @@ struct DirEntry {
   bool is_directory = false;
 };
 
+// What tells two versions of a file apart without reading it (decision F2),
+// and its read-only attribute (decision F6). Through a symbolic link: the
+// file it points to.
+struct FileInfo {
+  bool exists = false;
+  unsigned long long size = 0;
+  unsigned long long write_time = 0;  // last write, in 100 ns units
+  bool read_only = false;
+
+  bool operator==(const FileInfo&) const = default;
+};
+
 class Host {
  public:
   virtual ~Host() = default;
 
   // Files. `error` receives a message for the echo area on failure.
   virtual bool read_file(const std::wstring& path, std::string& bytes, std::wstring& error) = 0;
-  virtual bool write_file(const std::wstring& path, std::string_view bytes, std::wstring& error) = 0;
+  // Saves `bytes` as `path` the safe way (docs/PLAN.md 4.8): a temporary
+  // file in the same folder, flushed, then ReplaceFileW (an existing file)
+  // or MoveFileExW (a new one); a symbolic link is resolved and its target
+  // replaced; a file with several hard links is written in place. With
+  // `backup`, the old content of an existing file is kept as "<file>~"; a
+  // failure to make it fails the save. On failure, `error` receives the
+  // failed step and the reason ("flushing the temporary file: The disk is
+  // full"), and the file and "<file>~" are as before (except for a failure
+  // in the middle of an in-place write, which the reason says). On success,
+  // `error` may hold a note for the echo area (empty: none).
+  virtual bool save_file(const std::wstring& path, std::string_view bytes, bool backup, std::wstring& error) = 0;
+  // A missing file gives exists = false and true; false (with the reason in
+  // `error`) when the file cannot be inspected.
+  virtual bool file_info(const std::wstring& path, FileInfo& info, std::wstring& error) = 0;
   virtual FileKind file_kind(const std::wstring& path) = 0;
   // Lists the entries of `dir` (with or without a trailing backslash).
   virtual bool list_directory(const std::wstring& dir, std::vector<DirEntry>& entries) = 0;

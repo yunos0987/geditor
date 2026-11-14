@@ -779,9 +779,18 @@ void write_file(Editor& ed) {
 }
 
 void read_only_mode(Editor& ed) {
-  Buffer& b = ed.main_buffer();
-  b.read_only = !b.read_only;
-  ed.set_message(b.read_only ? L"Read-only mode enabled" : L"Read-only mode disabled");
+  ed.toggle_read_only();
+}
+
+// set-eol lf|crlf|cr (decision F7).
+void set_eol(Editor& ed) {
+  const std::vector<CommandArg>& args = ed.command_args();
+  Eol eol = Eol::kLf;
+  if (args.empty() || !parse_eol(args.front().text, &eol)) {
+    ed.fail(L"Line ending must be lf, crlf or cr");
+    return;
+  }
+  ed.set_eol(eol);
 }
 
 void quit(Editor& ed) {
@@ -977,7 +986,7 @@ constexpr CommandInfo kCommands[] = {
     {"select-all", &select_all},
     {"self-insert-command", &self_insert_command},
     {"set-buffer-file-coding-system", nullptr, kEncodingParams},
-    {"set-eol", nullptr, kEolParams},
+    {"set-eol", &set_eol, kEolParams},
     {"set-mark-command", &set_mark_command},
     {"set-wrap-mode", &set_wrap_mode, kWrapParams},
     {"text-scale-decrease", &text_scale_decrease},

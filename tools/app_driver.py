@@ -454,7 +454,11 @@ class App:
     def fault(self, what: str) -> bool:
         """'GFLT': "target", "font", "menu", "popup", "shape" (the next
         shaping of a grapheme cluster), "color" (the next colour glyph; then
-        one colour), "clipboard-read" or "clipboard-write"."""
+        one colour), "clipboard-read" or "clipboard-write"; M4a: "file-info"
+        (the next reading of a file's time and attributes) and "save-inspect",
+        "save-link", "save-temp-create", "save-temp-write", "save-flush",
+        "save-replace", "save-move", "save-backup", "save-in-place" (that
+        step of the next save)."""
         return inject_fault(self.hwnd, what)
 
     def redraw(self, frames: int) -> dict:

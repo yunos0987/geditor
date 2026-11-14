@@ -12,6 +12,9 @@ struct PieceTree::Node {
   Node* right = nullptr;
   size_t sum_length = 0;
   size_t sum_line_feeds = 0;
+  // '\n' of the subtree with CRLF / CR line ends (LF: the rest).
+  size_t sum_crlf = 0;
+  size_t sum_cr = 0;
 };
 
 size_t total_length(const PieceList& pieces) {
@@ -30,17 +33,119 @@ PieceTree::PieceTree(std::wstring original) {
   *this = PieceTree(std::move(original), std::move(lf));
 }
 
-PieceTree::PieceTree(std::wstring original, std::vector<uint32_t> line_feeds) {
+PieceTree::PieceTree(std::wstring original, std::vector<uint32_t> line_feeds)
+    : PieceTree(std::move(original), std::move(line_feeds), std::vector<EolRun>()) {}
+
+PieceTree::PieceTree(std::wstring original, std::vector<uint32_t> line_feeds, const std::vector<EolRun>& runs) {
   buffers_[0].text = std::move(original);
   buffers_[0].line_feeds = std::move(line_feeds);
-  if (!buffers_[0].text.empty()) {
+  const size_t length = buffers_[0].text.size();
+  if (length == 0) return;
+  const std::vector<uint32_t>& lf = buffers_[0].line_feeds;
+  if (runs.size() <= 1) {
     Piece p;
-    p.buffer = 0;
-    p.start = 0;
-    p.length = buffers_[0].text.size();
-    p.line_feeds = buffers_[0].line_feeds.size();
+    p.length = length;
+    p.line_feeds = lf.size();
+    p.eol = runs.empty() ? Eol::kLf : runs.front().eol;
     root_ = new_node(p);
+    return;
   }
+  PieceList pieces;
+  pieces.reserve(runs.size());
+  size_t lf_index = 0;
+  for (size_t i = 0; i < runs.size(); ++i) {
+    const size_t start = i == 0 ? 0 : std::min(runs[i].start, length);
+    const size_t end = i + 1 < runs.size() ? std::min(runs[i + 1].start, length) : length;
+    if (end <= start) continue;
+    size_t count = 0;
+    while (lf_index < lf.size() && lf[lf_index] < end) {
+      ++lf_index;
+      ++count;
+    }
+    Piece p;
+    p.start = start;
+    p.length = end - start;
+    p.line_feeds = count;
+    p.eol = runs[i].eol;
+    pieces.push_back(p);
+  }
+  build(pieces);
+}
+
+void PieceTree::build(const PieceList& pieces) {
+  // Cartesian tree on the treap priorities: the right spine on a stack.
+  std::vector<Node*> spine;
+  for (const Piece& p : pieces) {
+    if (p.length == 0) continue;
+    Node* n = new_node(p);
+    Node* last = nullptr;
+    while (!spine.empty() && spine.back()->priority < n->priority) {
+      last = spine.back();
+      spine.pop_back();
+      update(last);
+    }
+    n->left = last;
+    if (!spine.empty()) spine.back()->right = n;
+    spine.push_back(n);
+  }
+  while (!spine.empty()) {
+    update(spine.back());
+    if (spine.size() == 1) root_ = spine.back();
+    spine.pop_back();
+  }
+}
+
+size_t PieceTree::eol_count(Eol eol) const {
+  if (root_ == nullptr) return 0;
+  switch (eol) {
+    case Eol::kCrLf: return root_->sum_crlf;
+    case Eol::kCr: return root_->sum_cr;
+    case Eol::kLf: break;
+  }
+  return root_->sum_line_feeds - root_->sum_crlf - root_->sum_cr;
+}
+
+Eol PieceTree::line_eol(size_t line) const {
+  // The piece that holds the line's '\n'.
+  const size_t offset = line_end(line);
+  const Node* n = root_;
+  size_t off = offset;
+  while (n != nullptr) {
+    const size_t ll = n->left != nullptr ? n->left->sum_length : 0;
+    if (off < ll) {
+      n = n->left;
+      continue;
+    }
+    off -= ll;
+    if (off < n->piece.length) return n->piece.eol;
+    off -= n->piece.length;
+    n = n->right;
+  }
+  return Eol::kLf;
+}
+
+PieceList PieceTree::pieces() const {
+  PieceList out;
+  std::vector<const Node*> stack;
+  const Node* n = root_;
+  while (n != nullptr || !stack.empty()) {
+    while (n != nullptr) {
+      stack.push_back(n);
+      n = n->left;
+    }
+    n = stack.back();
+    stack.pop_back();
+    out.push_back(n->piece);
+    n = n->right;
+  }
+  return out;
+}
+
+void PieceTree::assign_pieces(const PieceList& pieces) {
+  destroy(root_);
+  root_ = nullptr;
+  build(pieces);
+  ++revision_;
 }
 
 PieceTree::~PieceTree() {
@@ -95,13 +200,19 @@ size_t PieceTree::piece_count() const {
 void PieceTree::update(Node* n) {
   n->sum_length = n->piece.length;
   n->sum_line_feeds = n->piece.line_feeds;
+  n->sum_crlf = n->piece.eol == Eol::kCrLf ? n->piece.line_feeds : 0;
+  n->sum_cr = n->piece.eol == Eol::kCr ? n->piece.line_feeds : 0;
   if (n->left != nullptr) {
     n->sum_length += n->left->sum_length;
     n->sum_line_feeds += n->left->sum_line_feeds;
+    n->sum_crlf += n->left->sum_crlf;
+    n->sum_cr += n->left->sum_cr;
   }
   if (n->right != nullptr) {
     n->sum_length += n->right->sum_length;
     n->sum_line_feeds += n->right->sum_line_feeds;
+    n->sum_crlf += n->right->sum_crlf;
+    n->sum_cr += n->right->sum_cr;
   }
 }
 
@@ -181,20 +292,22 @@ PieceTree::Node* PieceTree::merge(Node* a, Node* b) {
   return b;
 }
 
-bool PieceTree::extend_rightmost(Node* n, uint32_t buffer, size_t end, size_t count, size_t line_feeds) {
+bool PieceTree::extend_rightmost(Node* n, const Piece& p) {
   if (n == nullptr) return false;
   if (n->right != nullptr) {
-    if (!extend_rightmost(n->right, buffer, end, count, line_feeds)) return false;
+    if (!extend_rightmost(n->right, p)) return false;
   } else {
-    if (n->piece.buffer != buffer || n->piece.start + n->piece.length != end) return false;
-    n->piece.length += count;
-    n->piece.line_feeds += line_feeds;
+    if (n->piece.buffer != p.buffer || n->piece.start + n->piece.length != p.start || n->piece.eol != p.eol) {
+      return false;
+    }
+    n->piece.length += p.length;
+    n->piece.line_feeds += p.line_feeds;
   }
   update(n);
   return true;
 }
 
-PieceList PieceTree::insert(size_t offset, std::wstring_view text) {
+PieceList PieceTree::insert(size_t offset, std::wstring_view text, Eol eol) {
   if (text.empty()) return {};
   TextBuffer& add = buffers_[1];
   const size_t start = add.text.size();
@@ -211,11 +324,12 @@ PieceList PieceTree::insert(size_t offset, std::wstring_view text) {
   p.start = start;
   p.length = text.size();
   p.line_feeds = lf;
+  p.eol = eol;
 
   Node* left = nullptr;
   Node* right = nullptr;
   split(root_, offset, left, right);
-  if (!extend_rightmost(left, 1, start, p.length, lf)) left = merge(left, new_node(p));
+  if (!extend_rightmost(left, p)) left = merge(left, new_node(p));
   root_ = merge(left, right);
   ++revision_;
   return PieceList{p};
@@ -311,7 +425,9 @@ bool PieceTree::visit(const Node* n, size_t base, size_t lo, size_t hi, ChunkFn 
   const size_t b = std::min(hi, piece_end);
   if (a < b) {
     const std::wstring& buf = buffers_[n->piece.buffer].text;
-    if (!fn(ctx, std::wstring_view(buf.data() + n->piece.start + (a - piece_begin), b - a))) return false;
+    if (!fn(ctx, std::wstring_view(buf.data() + n->piece.start + (a - piece_begin), b - a), n->piece.eol)) {
+      return false;
+    }
   }
   if (hi > piece_end) {
     if (!visit(n->right, piece_end, lo, hi, fn, ctx)) return false;

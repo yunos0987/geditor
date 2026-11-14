@@ -60,8 +60,25 @@ void FakeHost::add_dir(const std::wstring& path) {
 void FakeHost::add_file(const std::wstring& path, const std::string& bytes) {
   Entry e;
   e.bytes = bytes;
+  e.write_time = ++clock;
+  const auto old = files.find(key_of(path));
+  if (old != files.end()) e.read_only = old->second.read_only;
   files[key_of(path)] = e;
   names[key_of(path)] = path;
+}
+
+void FakeHost::touch_file(const std::wstring& path, const std::string& bytes) {
+  add_file(path, bytes);
+}
+
+void FakeHost::set_read_only(const std::wstring& path, bool read_only) {
+  const auto it = files.find(key_of(path));
+  if (it != files.end()) it->second.read_only = read_only;
+}
+
+void FakeHost::remove_file(const std::wstring& path) {
+  files.erase(key_of(path));
+  names.erase(key_of(path));
 }
 
 bool FakeHost::has_file(const std::wstring& path) const {
@@ -105,6 +122,59 @@ bool FakeHost::write_file(const std::wstring& path, std::string_view bytes, std:
   }
   add_file(path, std::string(bytes));
   written.push_back(path);
+  return true;
+}
+
+bool FakeHost::save_file(const std::wstring& path, std::string_view bytes, bool backup, std::wstring& error) {
+  saves.emplace_back(path, backup);
+  const auto existing = files.find(key_of(path));
+  const bool exists = existing != files.end() && !existing->second.is_directory;
+  if (exists && existing->second.read_only) {
+    error = L"Access is denied";
+    return false;
+  }
+  // The steps of PLAN 4.8 in order; a failing step leaves everything as it
+  // was (the real host removes its temporary file).
+  const SaveStep fail = fail_step;
+  fail_step = SaveStep::kNone;
+  if (fail == SaveStep::kTempWrite) {
+    error = L"writing the temporary file: The disk is full";
+    return false;
+  }
+  if (fail == SaveStep::kFlush) {
+    error = L"flushing the temporary file: The disk is full";
+    return false;
+  }
+  if (exists && fail == SaveStep::kReplace) {
+    error = L"replacing the file: Access is denied";
+    return false;
+  }
+  if (!exists && fail == SaveStep::kMove) {
+    error = L"moving the temporary file: Access is denied";
+    return false;
+  }
+  if (exists && backup && fail == SaveStep::kBackup) {
+    error = L"making the backup: Access is denied";
+    return false;
+  }
+  const std::string old = exists ? existing->second.bytes : std::string();
+  if (!write_file(path, bytes, error)) return false;
+  if (exists && backup) add_file(path + L"~", old);
+  return true;
+}
+
+bool FakeHost::file_info(const std::wstring& path, geditor::FileInfo& info, std::wstring& error) {
+  info = geditor::FileInfo();
+  if (info_error_paths.count(key_of(path)) != 0) {
+    error = L"Access is denied";
+    return false;
+  }
+  const auto it = files.find(key_of(path));
+  if (it == files.end() || it->second.is_directory) return true;
+  info.exists = true;
+  info.size = it->second.bytes.size();
+  info.write_time = it->second.write_time;
+  info.read_only = it->second.read_only;
   return true;
 }
 
@@ -166,8 +236,9 @@ geditor::SaveChoice FakeHost::ask_save_changes(const std::wstring&) {
   return c;
 }
 
-bool FakeHost::ask_yes_no(const std::wstring&) {
+bool FakeHost::ask_yes_no(const std::wstring& question) {
   ++yes_no_dialogs;
+  yes_no_questions.push_back(question);
   if (yes_no_answers.empty()) return false;
   const bool c = yes_no_answers.front();
   yes_no_answers.pop_front();

@@ -81,10 +81,15 @@ EolMark eol_mark_for_line(const PieceTree& tree, size_t line, Eol eol, const Dis
   EolMark mark;
   if (!options.eol_marks || line + 1 >= tree.line_count()) return mark;
   mark.shown = true;
-  mark.symbol = eol == Eol::kCrLf ? options.eol_crlf : options.eol_lf;
-  // Every line uses the buffer's line end until M4 keeps them per line, so
-  // eol_other is not used yet.
-  mark.color = kColorEol;
+  // The line's own line end; eol_other when it differs from the default
+  // (decision F8).
+  const Eol own = tree.line_eol(line);
+  switch (own) {
+    case Eol::kLf: mark.symbol = options.eol_lf; break;
+    case Eol::kCrLf: mark.symbol = options.eol_crlf; break;
+    case Eol::kCr: mark.symbol = options.eol_cr; break;
+  }
+  mark.color = own == eol ? kColorEol : kColorEolOther;
   return mark;
 }
 
