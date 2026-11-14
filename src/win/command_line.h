@@ -1,6 +1,6 @@
 // Command line of geditor.exe: [--settings=PATH] [+LINE] [file]
 // (docs/PLAN.md 2 "startup arguments"; --encoding arrives in M4), plus the
-// measurement flags.
+// measurement flags and --headless.
 #pragma once
 
 #include <cstddef>
@@ -16,6 +16,10 @@ struct CommandLine {
   std::wstring settings;       // PATH of --settings=PATH as written; empty when not given
   bool measure_startup = false;  // --measure-startup
   bool measure_input = false;    // --measure-input (tools/measure_input.py)
+  // --headless: an off-screen window that never takes the foreground, a
+  // private clipboard and dialogs answered through WM_COPYDATA, for the
+  // tools and checks (docs/PLAN.md 2 "headless"; not shown to users).
+  bool headless = false;
   std::vector<std::wstring> errors;  // messages for the echo area
 };
 

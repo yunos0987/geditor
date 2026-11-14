@@ -28,6 +28,10 @@ class FakeHost : public geditor::Host {
   std::wstring clipboard;
   bool clipboard_has_text = false;
   int lines = 10;
+  // Cells across the text area: with the default 3-cell gutter the window
+  // width is 80, so the default wrap (max, 80) wraps at 80 cells.
+  int columns = 84;
+  int display_dpi = 96;
 
   std::deque<geditor::OpenChoice> open_answers;
   std::deque<geditor::SaveChoice> save_answers;
@@ -72,6 +76,8 @@ class FakeHost : public geditor::Host {
   bool launch_new_window(const std::wstring& path, std::wstring& error) override;
   void quit() override { ++quit_calls; }
   int visible_lines() override;
+  int visible_columns() override { return columns; }
+  int dpi() override { return display_dpi; }
 };
 
 // The settings file of Session::settings.

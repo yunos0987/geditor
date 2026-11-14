@@ -18,6 +18,8 @@
 
 namespace geditor::win {
 
+struct Question;
+
 class MainWindow final : public Host {
  public:
   MainWindow();
@@ -25,8 +27,11 @@ class MainWindow final : public Host {
   MainWindow(const MainWindow&) = delete;
   MainWindow& operator=(const MainWindow&) = delete;
 
-  // Creates the renderer and the (hidden) window.
-  bool create(HINSTANCE instance, bool measure_startup, bool measure_input);
+  // Creates the renderer and the (hidden) window. `headless` (--headless):
+  // the window is placed outside every monitor as a tool window that is
+  // never activated, the clipboard is a private store and questions are
+  // answered through WM_COPYDATA (headless.h).
+  bool create(HINSTANCE instance, bool measure_startup, bool measure_input, bool headless);
   // Reads the settings file (--settings=PATH or %USERPROFILE%\.geditor.json),
   // opens the file of the command line, goes to +LINE and shows argument and
   // settings errors in the echo area.
@@ -50,6 +55,8 @@ class MainWindow final : public Host {
   bool launch_new_window(const std::wstring& path, std::wstring& error) override;
   void quit() override;
   int visible_lines() override;
+  int visible_columns() override;
+  int dpi() override;
 
  private:
   static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -63,6 +70,15 @@ class MainWindow final : public Host {
   void after_input();
   void update_title();
   void keep_point_visible();
+  // Rebuilds the font when the settings, text-scale or DPI ask for another
+  // one (always when `force`); reports missing families once per value of
+  // font.family / font.fallback (decision E1, missing_fonts_) and a failed
+  // creation (the previous font stays).
+  void apply_font(bool force);
+  void handle_dpi_changed(UINT dpi, const RECT& suggested);
+  // WM_VSCROLL: `position` is the 16-bit thumb position of the message.
+  void handle_vscroll(int code, unsigned position);
+  void update_scroll_bar();
   void place_ime();
   void start_input_measure();
   // After the first frame: watch the settings file (failures are shown once).
@@ -71,6 +87,19 @@ class MainWindow final : public Host {
   void append_message(const std::wstring& text);
   // Draws the current frame into a 32-bit BMP file (WM_COPYDATA request).
   bool capture_to_bmp(const std::wstring& path);
+  // The WM_COPYDATA requests of the tools (headless.h); 1 when done, 0 when
+  // rejected (reject_request says why).
+  LRESULT handle_copy_data(const COPYDATASTRUCT* data);
+  // Counts a request that was not understood and reports it to the
+  // debugger; the state ('GSTA') shows the count and the last reason.
+  void reject_request(const std::wstring& reason);
+  // Writes the state lines (headless.h) to `path` as UTF-16LE.
+  bool write_state(const std::wstring& path);
+  // Headless: asks `question` without a window and waits, in a loop like the
+  // modal loop of a task dialog, until a tool presses one of its buttons
+  // ('GANS'). Returns the id of that button (IDCANCEL when the loop ends
+  // because the program quits).
+  int ask_headless(const Question& question);
 
   HWND hwnd_ = nullptr;
   Renderer renderer_;
@@ -87,7 +116,30 @@ class MainWindow final : public Host {
   bool input_pending_ = false;
   LARGE_INTEGER input_start_{};
   double open_ms_ = -1;
-  int last_rows_ = 0;  // text rows of the last non-empty client area
+  int last_rows_ = 0;     // text rows of the last non-empty client area
+  int last_columns_ = 0;  // cells across the last non-empty client area
+  // A frame that could not be drawn (no render target): retried by a timer
+  // and reported in the echo area once drawing works again.
+  HRESULT draw_error_ = S_OK;
+  // The scroll bar as last set.
+  SCROLLINFO scroll_shown_{};
+  bool scroll_set_ = false;
+  // Which missing font names were already reported (decision E1).
+  MissingFontReport missing_fonts_;
+  // ---- --headless ----
+  bool headless_ = false;
+  // The private clipboard: the text as the real clipboard would hold it
+  // (CRLF line ends); the real clipboard is never opened.
+  std::wstring clipboard_store_;
+  bool clipboard_has_text_ = false;
+  // One-shot failures of the private clipboard ('GFLT').
+  bool fail_clipboard_read_ = false;
+  bool fail_clipboard_write_ = false;
+  // The question waiting for an answer, and the pressed button (0: none).
+  const Question* question_ = nullptr;
+  int question_answer_ = 0;
+  unsigned rejected_requests_ = 0;
+  std::wstring last_rejected_;
 };
 
 }  // namespace geditor::win

@@ -25,7 +25,7 @@ TEST(mx_tab_completes_command_names) {
   CHECK_EQ(s.ed.minibuffer_text(), std::wstring(L"forward-"));
   s.keys(L"TAB");
   CHECK_EQ(s.message(), std::wstring(L"{forward-char | forward-word}"));
-  s.ed.set_minibuffer_text(L"text-scale-r");  // not implemented yet, still completed
+  s.ed.set_minibuffer_text(L"text-scale-r");
   s.keys(L"TAB");
   CHECK_EQ(s.ed.minibuffer_text(), std::wstring(L"text-scale-reset"));
   s.ed.set_minibuffer_text(L"zzz");
@@ -215,10 +215,6 @@ constexpr LaterKey kLaterKeys[] = {
     {L"C-x RET r", "revert-buffer-with-coding-system"},
     {L"C-x RET c", "find-file-with-encoding"},
     {L"C-x RET e", "set-eol"},
-    {L"C-x C-+", "text-scale-increase"},
-    {L"C-x C-=", "text-scale-increase"},
-    {L"C-x C--", "text-scale-decrease"},
-    {L"C-x C-0", "text-scale-reset"},
     {L"<f10>", "menu-bar-open"},
     {L"C-x (", "kmacro-start-macro"},
     {L"<f3>", "kmacro-start-macro"},
@@ -231,9 +227,10 @@ constexpr LaterKey kLaterKeys[] = {
     {L"C-M-g", "goto-line"},
 };
 
-// Commands of later milestones without a default key (menu View / M-x).
-constexpr const char* kLaterWithoutKey[] = {
-    "toggle-line-numbers", "toggle-eol-marks", "toggle-whitespace-marks", "set-wrap-mode",
+// The View commands of M3a (menu View / M-x, text-scale also by key).
+constexpr const char* kViewCommands[] = {
+    "toggle-line-numbers", "toggle-eol-marks",    "toggle-whitespace-marks", "set-wrap-mode",
+    "text-scale-increase", "text-scale-decrease", "text-scale-reset",
 };
 
 }  // namespace
@@ -267,9 +264,12 @@ TEST(registry_later_commands_are_not_implemented) {
     const geditor::CommandInfo* info = geditor::find_command(k.command);
     CHECK(info != nullptr && info->fn == nullptr);
   }
-  for (const char* name : kLaterWithoutKey) {
+}
+
+TEST(registry_view_commands_are_implemented) {
+  for (const char* name : kViewCommands) {
     const geditor::CommandInfo* info = geditor::find_command(name);
-    CHECK(info != nullptr && info->fn == nullptr);
+    CHECK(info != nullptr && info->fn != nullptr);
   }
 }
 
@@ -283,10 +283,6 @@ TEST(registry_later_commands_keys_show_not_implemented) {
     CHECK_EQ(s.message(), expected);
     CHECK(!s.ed.minibuffer_active());
     CHECK_EQ(s.text(), std::wstring(L"abc"));
-  }
-  for (const char* name : kLaterWithoutKey) {
-    s.ed.execute_command(name);
-    CHECK_EQ(s.message(), geditor::widen(name) + L" is not implemented yet");
   }
 }
 

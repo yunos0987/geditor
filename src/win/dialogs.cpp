@@ -2,7 +2,10 @@
 
 #include <commctrl.h>
 
-#include "path.h"
+#include <optional>
+#include <vector>
+
+#include "question.h"
 
 namespace geditor::win {
 namespace {
@@ -29,47 +32,25 @@ HRESULT call_task_dialog(const TASKDIALOGCONFIG* config, int* button) {
   }
 }
 
-// Shows a task dialog; returns the pressed button id (IDCANCEL for Esc and
-// the close button), or 0 when the dialog could not be shown.
-int show_task_dialog(HWND owner, const std::wstring& instruction, const std::wstring& content,
-                     const TASKDIALOG_BUTTON* buttons, UINT button_count,
-                     TASKDIALOG_COMMON_BUTTON_FLAGS common_buttons, int default_button) {
-  TASKDIALOGCONFIG config{};
-  config.cbSize = sizeof(config);
-  config.hwndParent = owner;
-  config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-  config.dwCommonButtons = common_buttons;
-  config.pszWindowTitle = kTitle;
-  config.pszMainInstruction = instruction.c_str();
-  config.pszContent = content.empty() ? nullptr : content.c_str();
-  config.pButtons = buttons;
-  config.cButtons = button_count;
-  config.nDefaultButton = default_button;
+// Shows the task dialog of `question` (question.h builds its text and
+// buttons); returns the pressed button id (IDCANCEL for Esc and the close
+// button), or 0 when the dialog could not be shown.
+int show_task_dialog(HWND owner, const Question& question) {
+  const std::vector<TASKDIALOG_BUTTON> buttons = task_dialog_buttons(question);
+  const TASKDIALOGCONFIG config = task_dialog_config(question, buttons, owner, kTitle);
   int pressed = 0;
   if (FAILED(call_task_dialog(&config, &pressed))) return 0;
   return pressed;
 }
 
-constexpr int kOpenHere = 101;
-constexpr int kOpenNewWindow = 102;
-constexpr int kSave = 201;
-constexpr int kDontSave = 202;
-
 }  // namespace
 
 OpenChoice ask_open_choice(HWND owner, const std::wstring& path) {
-  const TASKDIALOG_BUTTON buttons[] = {
-      {kOpenHere, L"Open in this window"},
-      {kOpenNewWindow, L"Open in a new window"},
-      {IDCANCEL, L"Cancel"},
-  };
-  const std::wstring instruction = L"Open " + file_name_of(path) + L"?";
-  switch (show_task_dialog(owner, instruction, path, buttons, 3, 0, kOpenHere)) {
-    case kOpenHere: return OpenChoice::kReplace;
-    case kOpenNewWindow: return OpenChoice::kNewWindow;
-    case IDCANCEL: return OpenChoice::kCancel;
-    default: break;
+  const Question question = open_choice_question(path);
+  if (const std::optional<OpenChoice> choice = open_choice_for(show_task_dialog(owner, question))) {
+    return *choice;
   }
+  const std::wstring& instruction = question.instruction;
   const std::wstring text = instruction + L"\n" + path +
                             L"\n\nYes: open in this window\nNo: open in a new window";
   switch (MessageBoxW(owner, text.c_str(), kTitle, MB_YESNOCANCEL | MB_ICONQUESTION)) {
@@ -80,18 +61,11 @@ OpenChoice ask_open_choice(HWND owner, const std::wstring& path) {
 }
 
 SaveChoice ask_save_changes(HWND owner, const std::wstring& buffer_name) {
-  const TASKDIALOG_BUTTON buttons[] = {
-      {kSave, L"Save"},
-      {kDontSave, L"Don't Save"},
-      {IDCANCEL, L"Cancel"},
-  };
-  const std::wstring instruction = L"Save changes to " + buffer_name + L"?";
-  switch (show_task_dialog(owner, instruction, std::wstring(), buttons, 3, 0, kSave)) {
-    case kSave: return SaveChoice::kSave;
-    case kDontSave: return SaveChoice::kDontSave;
-    case IDCANCEL: return SaveChoice::kCancel;
-    default: break;
+  const Question question = save_changes_question(buffer_name);
+  if (const std::optional<SaveChoice> choice = save_choice_for(show_task_dialog(owner, question))) {
+    return *choice;
   }
+  const std::wstring& instruction = question.instruction;
   const std::wstring text = instruction + L"\n\nYes: save\nNo: don't save";
   switch (MessageBoxW(owner, text.c_str(), kTitle, MB_YESNOCANCEL | MB_ICONWARNING)) {
     case IDYES: return SaveChoice::kSave;
@@ -101,18 +75,10 @@ SaveChoice ask_save_changes(HWND owner, const std::wstring& buffer_name) {
 }
 
 bool ask_yes_no(HWND owner, const std::wstring& question) {
-  // Custom buttons: the common buttons would be labelled in the UI language
-  // of Windows, while geditor's dialogs are English (docs/PLAN.md 2).
-  const TASKDIALOG_BUTTON buttons[] = {
-      {IDYES, L"Yes"},
-      {IDNO, L"No"},
-  };
-  switch (show_task_dialog(owner, question, std::wstring(), buttons, 2, 0, IDNO)) {
-    case IDYES: return true;
-    case IDNO:
-    case IDCANCEL:  // Esc or the close button
-      return false;
-    default: break;
+  // Custom buttons (question.h): the common buttons would be labelled in the
+  // UI language of Windows, while geditor's dialogs are English.
+  if (const std::optional<bool> yes = yes_no_for(show_task_dialog(owner, yes_no_question(question)))) {
+    return *yes;  // IDCANCEL (Esc or the close button) is "No"
   }
   return MessageBoxW(owner, question.c_str(), kTitle,
                      MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;

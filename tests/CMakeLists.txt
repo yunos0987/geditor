@@ -6,11 +6,13 @@ add_executable(geditor_tests
   test_char_width.cpp
   test_commands_edit.cpp
   test_commands_move.cpp
+  test_display.cpp
   test_encoding.cpp
   test_files.cpp
   test_jsonc.cpp
   test_key.cpp
   test_keymap.cpp
+  test_layout_wrap.cpp
   test_minibuffer.cpp
   test_mx.cpp
   test_piece_tree.cpp
@@ -22,12 +24,15 @@ add_executable(geditor_tests
   test_settings.cpp
   test_shift_translation.cpp
   test_undo.cpp
+  test_visual_line.cpp
   test_win_echo.cpp
+  test_win_font.cpp
+  test_win_headless.cpp
   test_win_input.cpp
   test_win_logic.cpp
   test_win_settings.cpp)
 target_link_libraries(geditor_tests PRIVATE
-  geditor_options geditor_core geditor_win_logic pcre2_16 user32)
+  geditor_options geditor_core geditor_win_logic geditor_text pcre2_16 user32)
 
 add_test(NAME geditor_tests COMMAND geditor_tests)
 

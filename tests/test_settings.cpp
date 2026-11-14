@@ -341,7 +341,7 @@ TEST(settings_other_items_are_validated_and_kept) {
   CHECK_EQ(c.new_file_eol, std::wstring(L"lf"));
   CHECK(!c.backup);
   CHECK(c.case_fold == geditor::CaseFold::kNever);
-  // M2 applies only the keys: the editor's tab width is unchanged.
+  // The invalid tab_width was dropped: the editor keeps the default.
   CHECK_EQ(s.ed.tab_width(), 4);
 }
 

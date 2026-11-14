@@ -48,10 +48,11 @@ PieceTree::~PieceTree() {
 }
 
 PieceTree::PieceTree(PieceTree&& other) noexcept
-    : root_(other.root_), seed_(other.seed_) {
+    : root_(other.root_), seed_(other.seed_), revision_(other.revision_) {
   buffers_[0] = std::move(other.buffers_[0]);
   buffers_[1] = std::move(other.buffers_[1]);
   other.root_ = nullptr;
+  ++other.revision_;
 }
 
 PieceTree& PieceTree::operator=(PieceTree&& other) noexcept {
@@ -62,6 +63,9 @@ PieceTree& PieceTree::operator=(PieceTree&& other) noexcept {
     root_ = other.root_;
     seed_ = other.seed_;
     other.root_ = nullptr;
+    // Never a value this object had before: caches keyed on it see a change.
+    revision_ = std::max(revision_, other.revision_) + 1;
+    ++other.revision_;
   }
   return *this;
 }
@@ -213,6 +217,7 @@ PieceList PieceTree::insert(size_t offset, std::wstring_view text) {
   split(root_, offset, left, right);
   if (!extend_rightmost(left, 1, start, p.length, lf)) left = merge(left, new_node(p));
   root_ = merge(left, right);
+  ++revision_;
   return PieceList{p};
 }
 
@@ -225,11 +230,13 @@ void PieceTree::insert_pieces(size_t offset, const PieceList& pieces) {
     left = merge(left, new_node(p));
   }
   root_ = merge(left, right);
+  ++revision_;
 }
 
 PieceList PieceTree::erase(size_t offset, size_t count) {
   PieceList removed;
   if (count == 0) return removed;
+  ++revision_;
   Node* left = nullptr;
   Node* mid = nullptr;
   Node* right = nullptr;

@@ -21,20 +21,21 @@ std::wstring own_executable_path() {
 }
 
 std::wstring editor_command_line(const std::wstring& exe, const std::wstring& file,
-                                 const std::wstring& settings) {
+                                 const std::wstring& settings, bool headless) {
   std::wstring command_line = quote_argument(exe);
+  if (headless) command_line += L" " + quote_argument(L"--headless");
   if (!settings.empty()) command_line += L" " + quote_argument(L"--settings=" + settings);
   command_line += L" " + quote_argument(file);
   return command_line;
 }
 
 bool launch_editor(const std::wstring& exe, const std::wstring& file, const std::wstring& settings,
-                   std::wstring& error) {
+                   std::wstring& error, bool headless) {
   if (exe.empty()) {
     error = L"Cannot start a new window: the program path is unknown";
     return false;
   }
-  std::wstring command_line = editor_command_line(exe, file, settings);
+  std::wstring command_line = editor_command_line(exe, file, settings, headless);
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION info{};

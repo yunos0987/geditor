@@ -51,8 +51,12 @@ class Host {
   virtual bool launch_new_window(const std::wstring& path, std::wstring& error) = 0;
   // Closes the window and ends the process (after the current call returns).
   virtual void quit() = 0;
-  // Number of text lines that fit in the window.
+  // Number of text lines (screen rows) that fit in the window.
   virtual int visible_lines() = 0;
+  // Number of whole cells across the text area, line numbers included.
+  virtual int visible_columns() = 0;
+  // Dots per inch of the window (96 = 100 %), for text-scale limits.
+  virtual int dpi() = 0;
 };
 
 }  // namespace geditor

@@ -1,6 +1,7 @@
 #include "editor.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "commands.h"
 #include "layout.h"
@@ -10,14 +11,17 @@
 namespace geditor {
 namespace {
 
-// Moves the mark of a buffer while undo/redo change its text.
+// Moves the mark of a buffer while undo/redo change its text, and tells the
+// wrap layout (main buffer only) where the text changed.
 class MarkFollower final : public EditListener {
  public:
-  explicit MarkFollower(Buffer& b) : b_(b) {}
+  MarkFollower(Buffer& b, WrapLayout* layout) : b_(b), layout_(layout) {}
   void on_insert(size_t offset, size_t count) override {
+    if (layout_ != nullptr) layout_->note_edit(b_.text, offset, count, 0);
     if (b_.has_mark && b_.mark > offset) b_.mark += count;
   }
   void on_erase(size_t offset, size_t count) override {
+    if (layout_ != nullptr) layout_->note_edit(b_.text, offset, 0, count);
     if (!b_.has_mark) return;
     if (b_.mark >= offset + count) {
       b_.mark -= count;
@@ -28,6 +32,7 @@ class MarkFollower final : public EditListener {
 
  private:
   Buffer& b_;
+  WrapLayout* layout_;
 };
 
 constexpr Key kCtrlG{U'g', kModCtrl};
@@ -446,6 +451,7 @@ bool Editor::apply_settings_text(std::string_view utf8) {
   if (parsed.syntax_ok) {
     rebuild_keymaps(parsed.config, &errors);
     config_ = std::move(parsed.config);
+    apply_view_settings();
   }
   std::stable_sort(errors.begin(), errors.end(), [](const Diagnostic& a, const Diagnostic& b) {
     return a.pos.line != b.pos.line ? a.pos.line < b.pos.line : a.pos.column < b.pos.column;
@@ -490,6 +496,7 @@ void Editor::reload_settings() {
       if (settings_file_seen_) {
         settings_file_seen_ = false;
         config_ = Config();
+        apply_view_settings();
         settings_errors_.clear();
         rebuild_keymaps(config_, nullptr);
         show(L"Settings file removed; using defaults");
@@ -652,7 +659,7 @@ std::wstring Editor::mode_line() const {
   const wchar_t* flag = main_.read_only ? (modified ? L"%*" : L"%%") : (modified ? L"**" : L"--");
   return std::wstring(L"-") + flag + L" " + buffer_name() + L"  " + encoding_name(main_.format) + L" " +
          eol_name(main_.format.eol) + L"  L" + std::to_wstring(point_line() + 1) + L" C" +
-         std::to_wstring(point_column());
+         std::to_wstring(point_column()) + L"  wrap:" + wrap_mode_name(wrap_mode());
 }
 
 size_t Editor::point_line() const {
@@ -660,11 +667,189 @@ size_t Editor::point_line() const {
 }
 
 int Editor::point_column() const {
-  return column_at(main_.text, main_.point, tab_width_);
+  // Through the wrap layout: long lines start from a recorded state.
+  int64_t logical = 0;
+  layout().row_of(main_.text, main_.point, nullptr, &logical);
+  return static_cast<int>(std::min<int64_t>(logical, std::numeric_limits<int>::max()));
 }
 
 void Editor::set_tab_width(int width) {
   tab_width_ = std::max(1, width);
+}
+
+// ---- View ----
+
+void Editor::apply_view_settings() {
+  tab_width_ = std::max(1, config_.tab_width);
+  line_numbers_view_.reload(config_.line_numbers);
+  eol_marks_view_.reload(config_.eol_marks_show);
+  whitespace_view_.reload(whitespace_flags(config_));
+  wrap_view_.reload(config_.wrap_mode);
+}
+
+DisplayOptions Editor::display_options() const {
+  DisplayOptions o;
+  o.line_numbers = line_numbers();
+  o.eol_marks = eol_marks();
+  const WhitespaceFlags ws = whitespace_view_.get(whitespace_flags(config_));
+  o.space = ws[0];
+  o.tab = ws[1];
+  o.fullwidth_space = ws[2];
+  o.trailing = ws[3];
+  o.eol_lf = config_.eol_mark_lf;
+  o.eol_crlf = config_.eol_mark_crlf;
+  o.eol_cr = config_.eol_mark_cr;
+  return o;
+}
+
+WrapMode Editor::wrap_mode() const {
+  return wrap_view_.get(config_.wrap_mode);
+}
+
+bool Editor::line_numbers() const {
+  return line_numbers_view_.get(config_.line_numbers);
+}
+
+bool Editor::eol_marks() const {
+  return eol_marks_view_.get(config_.eol_marks_show);
+}
+
+bool Editor::whitespace_marks() const {
+  const WhitespaceFlags ws = whitespace_view_.get(whitespace_flags(config_));
+  return std::any_of(ws.begin(), ws.end(), [](bool b) { return b; });
+}
+
+int Editor::gutter_columns() const {
+  return geditor::gutter_columns(main_.text.line_count(), line_numbers());
+}
+
+int Editor::text_columns() const {
+  return std::max(1, host_.visible_columns() - gutter_columns());
+}
+
+int Editor::wrap_width() const {
+  return geditor::wrap_width(wrap_mode(), config_.wrap_column, text_columns());
+}
+
+const WrapLayout& Editor::layout() const {
+  wrap_.configure(wrap_width(), tab_width_);
+  return wrap_;
+}
+
+Editor::PointView Editor::point_view() const {
+  PointView v;
+  v.pos = layout().row_of(main_.text, main_.point, &v.column);
+  return v;
+}
+
+void Editor::display_row(RowPos pos, int left, int columns, DisplayRow* out) const {
+  build_display_row(main_.text, layout(), main_.format.eol, display_options(), pos, left, columns, out);
+}
+
+bool Editor::next_row(RowPos* pos) const {
+  return layout().next_row(main_.text, pos);
+}
+
+RowPos Editor::max_top() {
+  const WrapLayout& l = layout();
+  RowPos top = l.last_row(main_.text);
+  l.backward_rows(main_.text, &top, static_cast<size_t>(visible_lines()) - 1);
+  return top;
+}
+
+void Editor::keep_point_on_screen() {
+  const WrapLayout& l = layout();
+  const PieceTree& t = main_.text;
+  const RowPos p = l.row_of(t, main_.point, nullptr);
+  if (p < top_) {
+    main_.point = l.row_start(t, top_.line, top_.row);
+    return;
+  }
+  RowPos bottom = top_;
+  l.forward_rows(t, &bottom, static_cast<size_t>(visible_lines()) - 1);
+  if (bottom < p) main_.point = l.row_start(t, bottom.line, bottom.row);
+}
+
+ScrollBarState Editor::scroll_bar() {
+  ScrollBarState s;
+  const size_t lines = main_.text.line_count();
+  s.max = lines - 1;
+  s.page = static_cast<size_t>(visible_lines());
+  s.pos = std::min(top_.line, s.max);
+  return s;
+}
+
+void Editor::scroll_by_rows(long long rows) {
+  // A scroll bar action is a command of its own, like a click (set_point).
+  main_.undo.begin_command(main_.point, false);
+  const WrapLayout& l = layout();
+  if (rows > 0) {
+    const RowPos limit = max_top();
+    if (top_ < limit) {
+      l.forward_rows(main_.text, &top_, static_cast<size_t>(rows));
+      if (limit < top_) top_ = limit;
+    }
+  } else if (rows < 0) {
+    l.backward_rows(main_.text, &top_, static_cast<size_t>(-rows));
+  }
+  keep_point_on_screen();
+  main_.undo.end_command(main_.point);
+  last_command_ = "scroll-bar";
+}
+
+void Editor::scroll_to_line(size_t line) {
+  main_.undo.begin_command(main_.point, false);
+  const RowPos limit = max_top();
+  top_ = RowPos{std::min(line, main_.text.line_count() - 1), 0};
+  if (limit < top_) top_ = limit;
+  keep_point_on_screen();
+  main_.undo.end_command(main_.point);
+  last_command_ = "scroll-bar";
+}
+
+double Editor::font_pixels(double dpi) const {
+  return text_scale_pixels(config_.font_size, text_scale_, dpi);
+}
+
+void Editor::toggle_line_numbers() {
+  const bool on = !line_numbers();
+  line_numbers_view_.set(on, config_.line_numbers);
+  message_ = on ? L"Line numbers on" : L"Line numbers off";
+}
+
+void Editor::toggle_eol_marks() {
+  const bool on = !eol_marks();
+  eol_marks_view_.set(on, config_.eol_marks_show);
+  message_ = on ? L"Line ending marks on" : L"Line ending marks off";
+}
+
+void Editor::toggle_whitespace_marks() {
+  const WhitespaceFlags file = whitespace_flags(config_);
+  const bool on = !whitespace_marks();
+  whitespace_view_.set(on ? shown_whitespace_flags(file) : WhitespaceFlags{}, file);
+  message_ = on ? L"Whitespace marks on" : L"Whitespace marks off";
+}
+
+void Editor::set_wrap_mode(WrapMode mode) {
+  wrap_view_.set(mode, config_.wrap_mode);
+  message_ = std::wstring(L"Wrap: ") + wrap_mode_name(mode);
+}
+
+void Editor::text_scale_adjust(int steps) {
+  const double dpi = static_cast<double>(std::max(1, host_.dpi()));
+  if (steps == 0) {
+    text_scale_ = 0;
+    message_ = L"Text scale reset";
+    return;
+  }
+  const double now = font_pixels(dpi);
+  const double next = text_scale_pixels(config_.font_size, text_scale_ + steps, dpi);
+  if (steps > 0 ? next <= now : next >= now) {
+    fail(steps > 0 ? L"Text is at the largest size" : L"Text is at the smallest size");
+    return;
+  }
+  text_scale_ += steps;
+  message_ = L"Text scale " + std::wstring(text_scale_ > 0 ? L"+" : L"") + std::to_wstring(text_scale_);
 }
 
 void Editor::set_point(size_t offset) {
@@ -692,15 +877,27 @@ int Editor::visible_lines() {
 }
 
 void Editor::ensure_point_visible() {
-  const size_t last_line = main_.text.line_count() - 1;
-  if (top_line_ > last_line) top_line_ = last_line;
-  const size_t line = main_.text.line_of(main_.point);
+  const PieceTree& t = main_.text;
+  const WrapLayout& l = layout();
+  const size_t last_line = t.line_count() - 1;
+  if (top_.line > last_line) top_ = RowPos{last_line, 0};
+  if (!l.has_row(t, top_.line, top_.row)) top_.row = l.row_count(t, top_.line) - 1;
+  const RowPos p = l.row_of(t, main_.point, nullptr);
   const size_t visible = static_cast<size_t>(visible_lines());
-  if (line < top_line_) {
-    top_line_ = line;
-  } else if (line >= top_line_ + visible) {
-    top_line_ = line - visible + 1;
+  if (p < top_) {
+    top_ = p;
+    return;
   }
+  RowPos bottom = top_;
+  l.forward_rows(t, &bottom, visible - 1);
+  if (bottom < p) {
+    top_ = p;
+    l.backward_rows(t, &top_, visible - 1);
+  }
+}
+
+void Editor::note_text_edit(const Buffer& b, size_t offset, size_t inserted, size_t erased) {
+  if (&b == &main_) wrap_.note_edit(main_.text, offset, inserted, erased);
 }
 
 // ---- Editing primitives ----
@@ -734,6 +931,7 @@ bool Editor::insert_at(Buffer& b, size_t offset, std::wstring_view text) {
   }
   if (text.empty()) return true;
   const PieceList pieces = b.text.insert(offset, text);
+  note_text_edit(b, offset, text.size(), 0);
   b.undo.record_insert(offset, pieces);
   adjust_markers(b, offset, text.size(), 0);
   b.edited_in_command = true;
@@ -772,13 +970,14 @@ bool Editor::erase(Buffer& b, size_t from, size_t to) {
   if (!check_writable(b)) return false;
   if (from >= to) return true;
   b.undo.record_erase(from, b.text.erase(from, to - from));
+  note_text_edit(b, from, 0, to - from);
   adjust_markers(b, from, 0, to - from);
   b.edited_in_command = true;
   return true;
 }
 
 bool Editor::undo(Buffer& b) {
-  MarkFollower follower(b);
+  MarkFollower follower(b, &b == &main_ ? &wrap_ : nullptr);
   size_t point = b.point;
   if (!b.undo.undo(b.text, &follower, &point)) return false;
   b.point = std::min(point, b.text.length());
@@ -787,7 +986,7 @@ bool Editor::undo(Buffer& b) {
 }
 
 bool Editor::redo(Buffer& b) {
-  MarkFollower follower(b);
+  MarkFollower follower(b, &b == &main_ ? &wrap_ : nullptr);
   size_t point = b.point;
   if (!b.undo.redo(b.text, &follower, &point)) return false;
   b.point = std::min(point, b.text.length());

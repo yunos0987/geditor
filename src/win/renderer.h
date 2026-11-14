@@ -1,10 +1,13 @@
-// Direct2D drawing of the editor (docs/PLAN.md 4.6 / 4.7): the text area on
-// a cell grid, the mode line and the echo area / minibuffer line (several
-// lines while settings errors are shown). No line numbers, wrapping or menu
-// bar yet; long lines scroll horizontally.
+// Direct2D drawing of the editor (docs/PLAN.md 4.6 / 4.7): the line-number
+// gutter and the text area on a cell grid, the mode line and the echo area /
+// minibuffer line (several lines while settings errors are shown). The rows,
+// their wrap positions and their whitespace / end-of-line marks come from the
+// core (Editor::display_row); this file only draws them. Rows wider than the
+// window (wrap "none", or "fixed" wider than the window) scroll horizontally.
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -36,7 +39,13 @@ class Renderer {
   Renderer& operator=(const Renderer&) = delete;
 
   // Factories and the primary font; no render target yet.
-  bool init(const wchar_t* font_family, float font_size_pt);
+  bool init(const FontSpec& font);
+  // Replaces the font. Not installed family names are added to `missing`.
+  // On failure the previous font stays and false is returned.
+  bool set_font(const FontSpec& font, std::vector<std::wstring>* missing);
+  const FontSpec& font_spec() const { return font_; }
+  // The family that draws `c` (diagnostics).
+  std::wstring family_of(char32_t c) { return measurer_.family_of(c); }
   void release();
 
   // Draws one frame. Returns the EndDraw result (D2DERR_RECREATE_TARGET means
@@ -46,12 +55,21 @@ class Renderer {
   // for screenshots) without changing the view.
   HRESULT paint_to_dc(HWND hwnd, HDC dc, const Editor& editor, const ViewState& view);
   void resize(UINT width, UINT height);
+  // The DPI of the window (set before the first paint and on WM_DPICHANGED).
   void set_dpi(float dpi);
+  float dpi() const { return dpi_; }
   void discard_target();
+  // Checks of tools/app_check.py: the next render target / font creation
+  // fails as if Direct2D / DirectWrite had refused it.
+  void fail_next_target() { fail_next_target_ = true; }
+  void fail_next_font() { fail_next_font_ = true; }
 
   // Full text rows that fit in a client area `height_dip` high with an echo
   // area of `echo_rows` lines.
   int text_rows(float height_dip, int echo_rows) const;
+  // Whole cells across a client area `width_dip` wide (line numbers
+  // included).
+  int text_columns(float width_dip) const;
   // Rows of the echo area for `editor` in a client area `height_dip` high,
   // capped so that the mode line and one text row stay visible.
   int echo_rows(float height_dip, const Editor& editor) const;
@@ -71,16 +89,14 @@ class Renderer {
   // BeginDraw .. EndDraw on target_ with brush_.
   HRESULT draw_frame(const Editor& editor, ViewState& view);
   void draw_text_area(const Editor& editor, ViewState& view, float width, float height);
+  // Highlights the region cells of row_ (and its line end as one cell).
+  void draw_region(const Buffer& b, float x0, float y, D2D1_COLOR_F color);
   void draw_mode_line(const Editor& editor, float y, float width);
   // The echo area from `y` down: one line, or the lines of a multi-line
   // message (settings errors) followed by the minibuffer line when active.
   void draw_echo_area(const Editor& editor, ViewState& view, float y, float width, int rows);
-  void draw_echo_line(std::wstring_view text, float y, int columns);
-  // Collect the cells of columns [left, left + columns) into cells_.
-  // collect_line returns true when it reached the end of the line; then
-  // `end_column` is the column after its last character (relative to left).
-  bool collect_line(const PieceTree& text, size_t line, int left, int columns, int tab_width,
-                    int* end_column);
+  void draw_echo_line(std::wstring_view text, float y, int columns, D2D1_COLOR_F color);
+  // Collect the cells of columns [left, left + columns) of `s` into cells_.
   int collect_string(std::wstring_view s, int left, int columns, int tab_width);
   void draw_cells(float x0, float top, D2D1_COLOR_F color);
   void flush_run(uint16_t face, float x, float baseline);
@@ -94,6 +110,11 @@ class Renderer {
   ID2D1RenderTarget* target_ = nullptr;
   ID2D1SolidColorBrush* brush_ = nullptr;
   TextMeasurer measurer_;
+  FontSpec font_;
+  float dpi_ = 96;
+  bool fail_next_target_ = false;
+  bool fail_next_font_ = false;
+  DisplayRow row_;
   std::vector<Cell> cells_;
   std::vector<UINT16> run_glyphs_;
   std::vector<FLOAT> run_advances_;

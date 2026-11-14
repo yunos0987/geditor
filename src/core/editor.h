@@ -11,6 +11,7 @@
 #include "buffer.h"
 #include "commands.h"
 #include "config.h"
+#include "display.h"
 #include "host.h"
 #include "key.h"
 #include "keymap.h"
@@ -103,13 +104,65 @@ class Editor {
   // (after shift translation). The host passes unbound system keys such as
   // M-<f4> on to Windows.
   bool key_is_bound(const Key& key) const;
-  // "-** name  UTF-8 LF  L12 C5".
+  // "-** name  UTF-8 LF  L12 C5  wrap:max".
   std::wstring mode_line() const;
-  size_t top_line() const { return top_line_; }
+  size_t top_line() const { return top_.line; }
   size_t point_line() const;
+  // Column of point from the start of its logical line (the mode line's C).
   int point_column() const;
   int tab_width() const { return tab_width_; }
   void set_tab_width(int width);
+
+  // ---- View (docs/PLAN.md 4.5 - 4.7) ----
+  // The view settings in effect: the settings file's values, or the values
+  // View commands set for this window (decision E6).
+  DisplayOptions display_options() const;
+  WrapMode wrap_mode() const;
+  bool line_numbers() const;
+  bool eol_marks() const;
+  bool whitespace_marks() const;
+  // Cells of the line-number gutter (decision E2).
+  int gutter_columns() const;
+  // Cells across the text area right of the gutter (at least 1).
+  int text_columns() const;
+  // Wrap width in cells for the window (0: no wrapping).
+  int wrap_width() const;
+  // The wrap layout of the main buffer, configured for the current window
+  // width, wrap mode and tab width.
+  const WrapLayout& layout() const;
+  // The first screen row of the window.
+  RowPos top() const { return top_; }
+  void set_top(RowPos top) { top_ = top; }
+  // The screen row of point and its cell column within that row.
+  struct PointView {
+    RowPos pos;
+    int column = 0;
+  };
+  PointView point_view() const;
+  // Builds screen row `pos` for the visible columns [left, left + columns).
+  void display_row(RowPos pos, int left, int columns, DisplayRow* out) const;
+  // The screen row after `pos`; false at the end of the buffer.
+  bool next_row(RowPos* pos) const;
+  // Scrolls the window so that point is on screen (by screen rows).
+  void ensure_point_visible();
+  // Vertical scroll bar (logical-line approximation).
+  ScrollBarState scroll_bar();
+  // Scroll bar actions: by `rows` screen rows (negative: up), or to put
+  // logical line `line` at the top. The view stops where the last row is on
+  // the bottom row; point moves onto the screen when it would leave it.
+  void scroll_by_rows(long long rows);
+  void scroll_to_line(size_t line);
+  // text-scale steps of this window (decision E5) and the resulting font
+  // pixel height at `dpi`.
+  int text_scale() const { return text_scale_; }
+  double font_pixels(double dpi) const;
+  // View commands.
+  void toggle_line_numbers();
+  void toggle_eol_marks();
+  void toggle_whitespace_marks();
+  void set_wrap_mode(WrapMode mode);
+  // +1 / -1 steps, or 0 to reset.
+  void text_scale_adjust(int steps);
   // Moves the cursor of the main buffer (for example on a mouse click). Like
   // any other command, it ends a typing undo group and the goal column.
   void set_point(size_t offset);
@@ -138,7 +191,7 @@ class Editor {
   Key last_key() const { return last_key_; }
   int goal_column() const { return goal_column_; }
   void set_goal_column(int column) { goal_column_ = column; }
-  void set_top_line(size_t line) { top_line_ = line; }
+  void set_top_line(size_t line) { top_ = RowPos{line, 0}; }
   int visible_lines();
   // Position of recenter-top-bottom in its center -> top -> bottom cycle.
   int& recenter_cycle() { return recenter_cycle_; }
@@ -219,8 +272,16 @@ class Editor {
   void finish_command(Buffer& b);
   void note_non_command();
   void handle_quoted_insert(const Key& key);
-  void ensure_point_visible();
   void adjust_markers(Buffer& b, size_t offset, size_t inserted, size_t erased);
+  // After config_ changed: the tab width, and View command values that the
+  // file's new values end (decision E6).
+  void apply_view_settings();
+  // Tells the wrap layout about a change of the main buffer at `offset`.
+  void note_text_edit(const Buffer& b, size_t offset, size_t inserted, size_t erased);
+  // The first screen row that shows the last row on the bottom row.
+  RowPos max_top();
+  // Moves point onto the screen rows [top_, top_ + visible) when it is off.
+  void keep_point_on_screen();
 
   std::wstring default_directory() const;
   bool load_file(const std::wstring& path);
@@ -267,9 +328,18 @@ class Editor {
   std::string this_command_;
   int goal_column_ = 0;
   int recenter_cycle_ = 0;
-  size_t top_line_ = 0;
+  RowPos top_;
   int tab_width_ = 4;
   std::wstring message_;
+
+  // View state of this window (decisions E5, E6).
+  mutable WrapLayout wrap_;
+  ViewSetting<bool> line_numbers_view_;
+  ViewSetting<bool> eol_marks_view_;
+  // On/off over the file's whitespace flags.
+  ViewSetting<WhitespaceFlags> whitespace_view_;
+  ViewSetting<WrapMode> wrap_view_;
+  int text_scale_ = 0;
 
   MinibufferPurpose purpose_ = MinibufferPurpose::kNone;
   std::wstring prompt_;

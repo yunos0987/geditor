@@ -168,11 +168,24 @@ void backward_char(Editor& ed) {
   repeat_steps(ed, step_backward_char, step_forward_char);
 }
 
-// One line down or up at the goal column; false at the end (point goes to
-// the end / start of the buffer, as in Emacs).
+// One screen row down or up at the goal column (cells within the row, PLAN 2
+// "vertical motion in wrapped lines"); false at the end (point goes to the
+// end / start of the buffer, as in Emacs). The minibuffer has no wrapping and
+// moves by logical lines.
 bool vertical_step(Editor& ed, bool down) {
   Buffer& b = ed.current();
   const PieceTree& t = b.text;
+  if (&b == &ed.main_buffer()) {
+    const WrapLayout& layout = ed.layout();
+    RowPos pos = layout.row_of(t, b.point, nullptr);
+    if (down ? !layout.next_row(t, &pos) : !layout.previous_row(t, &pos)) {
+      b.point = down ? t.length() : 0;
+      ed.fail(down ? L"End of buffer" : L"Beginning of buffer");
+      return false;
+    }
+    b.point = layout.offset_at(t, pos.line, pos.row, ed.goal_column());
+    return true;
+  }
   size_t line = t.line_of(b.point);
   if (down) {
     if (line + 1 >= t.line_count()) {
@@ -197,7 +210,8 @@ void vertical_move(Editor& ed, bool down) {
   Buffer& b = ed.current();
   const std::string& last = ed.last_command();
   if (last != "next-line" && last != "previous-line") {
-    ed.set_goal_column(column_at(b.text, b.point, ed.tab_width()));
+    ed.set_goal_column(&b == &ed.main_buffer() ? ed.point_view().column
+                                               : column_at(b.text, b.point, ed.tab_width()));
   }
   repeat_steps(
       ed, [down](Editor& e) { return vertical_step(e, down); },
@@ -264,39 +278,48 @@ size_t scroll_amount(Editor& ed) {
   return visible > 2 ? visible - 2 : 1;
 }
 
-// Emacs C-v with scroll-error-top-bottom nil: when the last line is already
-// visible, nothing moves and "End of buffer" is shown. Otherwise the window
-// scrolls by `amount` lines (visible - 2 without a prefix argument), but never
-// past the top at which the last line sits on the bottom row. Point moves to
-// the new top line only when it would leave the window.
+// Emacs C-v with scroll-error-top-bottom nil: when the last screen row is
+// already visible, nothing moves and "End of buffer" is shown. Otherwise the
+// window scrolls by `amount` screen rows (visible - 2 without a prefix
+// argument; decision E4), but never past the top at which the last row sits
+// on the bottom row. Point moves to the new top row only when it would leave
+// the window.
 void scroll_up_by(Editor& ed, size_t amount) {
   Buffer& b = ed.main_buffer();
-  const size_t lines = b.text.line_count();
+  const PieceTree& t = b.text;
+  const WrapLayout& layout = ed.layout();
   const size_t visible = static_cast<size_t>(ed.visible_lines());
-  const size_t max_top = lines > visible ? lines - visible : 0;
-  const size_t top = ed.top_line();
-  if (top >= max_top) {
+  RowPos max_top = layout.last_row(t);
+  layout.backward_rows(t, &max_top, visible - 1);
+  const RowPos top = ed.top();
+  if (!(top < max_top)) {
     ed.fail(L"End of buffer");
     return;
   }
-  const size_t new_top = std::min(top + amount, max_top);
-  ed.set_top_line(new_top);
-  if (b.text.line_of(b.point) < new_top) b.point = b.text.line_start(new_top);
+  RowPos new_top = top;
+  layout.forward_rows(t, &new_top, amount);
+  if (max_top < new_top) new_top = max_top;
+  ed.set_top(new_top);
+  if (layout.row_of(t, b.point, nullptr) < new_top) b.point = layout.row_start(t, new_top.line, new_top.row);
 }
 
-// Mirror of scroll_up_by: at top 0 nothing moves and "Beginning of buffer"
-// is shown.
+// Mirror of scroll_up_by: at the first row nothing moves and "Beginning of
+// buffer" is shown.
 void scroll_down_by(Editor& ed, size_t amount) {
   Buffer& b = ed.main_buffer();
-  const size_t top = ed.top_line();
-  if (top == 0) {
+  const PieceTree& t = b.text;
+  const WrapLayout& layout = ed.layout();
+  const RowPos top = ed.top();
+  if (top == RowPos{}) {
     ed.fail(L"Beginning of buffer");
     return;
   }
-  const size_t new_top = top > amount ? top - amount : 0;
-  ed.set_top_line(new_top);
-  const size_t bottom = new_top + static_cast<size_t>(ed.visible_lines()) - 1;
-  if (b.text.line_of(b.point) > bottom) b.point = b.text.line_start(bottom);
+  RowPos new_top = top;
+  layout.backward_rows(t, &new_top, amount);
+  ed.set_top(new_top);
+  RowPos bottom = new_top;
+  layout.forward_rows(t, &bottom, static_cast<size_t>(ed.visible_lines()) - 1);
+  if (bottom < layout.row_of(t, b.point, nullptr)) b.point = layout.row_start(t, bottom.line, bottom.row);
 }
 
 // With a prefix argument N, C-v / M-v scroll by N lines (the other way for a
@@ -324,17 +347,16 @@ void recenter_top_bottom(Editor& ed) {
   Buffer& b = ed.main_buffer();
   int& cycle = ed.recenter_cycle();
   cycle = ed.last_command() == "recenter-top-bottom" ? (cycle + 1) % 3 : 0;
-  const size_t line = b.text.line_of(b.point);
+  // By screen rows (decision E4).
+  const WrapLayout& layout = ed.layout();
+  RowPos top = layout.row_of(b.text, b.point, nullptr);
   const size_t visible = static_cast<size_t>(ed.visible_lines());
-  size_t top = 0;
   if (cycle == 0) {
-    top = line >= visible / 2 ? line - visible / 2 : 0;
-  } else if (cycle == 1) {
-    top = line;
-  } else {
-    top = line >= visible - 1 ? line - (visible - 1) : 0;
+    layout.backward_rows(b.text, &top, visible / 2);
+  } else if (cycle == 2) {
+    layout.backward_rows(b.text, &top, visible - 1);
   }
-  ed.set_top_line(top);
+  ed.set_top(top);
 }
 
 // ---- Mark ----
@@ -756,6 +778,42 @@ void find_user_init_file(Editor& ed) {
   ed.find_user_init_file();
 }
 
+// ---- View (per window, never written to the settings file) ----
+
+void toggle_line_numbers(Editor& ed) {
+  ed.toggle_line_numbers();
+}
+
+void toggle_eol_marks(Editor& ed) {
+  ed.toggle_eol_marks();
+}
+
+void toggle_whitespace_marks(Editor& ed) {
+  ed.toggle_whitespace_marks();
+}
+
+void set_wrap_mode(Editor& ed) {
+  const std::vector<CommandArg>& args = ed.command_args();
+  WrapMode mode = WrapMode::kNone;
+  if (args.empty() || !parse_wrap_mode(args.front().text, &mode)) {
+    ed.fail(L"Wrap mode must be none, window, fixed or max");
+    return;
+  }
+  ed.set_wrap_mode(mode);
+}
+
+void text_scale_increase(Editor& ed) {
+  ed.text_scale_adjust(1);
+}
+
+void text_scale_decrease(Editor& ed) {
+  ed.text_scale_adjust(-1);
+}
+
+void text_scale_reset(Editor& ed) {
+  ed.text_scale_adjust(0);
+}
+
 // ---- Prefix argument and M-x ----
 
 void universal_argument(Editor& ed) {
@@ -895,13 +953,13 @@ constexpr CommandInfo kCommands[] = {
     {"set-buffer-file-coding-system", nullptr, kEncodingParams},
     {"set-eol", nullptr, kEolParams},
     {"set-mark-command", &set_mark_command},
-    {"set-wrap-mode", nullptr, kWrapParams},
-    {"text-scale-decrease", nullptr},
-    {"text-scale-increase", nullptr},
-    {"text-scale-reset", nullptr},
-    {"toggle-eol-marks", nullptr},
-    {"toggle-line-numbers", nullptr},
-    {"toggle-whitespace-marks", nullptr},
+    {"set-wrap-mode", &set_wrap_mode, kWrapParams},
+    {"text-scale-decrease", &text_scale_decrease},
+    {"text-scale-increase", &text_scale_increase},
+    {"text-scale-reset", &text_scale_reset},
+    {"toggle-eol-marks", &toggle_eol_marks},
+    {"toggle-line-numbers", &toggle_line_numbers},
+    {"toggle-whitespace-marks", &toggle_whitespace_marks},
     {"transpose-chars", &transpose_chars},
     {"undo", &undo},
     {"universal-argument", &universal_argument, {}, true},

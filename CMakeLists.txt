@@ -30,6 +30,7 @@ add_library(geditor_core STATIC
   src/core/char_width.cpp
   src/core/commands.cpp
   src/core/config.cpp
+  src/core/display.cpp
   src/core/editor.cpp
   src/core/encoding.cpp
   src/core/files.cpp
@@ -57,6 +58,13 @@ add_library(geditor_win_logic STATIC
 target_include_directories(geditor_win_logic PUBLIC src/win)
 target_link_libraries(geditor_win_logic PUBLIC geditor_core PRIVATE geditor_options)
 
+# DirectWrite font faces and fallback: shared by the app and the unit tests
+# (the tests check which font draws sample characters).
+add_library(geditor_text STATIC
+  src/win/text_measurer.cpp)
+target_include_directories(geditor_text PUBLIC src/win)
+target_link_libraries(geditor_text PUBLIC dwrite PRIVATE geditor_options)
+
 add_executable(geditor WIN32
   src/win/config_watcher.cpp
   src/win/dialogs.cpp
@@ -64,11 +72,11 @@ add_executable(geditor WIN32
   src/win/main.cpp
   src/win/measure.cpp
   src/win/renderer.cpp
-  src/win/text_measurer.cpp
   src/win/window.cpp
   src/win/geditor.manifest)
 target_link_libraries(geditor PRIVATE
-  geditor_options geditor_win_logic geditor_core d2d1 dwrite imm32 comctl32 shell32 delayimp)
+  geditor_options geditor_win_logic geditor_text geditor_core d2d1 dwrite imm32 comctl32 shell32
+  delayimp)
 # comctl32 (TaskDialog) and shell32 (drag and drop) load on first use only, so
 # that they do not cost startup time.
 target_link_options(geditor PRIVATE /DELAYLOAD:comctl32.dll /DELAYLOAD:shell32.dll)

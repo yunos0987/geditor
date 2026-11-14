@@ -17,6 +17,11 @@ file:
 
   python tools/measure_startup.py build/release/geditor.exe -- --settings=build/s.json
 
+geditor also gets --headless (its window stays off the screen and out of
+the foreground; it draws the same frame) unless --visible is given. A build
+without --headless (before the headless mode) must be measured with
+--visible: it would report "Unknown option: --headless" in its echo area.
+
 Exit code: 0 when the median is within --limit-ms, 1 otherwise, 2 on errors.
 """
 
@@ -42,6 +47,11 @@ def measure_once(exe: pathlib.Path, timeout_s: float,
         check=False,
     )
     text = result.stderr.decode("utf-8", errors="replace")
+    if "--headless" in (app_args or []) and not re.search(r"^headless=1$", text, re.MULTILINE):
+        # A build without --headless shows its window and says "Unknown
+        # option"; its number would not be a headless measurement.
+        raise RuntimeError(f"this build did not confirm --headless (no 'headless=1'); measure it with "
+                           f"--visible (exit={result.returncode}): {text!r}")
     match = PATTERN.search(text)
     if match is None:
         raise RuntimeError(f"no startup_ms in output (exit={result.returncode}): {text!r}")
@@ -64,6 +74,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=10.0, help="seconds per run (default 10)")
     parser.add_argument("--metric", choices=METRICS, default="startup",
                         help="metric compared with --limit-ms (default startup)")
+    parser.add_argument("--visible", action="store_true",
+                        help="show the window on the screen (no --headless)")
     argv = sys.argv[1:]
     app_args: list[str] | None = None
     if "--" in argv:
@@ -72,6 +84,9 @@ def main() -> int:
     args = parser.parse_args(argv)
     if app_args is None:
         app_args = default_app_args()
+    if not args.visible:
+        app_args = ["--headless", *app_args]
+    print(f"mode={'visible' if args.visible else 'headless'}", flush=True)
     if args.runs < 1:
         print("--runs must be 1 or more", file=sys.stderr)
         return 2
@@ -86,14 +101,17 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # Every result line carries the mode: headless and visible numbers are
+    # not comparable (AGENTS.md).
+    mode = "visible" if args.visible else "headless"
     for name in METRICS:
         values = [s[name] for s in samples]
-        print(f"{name}: samples_ms=" + " ".join(f"{v:.1f}" for v in values))
-        print(f"{name}: min_ms={min(values):.1f} median_ms={statistics.median(values):.1f}"
+        print(f"{name}: mode={mode} samples_ms=" + " ".join(f"{v:.1f}" for v in values))
+        print(f"{name}: mode={mode} min_ms={min(values):.1f} median_ms={statistics.median(values):.1f}"
               f" max_ms={max(values):.1f}")
     median = statistics.median(s[args.metric] for s in samples)
     ok = median <= args.limit_ms
-    print(f"metric={args.metric} limit_ms={args.limit_ms:.1f} median_ms={median:.1f}"
+    print(f"mode={mode} metric={args.metric} limit_ms={args.limit_ms:.1f} median_ms={median:.1f}"
           f" result={'OK' if ok else 'NG'}")
     return 0 if ok else 1
 

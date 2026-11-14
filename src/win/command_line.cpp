@@ -99,6 +99,10 @@ CommandLine parse_command_line(std::wstring_view command_line) {
         result.measure_input = true;
         continue;
       }
+      if (a == L"--headless") {
+        result.headless = true;
+        continue;
+      }
       if (a.rfind(L"--settings", 0) == 0) {
         constexpr size_t kPrefix = sizeof("--settings=") - 1;
         if (a.size() > kPrefix && a[kPrefix - 1] == L'=') {

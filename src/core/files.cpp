@@ -115,7 +115,7 @@ bool Editor::load_file(const std::wstring& path) {
   if (kind == FileKind::kNone) {
     main_.reset();
     main_.path = path;
-    top_line_ = 0;
+    top_ = RowPos();
     goal_column_ = 0;
     if (!settings_path_.empty() && same_path(path, settings_path_)) {
       // A new settings file starts with the commented example. Inserting it
@@ -154,7 +154,7 @@ bool Editor::load_file(const std::wstring& path) {
   main_.text = PieceTree(std::move(decoded.text), std::move(decoded.line_feeds));
   main_.format = decoded.format;
   main_.path = path;
-  top_line_ = 0;
+  top_ = RowPos();
   goal_column_ = 0;
   message_.clear();
   return true;

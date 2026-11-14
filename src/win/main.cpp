@@ -7,6 +7,8 @@
 // --measure-input prints the window handle after the first frame and then the
 // time from each keyboard message to the end of its frame
 // (tools/measure_input.py).
+// --headless (tools and checks) keeps the window off the screen, out of the
+// foreground and away from the real clipboard (window.h).
 
 #include <windows.h>
 
@@ -24,7 +26,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
   // Heap-allocated: no object with a dynamic initializer before wWinMain.
   auto* window = new geditor::win::MainWindow();
-  if (!window->create(instance, command_line.measure_startup, command_line.measure_input)) {
+  if (!window->create(instance, command_line.measure_startup, command_line.measure_input,
+                      command_line.headless)) {
     delete window;
     return 1;
   }

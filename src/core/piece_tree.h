@@ -69,6 +69,11 @@ class PieceTree {
 
   size_t piece_count() const;
 
+  // Changes with every insert, insert_pieces and erase (by exactly 1) and
+  // with every move into or out of this object (to a value this object never
+  // had), so that caches of derived data can tell when to drop it.
+  uint64_t revision() const { return revision_; }
+
  private:
   struct Node;
   struct TextBuffer {
@@ -96,6 +101,7 @@ class PieceTree {
   TextBuffer buffers_[2];
   Node* root_ = nullptr;
   uint32_t seed_ = 0x9E3779B9u;
+  uint64_t revision_ = 0;
 };
 
 }  // namespace geditor

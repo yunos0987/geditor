@@ -17,7 +17,17 @@ cursor is first moved to the end of the line with <end> (WM_KEYDOWN VK_END).
 
 Reports the median and the 95th percentile. Exit code: 0 when the median of
 the 100 MB file is within --limit-ms (default 16), 1 otherwise, 2 on errors.
-The 10 MB single-line numbers are reported without a limit.
+The 10 MB single-line numbers are reported without a limit; with --wrap
+window, end_key_ms is the time to scroll from the start to the end of that
+line.
+
+--wrap MODE (none / window / fixed / max) writes {"wrap": {"mode": MODE}}
+to the settings file; without it the settings file is "{}" (the defaults:
+line numbers on, wrap max).
+
+geditor also gets --headless (its window stays off the screen and out of
+the foreground; it draws the same frames) unless --visible is given. A build
+without --headless must be measured with --visible.
 """
 
 import argparse
@@ -104,10 +114,15 @@ def run(exe: pathlib.Path, file: pathlib.Path, extra_args: list[str], chars: int
                             stderr=subprocess.PIPE)
     try:
         first = b""
+        confirmed = False
         while b"hwnd=" not in first:
             first = proc.stderr.readline()
             if not first:
                 raise RuntimeError("geditor exited before its first frame")
+            confirmed = confirmed or first.strip() == b"headless=1"
+        if "--headless" in extra_args and not confirmed:
+            # A build without --headless shows its window instead.
+            raise RuntimeError("this build did not confirm --headless (no 'headless=1'); measure it with --visible")
         fields = dict(f.split("=", 1) for f in first.decode().split())
         hwnd = int(fields["hwnd"], 16)
         open_ms = float(fields["open_ms"])
@@ -128,16 +143,18 @@ def run(exe: pathlib.Path, file: pathlib.Path, extra_args: list[str], chars: int
         proc.wait(10)
 
 
-def report(name: str, result: dict, verbose: bool) -> float:
+def report(name: str, result: dict, verbose: bool, mode: str) -> float:
+    """Every line carries mode=headless|visible: headless frames have no
+    wait for the display, so the two are not comparable (AGENTS.md)."""
     s = result["samples"]
     median = statistics.median(s)
-    print(f"{name}: open_ms={result['open_ms']:.1f}")
+    print(f"{name}: mode={mode} open_ms={result['open_ms']:.1f}")
     if result["end_ms"] is not None:
-        print(f"{name}: end_key_ms={result['end_ms']:.1f}")
-    print(f"{name}: chars={len(s)} median_ms={median:.2f} p95_ms={percentile(s, 95):.2f}"
+        print(f"{name}: mode={mode} end_key_ms={result['end_ms']:.1f}")
+    print(f"{name}: mode={mode} chars={len(s)} median_ms={median:.2f} p95_ms={percentile(s, 95):.2f}"
           f" min_ms={min(s):.2f} max_ms={max(s):.2f}")
     if verbose:
-        print(f"{name}: samples_ms=" + " ".join(f"{v:.1f}" for v in s))
+        print(f"{name}: mode={mode} samples_ms=" + " ".join(f"{v:.1f}" for v in s))
     return median
 
 
@@ -150,7 +167,12 @@ def main() -> int:
     parser.add_argument("--limit-ms", type=float, default=16.0,
                         help="median limit for the 100 MB file (default 16)")
     parser.add_argument("--samples", action="store_true", help="also print every sample")
+    parser.add_argument("--wrap", choices=["none", "window", "fixed", "max"],
+                        help="wrap mode written to the settings file (default: the built-in max)")
+    parser.add_argument("--visible", action="store_true",
+                        help="show the window on the screen (no --headless)")
     args = parser.parse_args()
+    print(f"mode={'visible' if args.visible else 'headless'}", flush=True)
     if not args.exe.is_file():
         print(f"not found: {args.exe}", file=sys.stderr)
         return 2
@@ -162,18 +184,24 @@ def main() -> int:
         # A settings file of its own ("{}"): the measurement never depends on
         # (or reads) the user's %USERPROFILE%\.geditor.json.
         settings = args.data_dir / "settings.json"
-        settings.write_bytes(b"{}\n")
+        if args.wrap:
+            settings.write_bytes(b'{"wrap": {"mode": "' + args.wrap.encode() + b'"}}\n')
+            print(f"wrap={args.wrap}")
+        else:
+            settings.write_bytes(b"{}\n")
         settings_arg = f"--settings={settings.resolve()}"
+        mode_args = [] if args.visible else ["--headless"]
         # Type in the middle of the 100 MB file.
-        lines = run(args.exe, big, [settings_arg, "+500000"], args.chars, press_end=False)
-        one = run(args.exe, single, [settings_arg], args.chars, press_end=True)
+        lines = run(args.exe, big, [*mode_args, settings_arg, "+500000"], args.chars, press_end=False)
+        one = run(args.exe, single, [*mode_args, settings_arg], args.chars, press_end=True)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    median = report("lines_100mb", lines, args.samples)
-    report("single_line_10mb", one, args.samples)
+    mode = "visible" if args.visible else "headless"
+    median = report("lines_100mb", lines, args.samples, mode)
+    report("single_line_10mb", one, args.samples, mode)
     ok = median <= args.limit_ms
-    print(f"limit_ms={args.limit_ms:.1f} median_ms={median:.2f} result={'OK' if ok else 'NG'}")
+    print(f"mode={mode} limit_ms={args.limit_ms:.1f} median_ms={median:.2f} result={'OK' if ok else 'NG'}")
     return 0 if ok else 1
 
 

@@ -11,19 +11,15 @@
 namespace geditor::win {
 namespace {
 
-// Colours: the defaults of docs/PLAN.md 4.5 (settings arrive in M2/M3).
-constexpr UINT32 kBackground = 0x1e1e1e;
-constexpr UINT32 kForeground = 0xd4d4d4;
-constexpr UINT32 kCursor = 0xffffff;
-constexpr UINT32 kSelection = 0x264f78;
-constexpr UINT32 kModeLineBackground = 0x007acc;
-constexpr UINT32 kModeLineForeground = 0xffffff;
-
-constexpr float kMarginDip = 4.0f;  // left of the text, mode line and echo area
+constexpr float kMarginDip = 4.0f;  // left of the gutter, mode line and echo area
 constexpr float kCursorWidthDip = 2.0f;
 
 D2D1_COLOR_F rgb(UINT32 value) {
   return D2D1::ColorF(value);
+}
+
+D2D1_COLOR_F color_of(const Editor& editor, ColorIndex index) {
+  return rgb(editor.config().colors[static_cast<size_t>(index)]);
 }
 
 template <typename T>
@@ -67,7 +63,7 @@ Renderer::~Renderer() {
   release();
 }
 
-bool Renderer::init(const wchar_t* font_family, float font_size_pt) {
+bool Renderer::init(const FontSpec& font) {
   if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d_factory_))) return false;
   mark_stage("d2d_factory");
   if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
@@ -75,9 +71,29 @@ bool Renderer::init(const wchar_t* font_family, float font_size_pt) {
     return false;
   }
   mark_stage("dwrite_factory");
-  const bool ok = measurer_.init(dwrite_factory_, font_family, font_size_pt * 96.0f / 72.0f);
+  font_ = font;
+  const bool ok = measurer_.init(dwrite_factory_, font, nullptr);
   mark_stage("font");
   return ok;
+}
+
+bool Renderer::set_font(const FontSpec& font, std::vector<std::wstring>* missing) {
+  if (dwrite_factory_ == nullptr) return false;
+  const bool injected_failure = fail_next_font_;
+  fail_next_font_ = false;
+  if (!injected_failure && measurer_.init(dwrite_factory_, font, missing)) {
+    font_ = font;
+    return true;
+  }
+  // Keep the previous font (it was built before, so it builds again).
+  measurer_.init(dwrite_factory_, font_, nullptr);
+  return false;
+}
+
+int Renderer::text_columns(float width_dip) const {
+  const float cw = measurer_.cell_width();
+  if (cw <= 0) return 1;
+  return std::max(1, static_cast<int>(std::floor((width_dip - kMarginDip) / cw)));
 }
 
 void Renderer::release() {
@@ -103,9 +119,13 @@ int Renderer::echo_rows(float height_dip, const Editor& editor) const {
 bool Renderer::ensure_target(HWND hwnd) {
   if (hwnd_target_ != nullptr) return true;
   if (d2d_factory_ == nullptr) return false;
+  if (fail_next_target_) {
+    fail_next_target_ = false;
+    return false;
+  }
   RECT rc{};
   GetClientRect(hwnd, &rc);
-  const float dpi = static_cast<float>(GetDpiForWindow(hwnd));
+  const float dpi = dpi_;
   // Software rendering: creating a GPU render target costs about 80ms at
   // startup on the development PC (D3D device and driver load), while the
   // software target costs about 25ms. M1-5 (keystroke to frame within 16ms on
@@ -119,7 +139,7 @@ bool Renderer::ensure_target(HWND hwnd) {
   if (FAILED(d2d_factory_->CreateHwndRenderTarget(props, hwnd_props, &hwnd_target_))) {
     return false;
   }
-  if (FAILED(hwnd_target_->CreateSolidColorBrush(rgb(kForeground), &hwnd_brush_))) {
+  if (FAILED(hwnd_target_->CreateSolidColorBrush(rgb(0xffffff), &hwnd_brush_))) {
     safe_release(hwnd_target_);
     return false;
   }
@@ -136,6 +156,7 @@ void Renderer::resize(UINT width, UINT height) {
 }
 
 void Renderer::set_dpi(float dpi) {
+  dpi_ = dpi;
   if (hwnd_target_ != nullptr) hwnd_target_->SetDpi(dpi, dpi);
 }
 
@@ -154,7 +175,7 @@ HRESULT Renderer::paint_to_dc(HWND hwnd, HDC dc, const Editor& editor, const Vie
   if (d2d_factory_ == nullptr) return E_FAIL;
   RECT rc{};
   GetClientRect(hwnd, &rc);
-  const float dpi = static_cast<float>(GetDpiForWindow(hwnd));
+  const float dpi = dpi_;
   const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
       D2D1_RENDER_TARGET_TYPE_SOFTWARE,
       D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), dpi, dpi);
@@ -162,7 +183,7 @@ HRESULT Renderer::paint_to_dc(HWND hwnd, HDC dc, const Editor& editor, const Vie
   ID2D1SolidColorBrush* dc_brush = nullptr;
   HRESULT hr = d2d_factory_->CreateDCRenderTarget(&props, &dc_target);
   if (SUCCEEDED(hr)) hr = dc_target->BindDC(dc, &rc);
-  if (SUCCEEDED(hr)) hr = dc_target->CreateSolidColorBrush(rgb(kForeground), &dc_brush);
+  if (SUCCEEDED(hr)) hr = dc_target->CreateSolidColorBrush(rgb(0xffffff), &dc_brush);
   if (SUCCEEDED(hr)) {
     target_ = dc_target;
     brush_ = dc_brush;
@@ -179,7 +200,7 @@ HRESULT Renderer::paint_to_dc(HWND hwnd, HDC dc, const Editor& editor, const Vie
 HRESULT Renderer::draw_frame(const Editor& editor, ViewState& view) {
   target_->BeginDraw();
   target_->SetTransform(D2D1::Matrix3x2F::Identity());
-  target_->Clear(rgb(kBackground));
+  target_->Clear(color_of(editor, kColorBackground));
   const D2D1_SIZE_F size = target_->GetSize();
   const float lh = measurer_.line_height();
   const int rows = echo_rows(size.height, editor);
@@ -201,95 +222,144 @@ void Renderer::fill(float left, float top, float right, float bottom, D2D1_COLOR
 
 void Renderer::draw_text_area(const Editor& editor, ViewState& view, float width, float height) {
   const Buffer& b = editor.buffer();
-  const PieceTree& text = b.text;
-  const int tab_width = editor.tab_width();
   const float cw = measurer_.cell_width();
   const float lh = measurer_.line_height();
-  const int columns = std::max(1, static_cast<int>(std::floor((width - kMarginDip) / cw)));
+  const int gutter = editor.gutter_columns();
+  const int columns = std::max(1, text_columns(width) - gutter);
+  const float x0 = kMarginDip + static_cast<float>(gutter) * cw;
 
-  // Horizontal scrolling keeps the cursor column visible (no wrapping in M1).
-  const int point_column = editor.point_column();
-  if (point_column < view.left_column || point_column >= view.left_column + columns) {
-    view.left_column = point_column < columns ? 0 : point_column - columns / 2;
+  // Horizontal scrolling: rows that the core wraps within the window never
+  // scroll; wider rows ("none", or "fixed" wider than the window, decision
+  // E3) keep the cursor column visible.
+  const Editor::PointView point = editor.point_view();
+  const int wrap = editor.wrap_width();
+  if (wrap > 0 && wrap < columns) {
+    view.left_column = 0;
+  } else if (point.column < view.left_column || point.column >= view.left_column + columns) {
+    view.left_column = point.column < columns ? 0 : point.column - columns / 2;
   }
   const int left = view.left_column;
 
-  const bool region = b.has_mark && b.mark_active && b.mark != b.point;
-  const size_t region_start = std::min(b.mark, b.point);
-  const size_t region_end = std::max(b.mark, b.point);
-
-  target_->PushAxisAlignedClip(D2D1::RectF(kMarginDip, 0, width, height),
-                               D2D1_ANTIALIAS_MODE_ALIASED);
-  const size_t top = editor.top_line();
+  const size_t current_line = editor.point_line();
+  const D2D1_COLOR_F foreground = color_of(editor, kColorForeground);
+  const D2D1_COLOR_F whitespace = color_of(editor, kColorWhitespace);
+  const D2D1_COLOR_F selection = color_of(editor, kColorSelection);
+  const PieceTree& text = b.text;
+  RowPos pos = editor.top();
+  if (pos.line >= text.line_count()) return;
   const int rows = static_cast<int>(std::ceil(height / lh));  // the last one may be partial
-  for (int row = 0; row < rows; ++row) {
-    const size_t line = top + static_cast<size_t>(row);
-    if (line >= text.line_count()) break;
-    const float y = static_cast<float>(row) * lh;
-    int end_column = 0;
-    const bool reached_end = collect_line(text, line, left, columns + 1, tab_width, &end_column);
-    if (region) {
-      // Highlight runs of region cells, and the line end as one cell.
-      int run_start = 0;
-      int run_end = 0;
-      bool in_run = false;
-      auto add = [&](int column, int cells) {
-        if (in_run && column == run_end) {
-          run_end = column + cells;
-          return;
-        }
-        if (in_run) fill(kMarginDip + run_start * cw, y, kMarginDip + run_end * cw, y + lh, rgb(kSelection));
-        run_start = column;
-        run_end = column + cells;
-        in_run = true;
-      };
-      for (const Cell& c : cells_) {
-        if (c.width > 0 && c.offset >= region_start && c.offset < region_end) add(c.column, c.width);
-      }
-      const size_t line_end = text.line_end(line);
-      if (reached_end && line_end < text.length() && line_end >= region_start &&
-          line_end < region_end) {
-        add(end_column, 1);
-      }
-      if (in_run) fill(kMarginDip + run_start * cw, y, kMarginDip + run_end * cw, y + lh, rgb(kSelection));
+  float cursor_y = -1;
+  for (int r = 0; r < rows; ++r) {
+    const float y = static_cast<float>(r) * lh;
+    editor.display_row(pos, left, columns + 1, &row_);
+
+    // Line numbers (decision E2): right-aligned, on the first row of a line.
+    if (gutter > 0 && row_.first_row) {
+      const std::wstring number = std::to_wstring(pos.line + 1);
+      const int start = gutter - 1 - static_cast<int>(number.size());
+      collect_string(number, 0, gutter, 1);
+      for (Cell& c : cells_) c.column += start;
+      draw_cells(kMarginDip, y,
+                 color_of(editor, pos.line == current_line ? kColorLineNumberCurrent : kColorLineNumber));
     }
-    draw_cells(kMarginDip, y, rgb(kForeground));
+
+    target_->PushAxisAlignedClip(D2D1::RectF(x0, y, width, std::min(height, y + lh)),
+                                 D2D1_ANTIALIAS_MODE_ALIASED);
+    // Trailing whitespace background (decision E8).
+    for (const DisplayCell& c : row_.cells) {
+      if (c.trailing && c.width > 0) {
+        const float x = x0 + static_cast<float>(c.column) * cw;
+        fill(x, y, x + static_cast<float>(c.width) * cw, y + lh, whitespace);
+      }
+    }
+    if (b.has_mark && b.mark_active && b.mark != b.point) draw_region(b, x0, y, selection);
+    // Characters, then whitespace marks in their own colour.
+    for (int pass = 0; pass < 2; ++pass) {
+      cells_.clear();
+      for (const DisplayCell& c : row_.cells) {
+        if (c.mark == (pass == 1)) cells_.push_back(Cell{c.c, c.column, c.width, c.offset});
+      }
+      draw_cells(x0, y, pass == 0 ? foreground : whitespace);
+    }
+    // End-of-line mark in the cell after the line end (PLAN 4.7).
+    if (row_.complete && row_.eol.shown) {
+      collect_string(row_.eol.symbol, 0, 2, 1);
+      for (Cell& c : cells_) c.column += row_.end_column;
+      draw_cells(x0, y, color_of(editor, row_.eol.color));
+    }
+    target_->PopAxisAlignedClip();
+
+    if (pos == point.pos) cursor_y = y;
+    if (!editor.next_row(&pos)) break;
   }
 
-  if (!editor.minibuffer_active()) {
-    const size_t point_line = editor.point_line();
-    if (point_line >= top && point_line < top + static_cast<size_t>(rows)) {
-      const float x = kMarginDip + static_cast<float>(point_column - left) * cw;
-      const float y = static_cast<float>(point_line - top) * lh;
-      fill(x, y, x + kCursorWidthDip, y + lh, rgb(kCursor));
+  if (!editor.minibuffer_active() && cursor_y >= 0) {
+    // A bar on the left edge of the cell (PLAN 4.7): a mark at the line end
+    // stays visible.
+    const float x = x0 + static_cast<float>(point.column - left) * cw;
+    if (x >= x0 && x <= width) {
+      fill(x, cursor_y, x + kCursorWidthDip, cursor_y + lh, color_of(editor, kColorCursor));
       view.caret_x = x;
-      view.caret_y = y;
+      view.caret_y = cursor_y;
       view.caret_height = lh;
     }
   }
-  target_->PopAxisAlignedClip();
+}
+
+void Renderer::draw_region(const Buffer& b, float x0, float y, D2D1_COLOR_F color) {
+  const float cw = measurer_.cell_width();
+  const float lh = measurer_.line_height();
+  const size_t region_start = std::min(b.mark, b.point);
+  const size_t region_end = std::max(b.mark, b.point);
+  // Runs of region cells, and the line end as one cell.
+  int run_start = 0;
+  int run_end = 0;
+  bool in_run = false;
+  auto flush = [&] {
+    if (in_run) {
+      fill(x0 + static_cast<float>(run_start) * cw, y, x0 + static_cast<float>(run_end) * cw, y + lh, color);
+    }
+  };
+  auto add = [&](int column, int cells) {
+    if (in_run && column == run_end) {
+      run_end = column + cells;
+      return;
+    }
+    flush();
+    run_start = column;
+    run_end = column + cells;
+    in_run = true;
+  };
+  for (const DisplayCell& c : row_.cells) {
+    if (c.width > 0 && c.offset >= region_start && c.offset < region_end) add(c.column, c.width);
+  }
+  if (row_.complete && row_.last_row && row_.has_newline && row_.line_end >= region_start &&
+      row_.line_end < region_end) {
+    add(row_.end_column, 1);
+  }
+  flush();
 }
 
 void Renderer::draw_mode_line(const Editor& editor, float y, float width) {
   const float lh = measurer_.line_height();
-  fill(0, y, width, y + lh, rgb(kModeLineBackground));
-  const int columns =
-      std::max(1, static_cast<int>(std::floor((width - kMarginDip) / measurer_.cell_width())));
+  fill(0, y, width, y + lh, color_of(editor, kColorModeLineBackground));
+  const int columns = text_columns(width);
   collect_string(editor.mode_line(), 0, columns + 1, editor.tab_width());
-  draw_cells(kMarginDip, y, rgb(kModeLineForeground));
+  draw_cells(kMarginDip, y, color_of(editor, kColorModeLineForeground));
 }
 
 void Renderer::draw_echo_area(const Editor& editor, ViewState& view, float y, float width, int rows) {
   const float cw = measurer_.cell_width();
   const float lh = measurer_.line_height();
-  const int columns = std::max(1, static_cast<int>(std::floor((width - kMarginDip) / cw)));
+  const int columns = text_columns(width);
+  const D2D1_COLOR_F foreground = color_of(editor, kColorForeground);
   const bool multi_line = editor.message_is_multi_line();
   if (multi_line) {
     // Settings errors, one per line (as many as `rows` allows); the
     // minibuffer line (if any) below.
     const int message_rows = rows - (editor.minibuffer_active() ? 1 : 0);
     for (const std::wstring& line : editor.message_lines(message_rows)) {
-      draw_echo_line(fit_message(line, columns), y, columns);
+      draw_echo_line(fit_message(line, columns), y, columns, foreground);
       y += lh;
     }
   }
@@ -309,74 +379,21 @@ void Renderer::draw_echo_area(const Editor& editor, ViewState& view, float y, fl
   } else {
     text = fit_message(editor.message(), columns);
   }
-  draw_echo_line(text, y, columns);
+  draw_echo_line(text, y, columns, foreground);
   if (cursor_column >= 0) {
     const float x = kMarginDip + static_cast<float>(cursor_column) * cw;
-    fill(x, y, x + kCursorWidthDip, y + lh, rgb(kCursor));
+    fill(x, y, x + kCursorWidthDip, y + lh, color_of(editor, kColorCursor));
     view.caret_x = x;
     view.caret_y = y;
     view.caret_height = lh;
   }
 }
 
-void Renderer::draw_echo_line(std::wstring_view text, float y, int columns) {
+void Renderer::draw_echo_line(std::wstring_view text, float y, int columns, D2D1_COLOR_F color) {
   // The echo line counts TAB as one cell, like fit_message / fit_minibuffer.
   constexpr int kEchoTabWidth = 1;
   collect_string(text, 0, columns + 1, kEchoTabWidth);
-  draw_cells(kMarginDip, y, rgb(kForeground));
-}
-
-bool Renderer::collect_line(const PieceTree& text, size_t line, int left, int columns,
-                            int tab_width, int* end_column) {
-  cells_.clear();
-  const size_t start = text.line_start(line);
-  const size_t end = text.line_end(line);
-  const int right = left + columns;
-  int column = 0;
-  auto visit = [&](char32_t c, size_t offset) {
-    if (column >= right) return false;
-    const int w = advance_of(c, column, tab_width);
-    if (column + w > left || (w == 0 && column >= left)) {
-      cells_.push_back(Cell{c, column - left, w, offset});
-    }
-    column += w;
-    return true;
-  };
-  size_t pos = start;
-  wchar_t high = 0;
-  bool stopped = false;
-  text.for_each_chunk(start, end - start, [&](std::wstring_view chunk) {
-    for (const wchar_t u : chunk) {
-      const size_t at = pos++;
-      if (high != 0) {
-        const wchar_t h = high;
-        high = 0;
-        if (is_low_surrogate(u)) {
-          if (!visit(combine_surrogates(h, u), at - 1)) {
-            stopped = true;
-            return false;
-          }
-          continue;
-        }
-        if (!visit(static_cast<char32_t>(h), at - 1)) {
-          stopped = true;
-          return false;
-        }
-      }
-      if (is_high_surrogate(u)) {
-        high = u;
-        continue;
-      }
-      if (!visit(static_cast<char32_t>(u), at)) {
-        stopped = true;
-        return false;
-      }
-    }
-    return true;
-  });
-  if (!stopped && high != 0 && !visit(static_cast<char32_t>(high), pos - 1)) stopped = true;
-  *end_column = column - left;
-  return !stopped;
+  draw_cells(kMarginDip, y, color);
 }
 
 int Renderer::collect_string(std::wstring_view s, int left, int columns, int tab_width) {

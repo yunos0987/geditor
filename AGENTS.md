@@ -20,6 +20,11 @@ python tools/measure_startup.py build/release/geditor.exe --metric app -- --sett
 ```
 
 - 既定では `build/measure_startup/settings.json`（中身は `{}`。スクリプトが書く）を `--settings` で渡すので、計測は利用者の `%USERPROFILE%\.geditor.json` に左右されない。`--` の後に引数を書くと既定の代わりにそれをそのまま geditor に渡す（別の設定ファイルで測るときなど）
+- 計測スクリプト（`measure_startup.py` / `measure_input.py`）は既定でヘッドレス（`--headless`、下の「アプリの起動と実機確認」）で geditor を起動し、最初の行に `mode=headless` と出す。描画の経路は画面に出すときと同じ。画面に出して測るときは `--visible` を付ける。`--headless` を知らない版（ヘッドレスより前の commit。たとえば M3a の比較に使う HEAD 449cfe5）は `--visible` でしか測れない。ヘッドレスの geditor は `--measure-startup` / `--measure-input` で標準エラーに `headless=1` と出し、計測スクリプトはこれが無いと値を出さずにエラーで止まる（app_check も状態に `headless=1` が無い版は確認しない）
+- 計測スクリプトは結果の行（各値・中央値・判定）のすべてに `mode=headless` か `mode=visible` を付ける。ヘッドレスと画面に出したときの値は比べられない:
+  - ヘッドレスの `input_ms` に入るもの: メッセージの受け取り・キーの処理・コアの計算・Direct2D の描画・`EndDraw` の完了。入らないもの: 画面への表示の待ち（モニターの垂直同期や DWM の合成に合わせて待つ時間）。ウィンドウはどのモニターにも映らない位置にある透明でない layered ウィンドウなので、`EndDraw` がこの待ちをしない。このため画面に出したときの約 13ms に対して約 1ms になる（M3a のレビューで測定）
+  - ヘッドレスの `startup_ms` に入るもの: プロセスの生成・初期化・ウィンドウの作成・設定の読込・初回描画の `EndDraw`。入らないもの・違うもの: `ShowWindow` による表示と活性化（ヘッドレスは `SetWindowPos` で活性化せずに出す）、画面への合成の待ち
+  - 受入条件の基準（M1-5 の 16ms、M0-3 / M3-4 の 100ms など）は画面に出した値で決めたもの。ヘッドレスの値で判定すると黙って甘くなる。基準を判定するとき、または以前の画面に出した値（M3a 以前の報告など）と比べるときは `--visible` で測る（利用者が画面を使っている間は測らない）。基準の値そのものは変えていない
 
 - `startup_ms`: プロセス生成から初回描画の `EndDraw` 完了まで
 - `entry_ms`: プロセス生成から `wWinMain` 開始まで。開発 PC では Norton 360 が未知の exe の起動を約 2 秒止めるため、この値が大きくなる
@@ -36,9 +41,14 @@ build/release/tests/geditor_perf.exe
 
 ```powershell
 python tools/measure_input.py build/release/geditor.exe            # --samples prints every sample
+python tools/measure_input.py build/release/geditor.exe --wrap window
 ```
 
+- 設定ファイルは既定で `{}`（行番号あり・折り返し `max`）。`--wrap none|window|fixed|max` を付けると、その折り返しモードを書いた設定ファイルで測る
+- 1 行のファイルの `end_key_ms` は、先頭から行末までのスクロール（`<end>` 1 回）にかかった時間。`--wrap window` で M4-5 の参考値になる
+
 - `measure_input.py` は `build/measure_input/settings.json`（中身は `{}`）を `--settings` で渡す。利用者の `%USERPROFILE%\.geditor.json` は読まない。`--measure-input` では設定ファイルの監視は始めない
+- `measure_input.py` もヘッドレスが既定（`--visible` で画面に出す）。文字は今も `PostMessage` の `WM_CHAR` で送る
 
 ## アプリの起動と実機確認
 
@@ -50,35 +60,62 @@ build/release/geditor.exe [--settings=PATH] [+LINE] [file]
 - 設定ファイルは既定で `%USERPROFILE%\.geditor.json`。`--settings=PATH` で場所を変える（相対パスは今のフォルダーから。指定したときは `%USERPROFILE%` のファイルを読みも監視もしない。「新しいウィンドウで開く」にも同じ指定を渡す）
 - テスト・計測・実機確認では必ず `--settings` で `build/` の下のファイルを指定し、利用者の `%USERPROFILE%\.geditor.json` を読み書き・作成・削除しない（今は存在しない）
 - 設定ファイルは起動時に同期で読み、初回描画の後に別スレッドで監視する。保存すると約 200ms 後に読み直す。構文の誤りはファイル全体を採用せず、意味の誤りはその項目だけ無視する。誤りは行・桁付きでエコー領域に出し、2 件以上ならエコー領域を最大 10 行まで広げる（ウィンドウが低いときはモードラインと本文 1 行が残る行数まで。収まらない分は最後の行の `... and N more` に数える。次のキーで 1 行に戻る）。`M-x find-user-init-file` で設定ファイルを開く（無ければ書き方の例を入れた未保存の新規バッファになる）
-- M2 で反映するのはキー設定（`keys` / `minibuffer_keys` / `isearch_keys` / `query_replace_keys`）だけ。ほかの項目は型と値を検査して保持し、M3 以降で使う
+- M3a までに反映する項目: キー設定（`keys` / `minibuffer_keys` / `isearch_keys` / `query_replace_keys`）と表示の項目（`font` / `colors` / `tab_width` / `line_numbers` / `wrap` / `whitespace` / `eol_marks`）。`colors` の `search_match` / `search_current` は検索（M5）まで、`eol_other` は改行コードの混在（M4）まで使わない。`menu_bar` などほかの項目は型と値を検査して保持し、後の段階で使う
+- 入っていないフォント名（`font.family` / `font.fallback`）はエコー領域に `Font not found: <name>` と出し、Consolas（とシステムの代替フォント）を使う。出すのは `font.family` / `font.fallback` の値が変わったときだけで、text-scale・DPI の変更・`font.size` だけの変更でフォントを作り直しても繰り返さない。`font.fallback` を書かなければシステムの代替フォントだけを使う
+- View のコマンド（`toggle-line-numbers` / `toggle-eol-marks` / `toggle-whitespace-marks` / `set-wrap-mode`）と text-scale（`C-x C-+` / `C-x C--` / `C-x C-0`、1 段 1.2 倍、6〜200 ピクセル）はそのウィンドウだけに効き、設定ファイルには書かない。設定を読み直しても、その項目のファイルの値が変わるまでは切り替えた値を保つ
 - Norton 360 は `build/` の外に置いた新しい exe を約 2 秒止めるので、計測や確認は `build/` の exe で行う
+
+ヘッドレス（`--headless`）はテスト・計測・実機確認のための起動引数で、利用者向けには案内しない（付けても未知のオプションの表示は出ない）。確認の最中に利用者の画面・打鍵・クリップボードを奪わないためのもので、app_check と計測スクリプトはこれを既定にする:
+
+- ウィンドウは仮想画面の右の外に置く（どのモニターにも映らない）。ツールウィンドウなのでタスクバーと Alt+Tab に出ず、`WS_EX_NOACTIVATE` で前面にもならない。画面の外の普通のウィンドウには `WM_PAINT` が来ず初回描画が終わらなかった（Windows 11 で実測）ので、不透明のレイヤードウィンドウにしてある。描画は通常と同じ経路（`EndDraw` まで）で、`--measure-startup` / `--measure-input` / `GCAP` の画像はそのまま使える
+- キーは `PostMessage` で受ける（`app_check.py --input post` と同じ経路）。geditor 自身も前面を取らない（ドロップ時の `SetForegroundWindow` もしない）
+- クリップボードは本物を開かず、プロセス内の専用の置き場を使う（中身は本物と同じ CRLF）。読み書きの失敗は `GFLT` の `clipboard-read` / `clipboard-write` で 1 回だけ起こせる
+- 確認（開き方・保存・はい/いいえ・ログオフ時の保存）はダイアログを出さずに待つ。待っている間はキー・マウス・ドロップを受け付けず、`WM_CLOSE` とログオフの問い合わせも答えが出るまで断る（`WM_COPYDATA`・描画・画像の保存は続く）。答えが来るまで待ち続けるので、ツールの側で時間切れを決める。起動時の Direct2D 初期化の失敗はメッセージボックスの代わりに標準エラーへ `headless_error=init ...` と出して終了コード 1 で終わる（`GEDITOR_HEADLESS_FAULT=init` を環境変数に入れるとヘッドレスのときだけわざと失敗させられる）
+- 確認の文言とボタン名は `src/win/question.h` の 1 か所で作り、TaskDialog とヘッドレスの両方が使う
+- 「新しいウィンドウで開く」にも `--headless` を渡す（`--settings` と同じ）
+- ツールとのやり取りは `WM_COPYDATA`（`src/win/headless.h` に一覧）。`GSTA`（状態をファイルに書く: ヘッドレスか・設定ファイル・タイトル・エコー領域のメッセージ・変更の有無・文字数・クリップボードの中身・断った要求の数と理由・待っている確認の種類・文言・ボタン名）、`GCBW`（クリップボードに入れる）、`GANS`（ボタン名を指定して答える。無いボタン名は断り、確認は待ったまま）。分からない要求は 0 を返して数え、`OutputDebugString` にも出す
 
 実機確認（受入条件 M1 の画面・キー・ダイアログ・ファイル・クリップボード）は `tools/app_check.py` で行う。テスト用ファイルを `build/app_check/<日時>/files/` に作って geditor を起動し、キーを送り、画面を `shots/*.png` に保存し、ファイルのバイト列・クリップボード・タイトルを確かめて、項目ごとに PASS / FAIL / SKIP と証拠を表示する。画像は目でも確かめる:
 
 ```powershell
-python tools/app_check.py build/release/geditor.exe            # --strict: SKIP also fails
+python tools/app_check.py build/release/geditor.exe            # headless; --strict: SKIP also fails
 python tools/app_check.py build/release/geditor.exe --only-retry1
 python tools/app_check.py build/release/geditor.exe --only-m2
+python tools/app_check.py build/release/geditor.exe --only-m3a
+python tools/app_check.py build/release/geditor.exe --only-headless
+python tools/app_check.py build/release/geditor.exe --visible --only-visible
 ```
 
-- 最後の行に PASS / FAIL / SKIP の件数が出る。`--strict` を付けると SKIP が 1 件でもあれば終了コード 1。`--only-retry1` は長いパス・最小化と復元・結合文字と不可視文字・ログオフ時の保存確認・クリップボード読込失敗の確認だけを行う
+- 既定はヘッドレスで、最初の行に `mode headless` と出る。`--visible` を付けると従来どおり画面に出し、`SendInput` と前面（画面がロックされていなければ）・本物のクリップボード・本物の TaskDialog を使う（`mode visible`）
+- ヘッドレスの実行中は、別プロセスの見張りが 20ms ごとに前面のウィンドウと見えている `#32770` ウィンドウを調べ、geditor（同じ exe）のものが 1 度でもあれば FAIL にする。前面の見張りの間隔が 1 度でも 50ms を超えたときも FAIL にする。同じ見張りは 20ms ごとに、ヘッドレスの geditor のウィンドウ（`geditor.main` のツールウィンドウ）がどのモニターとも重ならず、最小化もされていないことを調べ、外れたら FAIL にする（最小化したツールウィンドウは主モニターにタイトルバーだけ置かれるため、ヘッドレスでは本当には最小化しない。`[S2]` は `WM_SIZE` の `SIZE_MINIMIZED` と元の大きさの `SIZE_RESTORED` を送って確かめる）。新しいウィンドウを探すときは、この実行が起動した geditor とその子プロセスのウィンドウだけを見る（ほかの geditor が開いていても数えない）。本物のクリップボードは開かず、`GetClipboardSequenceNumber` が前後で同じことを確かめる。`app_driver.py` はヘッドレスのとき `SendInput`・`keybd_event`・`SetForegroundWindow`・`BringWindowToTop`・`SetActiveWindow`・`SetFocus`・クリップボードの関数・`MoveWindow`・`SW_HIDE` / `SW_SHOWNOACTIVATE` / `SW_SHOWNA` 以外の `ShowWindow`（最小化も含む）・移動する `SetWindowPos` を呼ぶと例外にする
+- `--only-headless` はヘッドレスそのものの確認（ウィンドウの位置と種類・打鍵後の画像・見張り・ツール側の禁止・クリップボードの置き場と失敗・確認の種類とボタンごとの答え・待っている間のキー・新しいウィンドウ・おかしな要求・起動の失敗・計測スクリプト）だけを行う。全体の実行にも含まれる
+- 画面が要る確認はヘッドレスでは SKIP（`needs --visible`）になり、`--strict` でも失敗に数えない。今は次の 5 つ（`app_check.py` の `needs_visible` の呼び出し）で、`--visible --only-visible` で確かめる（前面を取りダイアログを出すので、利用者が画面を使っていないときに行う）:
+  - `[visible] keys through SendInput to the foreground window`（`SendInput` と前面）
+  - `[visible] task dialogs: their look and their buttons`（TaskDialog の見た目と `TDM_CLICK_BUTTON`）
+  - `[visible] the real clipboard: C-k / C-y through CF_UNICODETEXT`（本物のクリップボード）
+  - `[visible] clipboard held open by another program`（他のプログラムがクリップボードを開いているとき）
+  - `M-<f4> closes the window`（割り当てのない M-<f4> はシステムに渡り、システムの Alt+F4 はアクティブなウィンドウを閉じる。ヘッドレスのウィンドウはアクティブにならないので閉じない）
+- 日本語 IME の確認（下記）も画面が要る
+- 最後の行に PASS / FAIL / SKIP の件数（そのうち `--visible` が要るもの）が出る。`--strict` を付けると `needs --visible` 以外の SKIP が 1 件でもあれば終了コード 1。`--only-retry1` は長いパス・最小化と復元・結合文字と不可視文字・ログオフ時の保存確認・クリップボード読込失敗の確認だけを行う
 - 起動する geditor にはすべて `--settings` で `build/app_check/<日時>/` の下のファイルを渡す
 - `--only-m2` は設定ファイルの確認（M2）だけを行う。geditor の起動中に設定ファイルを書き換えて、キーの割り当てが効くまでの時間を測り（1 秒以内）、構文の誤りで直前の設定が残ること、誤りが 4 件のときにエコー領域が 4 行に広がり次のキーで 1 行に戻ること、ファイルを消すと既定に戻ること、他のプログラムが共有なしで開いている間は読めない理由を表示して直前の設定を保つこと、`find-user-init-file` が例の入った未保存のバッファを開き、保存した例が誤りなしで読めることを確かめる。最後に、無いフォルダーの設定ファイルを指定して監視を始められないことの表示を確かめる
+- `--only-m3a` は表示の確認（M3a）だけを行う。起動中に設定ファイルの表示項目を 1 つずつ書き換えて画面の画素を調べる（原色の配色で色を見分ける）。View のコマンドを M-x から実行し、text-scale のキー、`WM_VSCROLL`、本物の `WM_DPICHANGED`（lParam の RECT は Windows が geditor 側へ写す）を送る。フォントと描画先（render target）の作成をわざと失敗させるときは `WM_COPYDATA`（`dwData` = `'GFLT'`、本文 `font` か `target`）を送る。最後に `[C4 table]` の行で「設定項目 | 画像 | 見えるもの」の表を出す
 - `tools/` のスクリプトは `__pycache__` を作業ツリーに残さない（`sys.dont_write_bytecode` と、`app_driver.py` が読み込み時に自分の `.pyc` を消す処理による）
-- 画面がロックされていなければ `SendInput` で打鍵する（geditor を前面に出してから送り、前面でなければ送らずに止まる）。ロック中は `PostMessage` で `WM_KEYDOWN` / `WM_CHAR` を送り、修飾キーの状態は `AttachThreadInput` と `SetKeyboardState` で与える。どちらで動いたかは `input mode` の行に出る
-- 画面のロック中は `OpenClipboard` がアクセス拒否になるため、クリップボードを使う確認は SKIP になる（geditor 側の書き込み失敗の表示は確かめる）。実行の前後でクリップボードの文字列を保存・復元する
-- 画像は geditor に `WM_COPYDATA`（`dwData` = `'GCAP'`、BMP の保存先パス）を送って描かせる。ロック中は画面にも `PrintWindow` にも描画が出ないため。ダイアログは `PrintWindow` で撮る
-- `tools/app_driver.py` が起動・打鍵・撮影の部品
+- ヘッドレスではいつも `PostMessage` で `WM_KEYDOWN` / `WM_CHAR` を送り、修飾キーの状態は `AttachThreadInput` と `SetKeyboardState` で与える。`--visible` では、画面がロックされていなければ `SendInput` で打鍵する（geditor を前面に出してから送り、前面でなければ送らずに止まる）。ロック中か `--input post` なら `PostMessage` で送る（`--input post` では geditor を `SW_SHOWNOACTIVATE` で起動し、前面を取らない）。どちらで動いたかは `input mode` の行に出る
+- `--visible` で画面がロックされていると `OpenClipboard` がアクセス拒否になるため、クリップボードを使う確認は SKIP になる（geditor 側の書き込み失敗の表示は確かめる）。`--visible` では実行の前後でクリップボードの文字列を保存・復元する（ヘッドレスでは触れない）
+- 画像は geditor に `WM_COPYDATA`（`dwData` = `'GCAP'`、BMP の保存先パス）を送って描かせる。ロック中は画面にも `PrintWindow` にも描画が出ないため。ダイアログ（`--visible` のみ）は `PrintWindow` で撮る
+- `tools/app_driver.py` が起動・打鍵・撮影の部品。ライブラリとして読み込んだだけでもヘッドレスが既定（`HEADLESS = True`）で、そのまま `App(...)` を作ると `--headless` で起動する。画面に出すには呼ぶ側が明示的に `HEADLESS = False` にする（app_check の `--visible` がこれをする）。全体の実行と `--only-headless` は、別プロセスで読み込んだ `App(...)` がヘッドレスで起動することも確かめる（`[R3]`）
 
-日本語 IME の確認（受入条件 M1-4）は人が行う。変換ウィンドウがカーソル位置に出ること、確定した文字列が 1 回の undo で消えることを見る。
+日本語 IME の確認（受入条件 M1-4）は人が画面で行う（ヘッドレスでは確かめられない）。変換ウィンドウがカーソル位置に出ること、確定した文字列が 1 回の undo で消えることを見る。
 
 ## 構成
 
-- `src/core/`: 編集の核（静的ライブラリ `geditor_core`）。piece tree・undo・文字コード・キー表記・キーマップ・コマンド・ミニバッファ・升目計算・JSONC パーサー（`jsonc.*`。リポジトリで唯一の JSON パーサー）・設定の検査とキーマップの層（`config.*`）を持つ。ファイル・クリップボード・ダイアログ・ウィンドウ起動などの環境依存の処理は `src/core/host.h` の `Host`（抽象クラス）を通して呼ぶ。Win32 側（`src/win/`）がこれを実装し、テストは `tests/fake_host.*` の偽物を使う
+- `src/core/`: 編集の核（静的ライブラリ `geditor_core`）。piece tree・undo・文字コード・キー表記・キーマップ・コマンド・ミニバッファ・升目計算・JSONC パーサー（`jsonc.*`。リポジトリで唯一の JSON パーサー）・設定の検査とキーマップの層（`config.*`）を持つ。折り返し（論理行を画面の行に分ける計算。長い行は 64K 文字ごとの区切りを記録して再利用する）は `layout.*` の `WrapLayout` にあり、描画・上下移動・スクロール・スクロールバーのすべてがこれを使う（描画側で折り返し位置を計算しない）。行番号の幅・空白記号・改行記号・text-scale の大きさ・View の切り替えは `display.*`。ファイル・クリップボード・ダイアログ・ウィンドウ起動などの環境依存の処理は `src/core/host.h` の `Host`（抽象クラス）を通して呼ぶ。Win32 側（`src/win/`）がこれを実装し、テストは `tests/fake_host.*` の偽物を使う
 - `geditor_core` には `user32` などの UI 系ライブラリをリンクしない
-- `src/win/`: Win32 層。`window.*`（ウィンドウ・メッセージ・`Host` の実装）、`input.*`（キー変換）、`renderer.*` と `text_measurer.*`（Direct2D / DirectWrite の升目描画と代替フォント）、`ime.*`、`clipboard.*`、`file_io.*`、`dialogs.*`（TaskDialog）、`process.*`（新しいウィンドウ）、`command_line.*`、`measure.*`（起動・打鍵の計測）、`config_watcher.*`（設定ファイルの監視スレッド）。キー変換・起動引数・クリップボードの改行変換・ファイル種別の判定などウィンドウなしで試せる部分は静的ライブラリ `geditor_win_logic` にまとめ、テストからも使う
+- `src/win/`: Win32 層。`window.*`（ウィンドウ・メッセージ・`Host` の実装）、`input.*`（キー変換）、`renderer.*` と `text_measurer.*`（Direct2D / DirectWrite の升目描画と代替フォント）、`ime.*`、`clipboard.*`、`file_io.*`、`dialogs.*`（TaskDialog）、`process.*`（新しいウィンドウ）、`command_line.*`、`measure.*`（起動・打鍵の計測）、`config_watcher.*`（設定ファイルの監視スレッド）、`question.h`（確認の文言とボタン。TaskDialog とヘッドレスが共用）、`headless.h`（ヘッドレスの `WM_COPYDATA` と状態の書式）。キー変換・起動引数・クリップボードの改行変換・ファイル種別の判定などウィンドウなしで試せる部分は静的ライブラリ `geditor_win_logic` にまとめ、テストからも使う。`text_measurer.*` は静的ライブラリ `geditor_text`（`dwrite` をリンク）にして、どのフォントで文字を描くかをテストからも確かめる
+- 高 DPI は Per-Monitor V2（`geditor.manifest` と `SetProcessDpiAwarenessContext`）。`WM_DPICHANGED` でフォントと升目を作り直し、勧められた大きさに変え、先頭の行を保つ。ウィンドウの右端に Win32 の縦スクロールバーを初回描画の後から常に出す（初回の描画を起動時間に含めないため。位置は論理行で近似）
 - `comctl32`（TaskDialog）と `shell32`（ドラッグ＆ドロップ）は遅延読み込みにして起動時間に含めない。TaskDialog のために `src/win/geditor.manifest` で Common Controls v6 を指定する
-- `tests/`: `geditor_tests`（ctest に登録）と `tests/perf/` の `geditor_perf`（登録しない）
+- `tests/`: `geditor_tests`（ctest に登録）と `tests/perf/` の `geditor_perf`（登録しない）。`test_win_font.cpp` は本物の DirectWrite で、英字が Consolas、日本語と絵文字が代替フォントで描かれることを確かめ、選ばれたフォント名を表示する
 - `.clangd` は `build/release/compile_commands.json` を読む（`cmake --preset release` で作られる）
 
 ## 文字幅表の生成

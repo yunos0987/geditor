@@ -101,6 +101,35 @@ std::vector<uint8_t> face_key(IDWriteFontFace* face) {
   return key;
 }
 
+// The English (or first) name of a font's family.
+std::wstring family_name(IDWriteFont* font) {
+  std::wstring name;
+  IDWriteFontFamily* family = nullptr;
+  IDWriteLocalizedStrings* names = nullptr;
+  if (SUCCEEDED(font->GetFontFamily(&family)) && SUCCEEDED(family->GetFamilyNames(&names))) {
+    UINT32 index = 0;
+    BOOL exists = FALSE;
+    if (FAILED(names->FindLocaleName(L"en-us", &index, &exists)) || !exists) index = 0;
+    UINT32 length = 0;
+    if (SUCCEEDED(names->GetStringLength(index, &length))) {
+      name.resize(length + 1);
+      if (SUCCEEDED(names->GetString(index, name.data(), length + 1))) {
+        name.resize(length);
+      } else {
+        name.clear();
+      }
+    }
+  }
+  safe_release(names);
+  safe_release(family);
+  return name;
+}
+
+bool family_installed(IDWriteFontCollection* collection, const std::wstring& name, UINT32* index) {
+  BOOL exists = FALSE;
+  return !name.empty() && SUCCEEDED(collection->FindFamilyName(name.c_str(), index, &exists)) && exists;
+}
+
 }  // namespace
 
 TextMeasurer::~TextMeasurer() {
@@ -115,21 +144,31 @@ void TextMeasurer::release() {
   safe_release(fallback_);
   safe_release(collection_);
   fallback_tried_ = false;
+  fallback_families_.clear();
   factory_ = nullptr;
 }
 
-bool TextMeasurer::init(IDWriteFactory* factory, const wchar_t* family, float em) {
+bool TextMeasurer::init(IDWriteFactory* factory, const FontSpec& spec, std::vector<std::wstring>* missing) {
   release();
   factory_ = factory;
-  em_ = em;
-  wcsncpy_s(family_, family, _TRUNCATE);
+  em_ = spec.em;
   if (FAILED(factory_->GetSystemFontCollection(&collection_, FALSE))) return false;
 
   UINT32 family_index = 0;
-  BOOL exists = FALSE;
-  if (FAILED(collection_->FindFamilyName(family_, &family_index, &exists)) || !exists) {
-    // Consolas ships with Windows; fall back to the first family otherwise.
-    family_index = 0;
+  family_ = spec.family;
+  if (!family_installed(collection_, family_, &family_index)) {
+    if (missing != nullptr) missing->push_back(spec.family);
+    // Consolas ships with Windows; the first family otherwise.
+    family_ = L"Consolas";
+    if (!family_installed(collection_, family_, &family_index)) family_index = 0;
+  }
+  for (const std::wstring& name : spec.fallback) {
+    UINT32 unused = 0;
+    if (family_installed(collection_, name, &unused)) {
+      fallback_families_.push_back(name);
+    } else if (missing != nullptr) {
+      missing->push_back(name);
+    }
   }
   IDWriteFontFamily* font_family = nullptr;
   IDWriteFont* font = nullptr;
@@ -139,8 +178,12 @@ bool TextMeasurer::init(IDWriteFactory* factory, const wchar_t* family, float em
                                                         DWRITE_FONT_STRETCH_NORMAL,
                                                         DWRITE_FONT_STYLE_NORMAL, &font)) &&
             SUCCEEDED(font->CreateFontFace(&face));
+  if (ok) {
+    const std::wstring name = family_name(font);
+    if (!name.empty()) family_ = name;
+  }
   uint16_t index = 0;
-  if (ok) ok = add_face(face, em_, &index);
+  if (ok) ok = add_face(face, em_, family_, &index);
   safe_release(face);
   safe_release(font);
   safe_release(font_family);
@@ -156,7 +199,7 @@ bool TextMeasurer::init(IDWriteFactory* factory, const wchar_t* family, float em
   return true;
 }
 
-bool TextMeasurer::add_face(IDWriteFontFace* face, float em, uint16_t* index) {
+bool TextMeasurer::add_face(IDWriteFontFace* face, float em, const std::wstring& family, uint16_t* index) {
   std::vector<uint8_t> key = face_key(face);
   for (size_t i = 0; i < faces_.size(); ++i) {
     if (faces_[i].face == face || (!key.empty() && faces_[i].key == key && faces_[i].em == em)) {
@@ -174,6 +217,7 @@ bool TextMeasurer::add_face(IDWriteFontFace* face, float em, uint16_t* index) {
   f.em = em;
   f.design_to_dip = em / static_cast<float>(metrics.designUnitsPerEm);
   f.key = std::move(key);
+  f.family = family;
   faces_.push_back(std::move(f));
   *index = static_cast<uint16_t>(faces_.size() - 1);
   return true;
@@ -228,21 +272,52 @@ TextMeasurer::Glyph TextMeasurer::lookup(char32_t c) {
   return g;
 }
 
+void TextMeasurer::create_fallback() {
+  fallback_tried_ = true;
+  if (GetUserDefaultLocaleName(locale_, static_cast<int>(sizeof(locale_) / sizeof(locale_[0]))) == 0) {
+    wcscpy_s(locale_, L"en-us");
+  }
+  IDWriteFactory2* factory2 = nullptr;
+  if (FAILED(factory_->QueryInterface(__uuidof(IDWriteFactory2), reinterpret_cast<void**>(&factory2)))) {
+    return;
+  }
+  IDWriteFontFallback* system = nullptr;
+  factory2->GetSystemFontFallback(&system);
+  if (fallback_families_.empty()) {
+    fallback_ = system;
+    factory2->Release();
+    return;
+  }
+  // The settings' families first (for every character), then the system
+  // fallback for the characters that none of them has.
+  IDWriteFontFallbackBuilder* builder = nullptr;
+  if (SUCCEEDED(factory2->CreateFontFallbackBuilder(&builder))) {
+    const DWRITE_UNICODE_RANGE all{0, 0x10FFFF};
+    std::vector<const WCHAR*> names;
+    for (const std::wstring& name : fallback_families_) names.push_back(name.c_str());
+    bool ok = SUCCEEDED(builder->AddMapping(&all, 1, names.data(), static_cast<UINT32>(names.size()),
+                                            collection_, nullptr, nullptr, 1.0f));
+    if (ok && system != nullptr) ok = SUCCEEDED(builder->AddMappings(system));
+    if (ok) builder->CreateFontFallback(&fallback_);
+    builder->Release();
+  }
+  if (fallback_ == nullptr) {
+    fallback_ = system;  // the builder failed: the system fallback alone
+  } else {
+    safe_release(system);
+  }
+  factory2->Release();
+}
+
+std::wstring TextMeasurer::family_of(char32_t c) {
+  const Glyph g = glyph(c);
+  if (g.face >= faces_.size()) return std::wstring();
+  return faces_[g.face].family;
+}
+
 TextMeasurer::Glyph TextMeasurer::fallback_glyph(char32_t c) {
   Glyph g;
-  if (!fallback_tried_) {
-    fallback_tried_ = true;
-    IDWriteFactory2* factory2 = nullptr;
-    if (SUCCEEDED(factory_->QueryInterface(__uuidof(IDWriteFactory2),
-                                           reinterpret_cast<void**>(&factory2)))) {
-      factory2->GetSystemFontFallback(&fallback_);
-      factory2->Release();
-    }
-    if (GetUserDefaultLocaleName(locale_, static_cast<int>(sizeof(locale_) / sizeof(locale_[0]))) ==
-        0) {
-      wcscpy_s(locale_, L"en-us");
-    }
-  }
+  if (!fallback_tried_) create_fallback();
   if (fallback_ == nullptr) return g;
 
   wchar_t text[2];
@@ -258,7 +333,7 @@ TextMeasurer::Glyph TextMeasurer::fallback_glyph(char32_t c) {
   UINT32 mapped_length = 0;
   IDWriteFont* font = nullptr;
   float scale = 1.0f;
-  if (FAILED(fallback_->MapCharacters(&source, 0, length, collection_, family_,
+  if (FAILED(fallback_->MapCharacters(&source, 0, length, collection_, family_.c_str(),
                                       DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                                       DWRITE_FONT_STRETCH_NORMAL, &mapped_length, &font, &scale)) ||
       font == nullptr) {
@@ -266,7 +341,8 @@ TextMeasurer::Glyph TextMeasurer::fallback_glyph(char32_t c) {
   }
   IDWriteFontFace* face = nullptr;
   uint16_t face_index = 0;
-  const bool ok = SUCCEEDED(font->CreateFontFace(&face)) && add_face(face, em_ * scale, &face_index);
+  const bool ok =
+      SUCCEEDED(font->CreateFontFace(&face)) && add_face(face, em_ * scale, family_name(font), &face_index);
   safe_release(face);
   safe_release(font);
   if (!ok) return g;
