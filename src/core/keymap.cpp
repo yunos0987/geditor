@@ -213,20 +213,21 @@ constexpr DefaultBinding kMinibufferBindings[] = {
     {L"M-n", "next-history-element"},
 };
 
-// PLAN 4.4 "Windows compatible keys" (12 keys; C-M-h and C-M-r share a row).
+// PLAN 4.4 "Windows compatible keys" (12 keys; C-S-h and C-S-r share a row).
+// Being bound, they are not shift-translated to C-<letter>.
 constexpr DefaultBinding kCompatBindings[] = {
-    {L"C-M-a", "select-all"},
-    {L"C-M-c", "copy"},
-    {L"C-M-x", "cut"},
-    {L"C-M-v", "paste"},
-    {L"C-M-z", "undo"},
-    {L"C-M-y", "redo"},
-    {L"C-M-s", "save-buffer"},
-    {L"C-M-w", "quit"},
-    {L"C-M-f", "isearch-forward"},
-    {L"C-M-h", "query-replace"},
-    {L"C-M-r", "query-replace"},
-    {L"C-M-g", "goto-line"},
+    {L"C-S-a", "select-all"},
+    {L"C-S-c", "copy"},
+    {L"C-S-x", "cut"},
+    {L"C-S-v", "paste"},
+    {L"C-S-z", "undo"},
+    {L"C-S-y", "redo"},
+    {L"C-S-s", "save-buffer"},
+    {L"C-S-w", "quit"},
+    {L"C-S-f", "isearch-forward"},
+    {L"C-S-h", "query-replace"},
+    {L"C-S-r", "query-replace"},
+    {L"C-S-g", "goto-line"},
 };
 
 // PLAN 4.4 "during isearch".

@@ -1,6 +1,6 @@
 // [C16]: C-g typed in the middle of a key sequence (after ESC, prefix keys or
 // a prefix argument) quits, as in Emacs; a real Ctrl+Alt+G key (C-M-g in one
-// key event) still runs the C-M-g binding.
+// key event) is the key C-M-g: undefined by default, or its settings binding.
 
 #include <string>
 
@@ -79,8 +79,8 @@ TEST(quit_esc_c_g_whatever_settings_bind_to_c_m_g) {
 TEST(quit_real_ctrl_alt_g_runs_the_binding) {
   test::Session s;
   s.load(L"0123456789");
-  s.keys(L"C-M-g");  // one key event with both modifiers
-  CHECK_EQ(s.message(), std::wstring(L"goto-line is not implemented yet"));
+  s.keys(L"C-M-g");  // one key event with both modifiers: not a quit
+  CHECK_EQ(s.message(), std::wstring(L"C-M-g is undefined"));
   s.settings("{\"keys\": {\"C-M-g\": \"end-of-line\"}}");
   s.keys(L"C-M-g");
   CHECK_EQ(s.point(), size_t{10});

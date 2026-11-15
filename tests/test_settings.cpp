@@ -104,12 +104,14 @@ TEST(settings_form_null_on_emacs_default_key) {
 TEST(settings_form_null_on_windows_compat_key) {
   test::Session s;
   s.load(L"abc");
-  s.settings("{\"keys\": {\"C-M-a\": null}}");
-  s.keys(L"C-M-a");
-  // Not select-all, and nothing from a lower layer either.
-  CHECK_EQ(s.message(), std::wstring(L"C-M-a is undefined"));
+  s.set_point(2);
+  s.settings("{\"keys\": {\"C-S-a\": null}}");
+  s.keys(L"C-S-a");
+  // Not select-all, and nothing from a lower layer or shift translation
+  // (C-a) either.
+  CHECK_EQ(s.message(), std::wstring(L"C-S-a is undefined"));
   CHECK(!s.ed.buffer().mark_active);
-  CHECK_EQ(s.point(), size_t{0});
+  CHECK_EQ(s.point(), size_t{2});
 }
 
 TEST(settings_form_null_on_plain_character_key) {
@@ -387,30 +389,60 @@ namespace {
 struct CompatRow {
   const wchar_t* key;
   const char* command;
-  const char* replaced_emacs;  // the Emacs operation of the same key
+  // What the key ran before through shift translation (the Emacs default of
+  // C-<letter>): a command name, "(prefix)" for C-x, "" when undefined.
+  const char* replaced;
 };
 
 // Written from the PLAN 4.4 table, independently of keymap.cpp.
 constexpr CompatRow kCompatRows[] = {
-    {L"C-M-a", "select-all", "beginning-of-defun"},
-    {L"C-M-c", "copy", "exit-recursive-edit"},
-    {L"C-M-x", "cut", "eval-defun"},
-    {L"C-M-v", "paste", "scroll-other-window"},
-    {L"C-M-z", "undo", "(none)"},
-    {L"C-M-y", "redo", "(none)"},
-    {L"C-M-s", "save-buffer", "isearch-forward-regexp"},
-    {L"C-M-w", "quit", "append-next-kill"},
-    {L"C-M-f", "isearch-forward", "forward-sexp"},
-    {L"C-M-h", "query-replace", "mark-defun"},
-    {L"C-M-r", "query-replace", "isearch-backward-regexp"},
-    {L"C-M-g", "goto-line", "(none)"},
+    {L"C-S-a", "select-all", "beginning-of-line"},
+    {L"C-S-c", "copy", ""},
+    {L"C-S-x", "cut", "(prefix)"},
+    {L"C-S-v", "paste", "scroll-up-command"},
+    {L"C-S-z", "undo", ""},
+    {L"C-S-y", "redo", "yank"},
+    {L"C-S-s", "save-buffer", "isearch-forward"},
+    {L"C-S-w", "quit", "kill-region"},
+    {L"C-S-f", "isearch-forward", "forward-char"},
+    {L"C-S-h", "query-replace", ""},
+    {L"C-S-r", "query-replace", "isearch-backward"},
+    {L"C-S-g", "goto-line", "keyboard-quit"},
 };
+
+// The 12 keys of the old Windows layer (Ctrl+Alt), undefined since 2026-11-15.
+constexpr const wchar_t* kOldCompatKeys[] = {
+    L"C-M-a", L"C-M-c", L"C-M-x", L"C-M-v", L"C-M-z", L"C-M-y",
+    L"C-M-s", L"C-M-w", L"C-M-f", L"C-M-h", L"C-M-r", L"C-M-g",
+};
+
+// What `keys` resolves to through shift translation in `map`: the command
+// name, "(prefix)", or "" (undefined / unbound); `translated` tells whether
+// the S- was dropped.
+std::string shift_lookup(const Keymap& map, const wchar_t* keys, bool* translated) {
+  geditor::KeySequence seq = *geditor::parse_key_sequence(keys);
+  const geditor::KeySequence original = seq;
+  const Keymap::Lookup r =
+      geditor::lookup_shift_translated(seq, [&](const geditor::KeySequence& k) { return map.lookup(k); });
+  *translated = !(seq == original);
+  if (r.result == Keymap::Result::kPrefix) return "(prefix)";
+  return r.result == Keymap::Result::kCommand ? std::string(r.command) : std::string();
+}
 
 }  // namespace
 
 TEST(compat_table_has_twelve_keys) {
   CHECK_EQ(std::size(kCompatRows), size_t{12});
   CHECK_EQ(geditor::default_compat_bindings().size(), size_t{12});
+  // The code table holds exactly the PLAN keys and commands.
+  for (const CompatRow& row : kCompatRows) {
+    bool found = false;
+    for (const auto& b : geditor::default_compat_bindings()) {
+      found = found || (std::wstring(b.keys) == row.key && std::string(b.command) == row.command);
+    }
+    if (!found) std::printf("  not in the code table: %s\n", test::to_display(row.key).c_str());
+    CHECK(found);
+  }
 }
 
 TEST(compat_keys_resolve_by_default) {
@@ -421,20 +453,52 @@ TEST(compat_keys_resolve_by_default) {
   }
 }
 
-TEST(compat_layer_overrides_the_emacs_layer) {
-  // An Emacs layer that binds every compat key to its Emacs operation.
-  std::vector<geditor::DefaultBinding> emacs;
-  for (const CompatRow& row : kCompatRows) emacs.push_back({row.key, row.replaced_emacs});
-  const Keymap map = geditor::build_keymap(emacs, geditor::default_compat_bindings(), {}, nullptr);
+TEST(compat_layer_overrides_shift_translation) {
+  // With the Windows layer: every key runs its own command, not translated.
+  const Keymap map =
+      geditor::build_keymap(geditor::default_global_bindings(), geditor::default_compat_bindings(), {}, nullptr);
+  // Without it, shift translation would run what C-<letter> runs.
+  const Keymap emacs_only = geditor::build_keymap(geditor::default_global_bindings(), {}, {}, nullptr);
   for (const CompatRow& row : kCompatRows) {
-    const Keymap::Lookup r = map.lookup(*geditor::parse_key_sequence(row.key));
-    CHECK(r.result == Keymap::Result::kCommand);
-    CHECK_EQ(std::string(r.command), std::string(row.command));
+    bool translated = true;
+    CHECK_EQ(shift_lookup(map, row.key, &translated), std::string(row.command));
+    CHECK(!translated);
+    const std::string before = shift_lookup(emacs_only, row.key, &translated);
+    if (before != row.replaced) std::printf("  replaced %s: %s\n", test::to_display(row.key).c_str(), before.c_str());
+    CHECK_EQ(before, std::string(row.replaced));
+    CHECK_EQ(translated, row.replaced[0] != '\0');
   }
-  // Without the compat layer the Emacs operation would run.
-  const Keymap emacs_only = geditor::build_keymap(emacs, {}, {}, nullptr);
-  CHECK_EQ(std::string(emacs_only.lookup(*geditor::parse_key_sequence(L"C-M-a")).command),
-           std::string("beginning-of-defun"));
+}
+
+TEST(old_compat_c_m_keys_are_undefined) {
+  for (const wchar_t* key : kOldCompatKeys) {
+    test::Session s;
+    s.load(L"one two\nthree");
+    s.set_point(5);
+    s.keys(key);
+    const std::wstring expected = std::wstring(key) + L" is undefined";
+    if (s.message() != expected) std::printf("  key %s\n", test::to_display(key).c_str());
+    CHECK_EQ(s.message(), expected);
+    CHECK_EQ(s.text(), std::wstring(L"one two\nthree"));
+    CHECK_EQ(s.point(), size_t{5});
+    CHECK(!s.modified());
+    CHECK(!s.ed.buffer().mark_active);
+    CHECK(!s.ed.minibuffer_active());
+    CHECK(global_lookup(s, key).result == Keymap::Result::kUndefined);
+  }
+}
+
+TEST(emacs_c_m_redo_and_query_replace_regexp_stay) {
+  test::Session s;
+  s.load(L"");
+  s.type(L"ab");
+  s.keys(L"C-/");
+  CHECK_EQ(s.text(), std::wstring(L""));
+  s.keys(L"C-M-_");
+  CHECK_EQ(s.text(), std::wstring(L"ab"));
+  CHECK_EQ(s.message(), std::wstring(L"Redo"));
+  CHECK_EQ(command_of(s, L"C-M-_"), std::string("redo"));
+  CHECK_EQ(command_of(s, L"C-M-%"), std::string("query-replace-regexp"));
 }
 
 TEST(compat_layer_is_overridden_by_settings) {

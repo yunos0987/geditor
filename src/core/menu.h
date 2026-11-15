@@ -55,20 +55,30 @@ std::wstring menu_text_without_mnemonic(std::wstring_view text);
 // The command call of a command item (its argument as a text argument).
 CommandCall menu_item_call(const MenuItem& item);
 
-// The key text of each command call that has a key (decision B1): for every
-// call, the shortest key sequence bound to exactly that call (a single call,
-// not a sequence) in the global keymap now in effect; ties go to the first
-// one found in the order settings (file order) > Windows compatible keys >
-// Emacs keys. A key whose binding is shadowed (rebound or unbound by a later
-// layer) does not count.
+// The key text of each command call that has a key (decision B1, two slots
+// since 2026-11-15). A candidate is a key sequence bound to exactly that call
+// (a single call, not a sequence) that the global keymap now in effect still
+// runs; a key whose binding is shadowed (rebound or unbound by a later layer)
+// does not count.
+// - Windows-side slot: the shortest candidate of the settings (file order)
+//   and the Windows compatible keys; ties go to the settings.
+// - Emacs slot: the shortest candidate of the Emacs default layer; ties go to
+//   the first one in the table. For cut / copy / paste / select-all the
+//   candidates also include the keys of kill-region / kill-ring-save / yank /
+//   mark-whole-buffer (and back), the same-action table of menu.cpp (display
+//   only; ties go to the item's own command).
+// The text is "<windows>  <emacs>" (two spaces); just the one key when only
+// one slot has a key or both slots have the same key; empty when neither.
 class MenuKeyTexts {
  public:
   explicit MenuKeyTexts(const Editor& editor);
-  // "C-x C-s"; empty when no key runs `item`.
+  // "C-S-s  C-x C-s"; empty when no key runs `item`.
   std::wstring text_for(const MenuItem& item) const;
 
  private:
-  std::vector<std::pair<CommandCall, KeySequence>> best_;
+  using Choices = std::vector<std::pair<CommandCall, KeySequence>>;
+  Choices windows_;
+  Choices emacs_;
 };
 
 // What a command item shows now.

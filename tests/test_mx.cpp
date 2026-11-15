@@ -189,9 +189,9 @@ constexpr const char* kPlanCommands[] = {
     "find-user-init-file",
 };
 
-// Names of Emacs operations that PLAN 4.4 mentions only as what a geditor
-// key replaces (the third column of the Windows compatible key table, and
-// text-scale-adjust): geditor has no such command.
+// Names of Emacs operations that PLAN 4.4 mentions only as not implemented
+// (the Emacs commands of the C-M- letter keys, which are undefined in
+// geditor, and text-scale-adjust): geditor has no such command.
 constexpr const char* kReplacedEmacsOperations[] = {
     "beginning-of-defun", "exit-recursive-edit", "eval-defun",   "scroll-other-window",
     "isearch-forward-regexp", "append-next-kill", "forward-sexp", "mark-defun",
@@ -220,10 +220,10 @@ constexpr LaterKey kLaterKeys[] = {
     {L"C-x )", "kmacro-end-macro"},
     {L"C-x e", "kmacro-end-and-call-macro"},
     {L"<f4>", "kmacro-end-and-call-macro"},
-    {L"C-M-f", "isearch-forward"},
-    {L"C-M-h", "query-replace"},
-    {L"C-M-r", "query-replace"},
-    {L"C-M-g", "goto-line"},
+    {L"C-S-f", "isearch-forward"},
+    {L"C-S-h", "query-replace"},
+    {L"C-S-r", "query-replace"},
+    {L"C-S-g", "goto-line"},
 };
 
 // The View commands of M3a (menu View / M-x, text-scale also by key).

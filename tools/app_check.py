@@ -1950,12 +1950,13 @@ def run_headless_checks(exe: pathlib.Path, out: pathlib.Path):
 # ---- M3b: menus, the right-click menu and the mouse ----
 
 # The command items of PLAN 4.9 with the key text of decision B1 (built-in
-# keys, no settings) and whether the command is implemented now (else grey;
+# keys, no settings: the Windows-side key, two spaces, the Emacs key; one key
+# when only one exists) and whether the command is implemented now (else grey;
 # M3b, set-eol since M4a, the encoding commands since M4b). tests/test_menu.cpp
 # holds the same table for the core model.
 M3B_ITEMS = [
     ("File > Open...", "C-x C-f", True), ("File > Open with Encoding...", "C-x RET c", True),
-    ("File > Reopen with Encoding...", "C-x RET r", True), ("File > Save", "C-M-s", True),
+    ("File > Reopen with Encoding...", "C-x RET r", True), ("File > Save", "C-S-s  C-x C-s", True),
     ("File > Save As...", "C-x C-w", True),
     *[(f"File > Encoding for Saving > {name}", "", True) for name in (
         "utf-8", "utf-8-bom", "utf-16le", "utf-16le-bom", "utf-16be", "utf-16be-bom", "shift_jis", "euc-jp",
@@ -1963,11 +1964,14 @@ M3B_ITEMS = [
     # set-eol: implemented in M4a.
     ("File > Line Endings > LF", "", True), ("File > Line Endings > CRLF", "", True),
     ("File > Line Endings > CR", "", True), ("File > Read Only", "C-x C-q", True),
-    ("File > Settings", "", True), ("File > Exit", "C-M-w", True),
-    ("Edit > Undo", "C-M-z", True), ("Edit > Redo", "C-M-y", True), ("Edit > Cut", "C-M-x", True),
-    ("Edit > Copy", "C-M-c", True), ("Edit > Paste", "C-M-v", True), ("Edit > Select All", "C-M-a", True),
-    ("Edit > Find...", "C-M-f", False), ("Edit > Replace...", "C-M-h", False),
-    ("Edit > Go to Line...", "C-M-g", False),
+    ("File > Settings", "", True), ("File > Exit", "C-S-w  C-x C-c", True),
+    ("Edit > Undo", "C-S-z  C-/", True), ("Edit > Redo", "C-S-y  C-?", True),
+    # The Emacs keys of Cut / Copy / Paste / Select All are those of the
+    # same-action commands kill-region / kill-ring-save / yank / mark-whole-buffer.
+    ("Edit > Cut", "C-S-x  C-w", True), ("Edit > Copy", "C-S-c  M-w", True), ("Edit > Paste", "C-S-v  C-y", True),
+    ("Edit > Select All", "C-S-a  C-x h", True),
+    ("Edit > Find...", "C-S-f  C-s", False), ("Edit > Replace...", "C-S-h  M-%", False),
+    ("Edit > Go to Line...", "C-S-g  M-g g", False),
     ("View > Line Numbers", "", True), ("View > Line Ending Marks", "", True),
     ("View > Whitespace Marks", "", True), ("View > Wrap > None", "", True), ("View > Wrap > Window", "", True),
     ("View > Wrap > Fixed", "", True), ("View > Wrap > Max", "", True), ("View > Zoom In", "C-x C-+", True),
@@ -2038,6 +2042,7 @@ def run_m3b_checks(exe: pathlib.Path, out: pathlib.Path):
         run_m3b_mouse(app, run, original)
         run_m3b_strip(app, run, original)
         run_m3b_context(app, run, original, settings, wrap10)
+        run_m3b_windows_keys(app, run)
         run_m3b_menu_bar(app, run, settings, wrap10)
     finally:
         app.kill()
@@ -2341,6 +2346,17 @@ def run_m3b_context(app, run: M3bRun, original: str, settings: pathlib.Path, wra
           [i.split("\t")[0] for i in items] == M3B_CONTEXT,
           f"before {pmt(before)}; pending {pmt(pending)} at ({pending.get('menu_x')}, {pending.get('menu_y')}) "
           f"click ({x}, {y}); items={items}")
+    # The key texts of the right-click HMENU (read back from the built menu)
+    # are those of the Edit menu items (two keys: Windows side, Emacs).
+    expected = dict((p.split(" > ", 1)[1], k) for p, k, _ in M3B_ITEMS if p.startswith("Edit > "))
+    got = dict((i.split("\t")[0], i.split("\t")[1]) for i in items if len(i.split("\t")) == 3 and
+               not i.startswith("-\t"))
+    check("[keys C5/C8] the right-click HMENU shows the two-key texts (Windows side, two spaces, Emacs; "
+          "the same-action Emacs keys of Cut / Copy / Paste / Select All)",
+          got == {name: expected[name] for name in M3B_CONTEXT if name != "-"} and
+          got.get("Undo") == "C-S-z  C-/" and got.get("Cut") == "C-S-x  C-w" and got.get("Copy") == "C-S-c  M-w" and
+          got.get("Paste") == "C-S-v  C-y" and got.get("Select All") == "C-S-a  C-x h",
+          f"key texts={got}")
     wrong = app.answer("Frobnicate")
     state = run.state()
     check("[C10] a menu answer that names no item is rejected and logged; the menu stays",
@@ -2428,6 +2444,45 @@ def run_m3b_context(app, run: M3bRun, original: str, settings: pathlib.Path, wra
           copied.get("clipboard_text") == "h",
           f"menu_bar={state['menu_bar']} GetMenu={hidden} clipboard={copied.get('clipboard_text')!r}")
     apply_settings(settings, wrap10)
+
+
+def run_m3b_windows_keys(app, run: M3bRun):
+    """The Windows compatible keys are Ctrl+Shift since 2026-11-15: C-S-a
+    selects everything (not C-a), C-S-z undoes, and the old Ctrl+Alt key
+    C-M-a is undefined."""
+    keys = app.keys
+    keys("C-g M-< C-n C-f C-f")
+    time.sleep(0.3)
+    before = run.state()
+    keys("C-S-a")
+    time.sleep(0.3)
+    selected = run.state()
+    check("[keys C5] posted C-S-a runs select-all (not C-a): mark at 0, point at the end",
+          before["point"] != "0" and selected["mark_active"] == "1" and selected["mark"] == "0" and
+          selected["point"] == str(len(selected["text"])) and selected["text"] == before["text"],
+          f"before {pmt(before)}; after {pmt(selected)} length={len(selected['text'])} "
+          f"message={selected['message']!r}")
+    keys("C-g M-<")
+    app.type("Q")
+    time.sleep(0.3)
+    typed = run.state()
+    keys("C-S-z")
+    time.sleep(0.3)
+    undone = run.state()
+    check("[keys C5] posted C-S-z undoes the typed character",
+          typed["text"] == "Q" + before["text"] and undone["text"] == before["text"],
+          f"typed: {typed['text'][:12]!r}; after C-S-z: {undone['text'][:12]!r} message={undone['message']!r}")
+    keys("M-< C-n C-f")
+    time.sleep(0.3)
+    b = run.state()
+    keys("C-M-a")
+    time.sleep(0.3)
+    a = run.state()
+    check("[keys C5] posted C-M-a shows 'C-M-a is undefined' and changes no text, point, mark or modified flag",
+          a["message"] == "C-M-a is undefined" and a["text"] == b["text"] and a["point"] == b["point"] and
+          a["mark_active"] == b["mark_active"] and a["modified"] == b["modified"],
+          f"message={a['message']!r} before {pmt(b)} modified={b['modified']}; after {pmt(a)} "
+          f"modified={a['modified']}")
 
 
 def run_m3b_menu_bar(app, run: M3bRun, settings: pathlib.Path, wrap10: dict):

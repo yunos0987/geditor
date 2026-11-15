@@ -118,8 +118,8 @@ struct DefaultBinding {
 // commands that later milestones implement) and the Windows editing keys that
 // do not conflict with Emacs.
 std::span<const DefaultBinding> default_global_bindings();
-// The 12 Windows-compatible C-M- keys of PLAN 4.4; they take precedence over
-// the Emacs layer.
+// The 12 Windows-compatible C-S- keys of PLAN 4.4; they take precedence over
+// the Emacs layer (and, being bound, over shift translation to C-<letter>).
 std::span<const DefaultBinding> default_compat_bindings();
 // Bindings active only while the minibuffer reads input (over global).
 std::span<const DefaultBinding> default_minibuffer_bindings();

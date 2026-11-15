@@ -173,38 +173,75 @@ MenuKeyTexts::MenuKeyTexts(const Editor& editor) {
   const Keymap& map = editor.keymap(KeymapKind::kGlobal);
   // A candidate counts when the keymap in effect runs exactly its binding
   // (a later layer may have rebound or unbound the keys).
-  auto consider = [&](const KeySequence& keys, const Binding& binding) {
+  auto consider = [&](Choices* best, const KeySequence& keys, const Binding& binding) {
     if (keys.empty() || binding.sequence || binding.calls.size() != 1) return;
     const CommandCall& call = binding.calls.front();
-    auto it = best_.begin();
-    while (it != best_.end() && !(it->first == call)) ++it;
-    if (it != best_.end() && it->second.size() <= keys.size()) return;
+    auto it = best->begin();
+    while (it != best->end() && !(it->first == call)) ++it;
+    if (it != best->end() && it->second.size() <= keys.size()) return;
     const Keymap::Lookup r = map.lookup(keys);
     if (r.result != Keymap::Result::kCommand || r.binding == nullptr || !(*r.binding == binding)) return;
-    if (it != best_.end()) {
+    if (it != best->end()) {
       it->second = keys;
     } else {
-      best_.emplace_back(call, keys);
+      best->emplace_back(call, keys);
     }
   };
+  // The Windows-side slot: settings (file order), then the Windows layer.
   for (const KeySetting& s : editor.config().keys[static_cast<size_t>(KeymapKind::kGlobal)]) {
-    if (!s.unbind) consider(s.keys, s.binding);
+    if (!s.unbind) consider(&windows_, s.keys, s.binding);
   }
-  for (const auto layer : {compat_layer(KeymapKind::kGlobal), emacs_layer(KeymapKind::kGlobal)}) {
-    for (const DefaultBinding& b : layer) {
-      const std::optional<KeySequence> keys = parse_key_sequence(b.keys);
-      if (keys) consider(*keys, command_binding(b.command));
-    }
+  for (const DefaultBinding& b : compat_layer(KeymapKind::kGlobal)) {
+    const std::optional<KeySequence> keys = parse_key_sequence(b.keys);
+    if (keys) consider(&windows_, *keys, command_binding(b.command));
+  }
+  // The Emacs slot: the Emacs default layer.
+  for (const DefaultBinding& b : emacs_layer(KeymapKind::kGlobal)) {
+    const std::optional<KeySequence> keys = parse_key_sequence(b.keys);
+    if (keys) consider(&emacs_, *keys, command_binding(b.command));
   }
 }
+
+namespace {
+
+// Commands that do the same as a menu item's command, for the Emacs slot of
+// the key text only (no binding changes; user decision 2026-11-15). Two-way.
+// select-all and mark-whole-buffer differ only in where the cursor ends.
+constexpr std::pair<const char*, const char*> kSameActionCommands[] = {
+    {"cut", "kill-region"},
+    {"copy", "kill-ring-save"},
+    {"paste", "yank"},
+    {"select-all", "mark-whole-buffer"},
+};
+
+}  // namespace
 
 std::wstring MenuKeyTexts::text_for(const MenuItem& item) const {
   if (item.kind != MenuItemKind::kCommand) return std::wstring();
   const CommandCall call = menu_item_call(item);
-  for (const auto& [c, keys] : best_) {
-    if (c == call) return key_sequence_to_string(keys);
+  auto find = [](const Choices& best, const CommandCall& wanted) -> const KeySequence* {
+    for (const auto& [c, keys] : best) {
+      if (c == wanted) return &keys;
+    }
+    return nullptr;
+  };
+  const KeySequence* windows_keys = find(windows_, call);
+  // The Emacs slot: the shortest key of the command itself or of a
+  // same-action command (ties go to the command itself).
+  const KeySequence* emacs_keys = find(emacs_, call);
+  if (call.args.empty()) {
+    for (const auto& [a, b] : kSameActionCommands) {
+      const char* other = call.name == a ? b : call.name == b ? a : nullptr;
+      if (other == nullptr) continue;
+      const KeySequence* k = find(emacs_, CommandCall{other, {}});
+      if (k != nullptr && (emacs_keys == nullptr || k->size() < emacs_keys->size())) emacs_keys = k;
+    }
   }
-  return std::wstring();
+  const std::wstring windows = windows_keys != nullptr ? key_sequence_to_string(*windows_keys) : std::wstring();
+  const std::wstring emacs = emacs_keys != nullptr ? key_sequence_to_string(*emacs_keys) : std::wstring();
+  if (windows.empty()) return emacs;
+  if (emacs.empty() || emacs == windows) return windows;
+  return windows + L"  " + emacs;
 }
 
 bool menu_item_enabled(const Editor& editor, const MenuItem& item) {

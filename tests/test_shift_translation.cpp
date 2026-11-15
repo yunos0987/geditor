@@ -39,19 +39,48 @@ TEST(shift_translation_s_end) {
 }
 
 TEST(shift_translation_c_s_letter) {
-  // C-S-a is unbound: it runs C-a (beginning-of-line).
+  // C-S-b is not one of the 12 Windows keys: it runs C-b (backward-char).
+  test::Session s;
+  s.load(L"abc");
+  s.set_point(2);
+  s.keys(L"C-S-b");
+  CHECK_EQ(s.point(), size_t{1});
+  CHECK_EQ(s.message(), std::wstring());
+}
+
+TEST(shift_translation_not_for_windows_keys) {
+  // C-S-a is the Windows key select-all, not C-a (beginning-of-line).
   test::Session s;
   s.load(L"abc");
   s.set_point(2);
   s.keys(L"C-S-a");
+  CHECK(s.ed.buffer().mark_active);
+  CHECK_EQ(s.ed.buffer().mark, size_t{0});
+  CHECK_EQ(s.point(), size_t{3});
+}
+
+TEST(shift_translation_settings_win_over_windows_keys) {
+  test::Session s;
+  s.load(L"abc");
+  s.set_point(2);
+  s.settings("{\"keys\": {\"C-S-a\": \"beginning-of-line\"}}");
+  CHECK(s.ed.settings_errors().empty());
+  s.keys(L"C-S-a");
   CHECK_EQ(s.point(), size_t{0});
+  CHECK(!s.ed.buffer().mark_active);
+  s.set_point(2);
+  s.settings("{\"keys\": {\"C-S-a\": null}}");
+  s.keys(L"C-S-a");
+  CHECK_EQ(s.message(), std::wstring(L"C-S-a is undefined"));
+  CHECK_EQ(s.point(), size_t{2});
+  CHECK(!s.ed.buffer().mark_active);
 }
 
 TEST(shift_translation_unbound_both_ways) {
   test::Session s;
   s.load(L"abc");
-  s.keys(L"C-S-z");
-  CHECK_EQ(s.message(), std::wstring(L"C-S-z is undefined"));
+  s.keys(L"C-S-i");
+  CHECK_EQ(s.message(), std::wstring(L"C-S-i is undefined"));
   CHECK_EQ(s.text(), std::wstring(L"abc"));
 }
 

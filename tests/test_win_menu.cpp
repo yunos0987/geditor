@@ -119,7 +119,7 @@ TEST(win_menu_bar_hmenu_matches_the_core_model) {
   check_same(geditor::win::read_menu(bar), expected_bar(s));
   const std::vector<MenuEntry> entries = geditor::win::read_menu(bar);
   const MenuEntry* undo = entry(entries, L"Edit > Undo");
-  CHECK(undo != nullptr && undo->text == L"&Undo" && undo->key_text == L"C-M-z" && undo->enabled);
+  CHECK(undo != nullptr && undo->text == L"&Undo" && undo->key_text == L"C-S-z  C-/" && undo->enabled);
   const MenuEntry* find = entry(entries, L"Edit > Find...");
   CHECK(find != nullptr && !find->enabled);
   const MenuEntry* max = entry(entries, L"View > Wrap > Max");
@@ -134,7 +134,7 @@ TEST(win_menu_init_popup_refreshes_keys_grey_and_marks) {
   CHECK(bar != nullptr);
   if (bar == nullptr) return;
   // Change everything the refresh shows: keys, View marks, the minibuffer.
-  s.settings(R"({"keys": {"C-z": "undo", "C-M-s": null, "C-x C-s": null}})");
+  s.settings(R"({"keys": {"C-z": "undo", "C-S-s": null, "C-x C-s": null}})");
   s.keys(L"M-x");
   s.type(L"toggle-line-numbers");
   s.keys(L"RET");
@@ -147,7 +147,7 @@ TEST(win_menu_init_popup_refreshes_keys_grey_and_marks) {
   init_popups(bar, s);
   check_same(geditor::win::read_menu(bar), expected_bar(s));
   std::vector<MenuEntry> entries = geditor::win::read_menu(bar);
-  CHECK(entry(entries, L"Edit > Undo")->key_text == L"C-z");
+  CHECK(entry(entries, L"Edit > Undo")->key_text == L"C-z  C-/");
   CHECK(entry(entries, L"File > Save")->key_text.empty());
   CHECK(!entry(entries, L"View > Line Numbers")->checked);
   CHECK(entry(entries, L"View > Wrap > Window")->checked);
@@ -193,7 +193,9 @@ TEST(win_context_menu_hmenu_is_built_from_the_edit_definition) {
     CHECK_EQ(c.enabled, e->enabled);
     CHECK_EQ(c.separator, e->separator);
   }
-  CHECK_EQ(context[4].key_text, std::wstring(L"C-M-c"));  // the shortest key wins the tie
+  // The shorter Windows-side key, and M-w (kill-ring-save) from the
+  // same-action table in the Emacs slot.
+  CHECK_EQ(context[4].key_text, std::wstring(L"C-S-c  M-w"));
   // The ids map back to the core items of the Edit menu.
   const MenuItem* undo = geditor::win::menu_item_for_command(context[0].id);
   CHECK(undo != nullptr && undo == &geditor::context_menu_items()[0]);
@@ -248,7 +250,7 @@ TEST(win_menu_question_lists_items_and_takes_enabled_ones) {
   const std::wstring state = geditor::win::question_state(q);
   CHECK(state.find(L"question=context_menu\n") != std::wstring::npos);
   CHECK(state.find(L"menu_x=12\nmenu_y=34\n") != std::wstring::npos);
-  CHECK(state.find(L"menu_item=Undo\tC-M-z\tenabled\n") != std::wstring::npos);
+  CHECK(state.find(L"menu_item=Undo\tC-S-z  C-/\tenabled\n") != std::wstring::npos);
   CHECK(state.find(L"menu_item=-\t\tseparator\n") != std::wstring::npos);
   CHECK(state.find(L"button=Select All\n") != std::wstring::npos);
   CHECK(state.find(L"button=Cancel\n") != std::wstring::npos);
@@ -268,7 +270,7 @@ TEST(win_menu_question_lists_items_and_takes_enabled_ones) {
       geditor::win::menu_question(geditor::win::QuestionKind::kMenuBar, geditor::win::read_menu(bar), POINT{});
   const std::wstring bar_state = geditor::win::question_state(mq);
   CHECK(bar_state.find(L"question=menu_bar\n") != std::wstring::npos);
-  CHECK(bar_state.find(L"menu_item=Edit > Go to Line...\tC-M-g\tdisabled\n") != std::wstring::npos);
+  CHECK(bar_state.find(L"menu_item=Edit > Go to Line...\tC-S-g  M-g g\tdisabled\n") != std::wstring::npos);
   CHECK(bar_state.find(L"menu_item=View > Wrap > Max\t\tenabled checked radio\n") != std::wstring::npos);
   CHECK(bar_state.find(L"menu_item=View > Wrap\t\tsubmenu enabled\n") != std::wstring::npos);
   CHECK_EQ(geditor::win::question_button_id(mq, L"Edit > Go to Line..."), 0);

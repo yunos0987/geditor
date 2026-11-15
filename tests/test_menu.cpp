@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "commands.h"
+#include "config.h"
 #include "fake_host.h"
 #include "menu.h"
 
@@ -23,8 +24,9 @@ namespace {
 // One row per item of the PLAN 4.9 table, in menu order. `path` is the PLAN
 // text ("─" rows are separators, "▶" rows are submenus); `key` is the key
 // text that decision B1 picks from the built-in keymap layers (settings
-// none): the shortest key, ties to the Windows compatible key before the
-// Emacs one. The PLAN item -> row cross-check is this table itself: every
+// none): the shortest Windows compatible key, two spaces, the shortest Emacs
+// key (ties to the first in the table); one key when only one slot has one.
+// The PLAN item -> row cross-check is this table itself: every
 // row names its PLAN text, and plan_table_covers_every_model_item checks
 // that the model has exactly these items in this order.
 struct PlanRow {
@@ -52,7 +54,7 @@ constexpr PlanRow kPlanRows[] = {
     {L"File > Open with Encoding...", kCmd, "find-file-with-encoding", nullptr, kNo, true, L"C-x RET c"},
     {L"File > Reopen with Encoding...", kCmd, "revert-buffer-with-coding-system", nullptr, kNo, true, L"C-x RET r"},
     {L"File > ─", kSep, nullptr, nullptr, kNo, false, L""},
-    {L"File > Save", kCmd, "save-buffer", nullptr, kNo, true, L"C-M-s"},
+    {L"File > Save", kCmd, "save-buffer", nullptr, kNo, true, L"C-S-s  C-x C-s"},
     {L"File > Save As...", kCmd, "write-file", nullptr, kNo, true, L"C-x C-w"},
     {L"File > ─", kSep, nullptr, nullptr, kNo, false, L""},
     {L"File > Encoding for Saving ▶", kSub, nullptr, nullptr, kNo, true, L""},
@@ -75,19 +77,21 @@ constexpr PlanRow kPlanRows[] = {
     {L"File > Read Only", kCmd, "read-only-mode", nullptr, kChk, true, L"C-x C-q"},
     {L"File > ─", kSep, nullptr, nullptr, kNo, false, L""},
     {L"File > Settings", kCmd, "find-user-init-file", nullptr, kNo, true, L""},
-    {L"File > Exit", kCmd, "quit", nullptr, kNo, true, L"C-M-w"},
+    {L"File > Exit", kCmd, "quit", nullptr, kNo, true, L"C-S-w  C-x C-c"},
     // Edit
-    {L"Edit > Undo", kCmd, "undo", nullptr, kNo, true, L"C-M-z"},
-    {L"Edit > Redo", kCmd, "redo", nullptr, kNo, true, L"C-M-y"},
+    {L"Edit > Undo", kCmd, "undo", nullptr, kNo, true, L"C-S-z  C-/"},
+    {L"Edit > Redo", kCmd, "redo", nullptr, kNo, true, L"C-S-y  C-?"},
     {L"Edit > ─", kSep, nullptr, nullptr, kNo, false, L""},
-    {L"Edit > Cut", kCmd, "cut", nullptr, kNo, true, L"C-M-x"},
-    {L"Edit > Copy", kCmd, "copy", nullptr, kNo, true, L"C-M-c"},
-    {L"Edit > Paste", kCmd, "paste", nullptr, kNo, true, L"C-M-v"},
-    {L"Edit > Select All", kCmd, "select-all", nullptr, kNo, true, L"C-M-a"},
+    // The Emacs slot of these four comes from the same-action table
+    // (kill-region / kill-ring-save / yank / mark-whole-buffer).
+    {L"Edit > Cut", kCmd, "cut", nullptr, kNo, true, L"C-S-x  C-w"},
+    {L"Edit > Copy", kCmd, "copy", nullptr, kNo, true, L"C-S-c  M-w"},
+    {L"Edit > Paste", kCmd, "paste", nullptr, kNo, true, L"C-S-v  C-y"},
+    {L"Edit > Select All", kCmd, "select-all", nullptr, kNo, true, L"C-S-a  C-x h"},
     {L"Edit > ─", kSep, nullptr, nullptr, kNo, false, L""},
-    {L"Edit > Find...", kCmd, "isearch-forward", nullptr, kNo, false, L"C-M-f"},
-    {L"Edit > Replace...", kCmd, "query-replace", nullptr, kNo, false, L"C-M-h"},
-    {L"Edit > Go to Line...", kCmd, "goto-line", nullptr, kNo, false, L"C-M-g"},
+    {L"Edit > Find...", kCmd, "isearch-forward", nullptr, kNo, false, L"C-S-f  C-s"},
+    {L"Edit > Replace...", kCmd, "query-replace", nullptr, kNo, false, L"C-S-h  M-%"},
+    {L"Edit > Go to Line...", kCmd, "goto-line", nullptr, kNo, false, L"C-S-g  M-g g"},
     // View
     {L"View > Line Numbers", kCmd, "toggle-line-numbers", nullptr, kChk, true, L""},
     {L"View > Line Ending Marks", kCmd, "toggle-eol-marks", nullptr, kChk, true, L""},
@@ -254,37 +258,182 @@ TEST(menu_key_texts_follow_decision_b1) {
   }
 }
 
+TEST(menu_key_texts_cover_each_slot_case) {
+  Session s;
+  s.load(L"abc");
+  // Both slots, only Emacs, neither (only Windows: below, with C-w unbound).
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-S-z  C-/"));
+  CHECK_EQ(key_text(s, L"File > Open..."), std::wstring(L"C-x C-f"));
+  CHECK_EQ(key_text(s, L"File > Settings"), std::wstring(L""));
+  s.settings(R"({"keys": {"C-w": null}})");
+  CHECK(s.ed.settings_errors().empty());
+  CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x"));
+  // The same key in both slots shows once.
+  s.settings(R"({"keys": {"C-/": "undo"}})");
+  CHECK(s.ed.settings_errors().empty());
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-/"));
+  // A key containing '&' (the core text keeps one '&'; menu_bar escapes it).
+  s.settings(R"({"keys": {"C-c &": "cut"}})");
+  CHECK(s.ed.settings_errors().empty());
+  CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x  C-w"));  // the shorter Windows key
+  s.settings(R"({"keys": {"C-c &": "toggle-line-numbers"}})");
+  CHECK_EQ(key_text(s, L"View > Line Numbers"), std::wstring(L"C-c &"));
+}
+
 TEST(menu_key_texts_change_with_a_settings_reload) {
   Session s;
   s.load(L"abc");
-  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-M-z"));
-  CHECK_EQ(key_text(s, L"File > Save"), std::wstring(L"C-M-s"));
-  // Rebind undo (a settings key wins the tie of one-key sequences), unbind
-  // save-buffer everywhere, give Wrap > None a key with its argument.
-  s.settings(R"({"keys": {"C-z": "undo", "C-M-s": null, "C-x C-s": null, "<f5>": ["set-wrap-mode", "none"]}})");
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-S-z  C-/"));
+  CHECK_EQ(key_text(s, L"File > Save"), std::wstring(L"C-S-s  C-x C-s"));
+  // A settings key replaces the Windows slot (it wins the tie of one-key
+  // sequences); unbind save-buffer everywhere; give Wrap > None a key with
+  // its argument.
+  s.settings(R"({"keys": {"C-z": "undo", "C-S-s": null, "C-x C-s": null, "<f5>": ["set-wrap-mode", "none"]}})");
   CHECK(s.ed.settings_errors().empty());
-  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-z"));
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-z  C-/"));
   CHECK_EQ(key_text(s, L"File > Save"), std::wstring(L""));
   CHECK_EQ(key_text(s, L"View > Wrap > None"), std::wstring(L"<f5>"));
   CHECK_EQ(key_text(s, L"View > Wrap > Max"), std::wstring(L""));
   // Back to the defaults.
   s.settings("{}");
-  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-M-z"));
-  CHECK_EQ(key_text(s, L"File > Save"), std::wstring(L"C-M-s"));
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-S-z  C-/"));
+  CHECK_EQ(key_text(s, L"File > Save"), std::wstring(L"C-S-s  C-x C-s"));
   CHECK_EQ(key_text(s, L"View > Wrap > None"), std::wstring(L""));
 }
 
 TEST(menu_key_text_skips_shadowed_and_sequence_bindings) {
   Session s;
   s.load(L"abc");
-  // C-M-z now runs redo: undo falls back to the first one-key Emacs key.
-  s.settings(R"({"keys": {"C-M-z": "redo", "C-c u": [["undo"], ["undo"]]}})");
+  // A settings binding overrides the Emacs key C-/: the Emacs slot takes the
+  // next one-key Emacs key (C-_); C-S-z now runs redo, so the Windows slot of
+  // undo is empty (the sequence binding does not count).
+  s.settings(R"({"keys": {"C-/": "redo", "C-S-z": "redo", "C-c u": [["undo"], ["undo"]]}})");
   CHECK(s.ed.settings_errors().empty());
-  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-/"));
-  CHECK_EQ(key_text(s, L"Edit > Redo"), std::wstring(L"C-M-z"));
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-_"));
+  CHECK_EQ(key_text(s, L"Edit > Redo"), std::wstring(L"C-/  C-?"));
+  // An overridden Emacs key with no other Emacs key: the slot disappears.
+  s.settings(R"({"keys": {"C-x C-s": "end-of-line"}})");
+  CHECK_EQ(key_text(s, L"File > Save"), std::wstring(L"C-S-s"));
   // A key bound with an argument does not show on the argument-less item.
   s.settings(R"({"keys": {"C-c i": ["insert-text", "x"], "C-c z": ["undo"]}})");
-  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-M-z"));
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-S-z  C-/"));
+}
+
+// [C9] of v2: the same-action keys of the Emacs slot follow the v1 rules.
+TEST(menu_key_texts_same_action_keys_follow_the_emacs_slot_rules) {
+  Session s;
+  s.load(L"abc");
+  // A setting that rebinds C-w removes it from Cut's Emacs slot.
+  s.settings(R"({"keys": {"C-w": "end-of-line"}})");
+  CHECK(s.ed.settings_errors().empty());
+  CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x"));
+  CHECK_EQ(key_text(s, L"Edit > Copy"), std::wstring(L"C-S-c  M-w"));
+  // A longer settings key of kill-region does not replace C-w (and settings
+  // keys of the same-action command are not Emacs keys).
+  s.settings(R"({"keys": {"C-c k": "kill-region"}})");
+  CHECK(s.ed.settings_errors().empty());
+  CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x  C-w"));
+  // Same sequence in both slots: shown once.
+  s.settings(R"({"keys": {"C-y": "paste"}})");
+  CHECK_EQ(key_text(s, L"Edit > Paste"), std::wstring(L"C-y"));
+  // Unbinding the Windows key leaves the same-action Emacs key alone.
+  s.settings(R"({"keys": {"C-S-a": null}})");
+  CHECK_EQ(key_text(s, L"Edit > Select All"), std::wstring(L"C-x h"));
+  // No other item gains an Emacs key: the items without an own Emacs key
+  // keep their v1 texts.
+  s.settings("{}");
+  CHECK_EQ(key_text(s, L"File > Settings"), std::wstring(L""));
+  CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-S-z  C-/"));
+  CHECK_EQ(key_text(s, L"Edit > Redo"), std::wstring(L"C-S-y  C-?"));
+  CHECK_EQ(key_text(s, L"Edit > Replace..."), std::wstring(L"C-S-h  M-%"));
+  CHECK_EQ(key_text(s, L"View > Line Numbers"), std::wstring(L""));
+}
+
+// The rule of decision B1 written independently of menu.cpp, from the layer
+// tables and the settings: checked against every PLAN 4.9 item under several
+// settings.
+namespace {
+
+// The same-action table of the v2 addendum (two-way), written from the
+// packet, independently of menu.cpp.
+constexpr std::pair<const char*, const char*> kSameAction[] = {
+    {"cut", "kill-region"}, {"copy", "kill-ring-save"}, {"paste", "yank"}, {"select-all", "mark-whole-buffer"}};
+
+std::wstring rule_text(const Session& s, const MenuItem& item) {
+  if (item.kind != MenuItemKind::kCommand) return std::wstring();
+  const geditor::CommandCall call = geditor::menu_item_call(item);
+  // The calls whose Emacs keys count: the item's own, then same-action ones.
+  std::vector<geditor::CommandCall> emacs_calls = {call};
+  if (call.args.empty()) {
+    for (const auto& [a, b] : kSameAction) {
+      if (call.name == a) emacs_calls.push_back(geditor::CommandCall{b, {}});
+      if (call.name == b) emacs_calls.push_back(geditor::CommandCall{a, {}});
+    }
+  }
+  const geditor::Keymap& map = s.ed.keymap(geditor::KeymapKind::kGlobal);
+  auto runs_call = [&](const geditor::KeySequence& keys, const geditor::Binding& b, const geditor::CommandCall& c) {
+    if (b.sequence || b.calls.size() != 1 || !(b.calls.front() == c)) return false;
+    const geditor::Keymap::Lookup r = map.lookup(keys);
+    return r.result == geditor::Keymap::Result::kCommand && r.binding != nullptr && *r.binding == b;
+  };
+  auto runs = [&](const geditor::KeySequence& keys, const geditor::Binding& b) { return runs_call(keys, b, call); };
+  std::vector<geditor::KeySequence> windows;  // in tie order
+  for (const geditor::KeySetting& k : s.ed.config().keys[static_cast<size_t>(geditor::KeymapKind::kGlobal)]) {
+    if (!k.unbind && runs(k.keys, k.binding)) windows.push_back(k.keys);
+  }
+  std::vector<geditor::KeySequence> emacs;  // the item's own keys first (ties)
+  for (const auto& b : geditor::default_compat_bindings()) {
+    const geditor::KeySequence keys = *geditor::parse_key_sequence(b.keys);
+    if (runs(keys, geditor::command_binding(b.command))) windows.push_back(keys);
+  }
+  for (const geditor::CommandCall& c : emacs_calls) {
+    for (const auto& b : geditor::default_global_bindings()) {
+      const geditor::KeySequence keys = *geditor::parse_key_sequence(b.keys);
+      if (runs_call(keys, geditor::command_binding(b.command), c)) emacs.push_back(keys);
+    }
+  }
+  auto shortest = [](const std::vector<geditor::KeySequence>& v) {
+    const geditor::KeySequence* best = nullptr;
+    for (const auto& k : v) {
+      if (best == nullptr || k.size() < best->size()) best = &k;
+    }
+    return best == nullptr ? std::wstring() : geditor::key_sequence_to_string(*best);
+  };
+  const std::wstring w = shortest(windows);
+  const std::wstring e = shortest(emacs);
+  if (w.empty()) return e;
+  if (e.empty() || e == w) return w;
+  return w + L"  " + e;
+}
+
+}  // namespace
+
+TEST(menu_key_texts_match_the_rule_for_every_item) {
+  const char* settings[] = {
+      "{}",
+      R"({"keys": {"C-z": "undo", "C-S-s": null, "C-x C-s": null, "<f5>": ["set-wrap-mode", "none"]}})",
+      R"({"keys": {"C-/": "redo", "C-S-z": "redo", "C-c &": "copy", "C-x C-q": null}})",
+      R"({"keys": {"C-/": "undo", "C-c C-c": "quit", "<f6>": "toggle-whitespace-marks"}})",
+      // v2: same-action keys rebound, a longer kill-region key, a shared key.
+      R"({"keys": {"C-w": "end-of-line", "C-c k": "kill-region", "C-y": "paste", "C-x h": null}})",
+      R"({"keys": {"M-w": "copy", "C-S-v": null, "C-S-a": "mark-whole-buffer"}})",
+  };
+  for (const char* text : settings) {
+    Session s;
+    s.load(L"abc");
+    s.settings(text);
+    CHECK(s.ed.settings_errors().empty());
+    const MenuKeyTexts keys(s.ed);
+    size_t checked_items = 0;
+    for (const ModelRow& r : model_rows()) {
+      const std::wstring got = keys.text_for(*r.item);
+      const std::wstring want = rule_text(s, *r.item);
+      if (got != want) std::printf("  %s: %s\n", text, test::to_display(r.path).c_str());
+      CHECK_EQ(got, want);
+      ++checked_items;
+    }
+    CHECK_EQ(checked_items, std::size(kPlanRows));
+  }
 }
 
 // ---- [C2] View check and radio marks ----
@@ -499,7 +648,7 @@ TEST(menu_context_menu_is_the_start_of_the_edit_menu) {
     CHECK_EQ(a.key_text, b.key_text);
     CHECK_EQ(a.enabled, b.enabled);
   }
-  CHECK_EQ(keys.text_for(context[0]), std::wstring(L"C-z"));
+  CHECK_EQ(keys.text_for(context[0]), std::wstring(L"C-z  C-/"));
 }
 
 // ---- menu-bar-open ----
