@@ -17,6 +17,7 @@ add_executable(geditor_tests
   test_m3c_keys.cpp
   test_m3c_retry1.cpp
   test_m4a_eol.cpp
+  test_m4a_fix.cpp
   test_m4a_menu.cpp
   test_m4a_save.cpp
   test_layout_wrap.cpp

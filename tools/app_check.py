@@ -36,8 +36,9 @@ link and (when it can be created) a symbolic link.
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
-keys are posted as WM_KEYDOWN / WM_CHAR with the modifier state set through
-AttachThreadInput + SetKeyboardState, the clipboard checks use geditor's
+keys are posted as WM_KEYDOWN / WM_CHAR with the modifiers of each key in
+its lParam bits (M4a fix F2; the keyboard state is never set), the
+clipboard checks use geditor's
 private clipboard (read through WM_COPYDATA 'GSTA', written with 'GCBW',
 failures forced with 'GFLT'), and the questions are read and answered
 through 'GSTA' / 'GANS' instead of task dialogs. The real clipboard is
@@ -1679,6 +1680,38 @@ def check_library_default_headless(exe: pathlib.Path, out: pathlib.Path):
           f"exit={result.returncode} {line} {result.stderr.strip()[-200:]}")
 
 
+def check_headless_keys_ignore_held_ctrl(exe: pathlib.Path, work: pathlib.Path, settings: pathlib.Path):
+    """M4a fix F2 ([C7]): while this thread is attached to geditor's input
+    with Ctrl held in the shared keyboard state (what the user's real Ctrl
+    did to the old driver), a posted plain y inserts y and C-y (Ctrl in the
+    lParam bits of the key) yanks. Only this check holds a key
+    (d.held_keyboard_state); the driver never touches the keyboard state."""
+    app = d.App(exe, [str(work / "f2_keys.txt")], cwd=work, settings=settings)
+    try:
+        app.use_input()
+        stored = app.set_clipboard("Z")
+        with d.held_keyboard_state(app.hwnd, [d.VK_CONTROL, 0xA2]):  # VK_LCONTROL
+            held = d.user32.GetKeyState(d.VK_CONTROL) < 0
+            app.keys("y")
+            time.sleep(0.3)
+            plain = app.state()
+            app.keys("C-y")
+            time.sleep(0.3)
+            yanked = app.state()
+        check("[M4a fix F2] with Ctrl held in the shared keyboard state, a posted plain y inserts y",
+              held and plain.get("text") == "y" and plain.get("point") == "1",
+              f"Ctrl held={held}; after y text={plain.get('text')!r} point={plain.get('point')} "
+              f"message={plain.get('message')!r}")
+        check("[M4a fix F2] with Ctrl held in the shared keyboard state, C-y (Ctrl in the key's lParam bits) yanks",
+              stored and yanked.get("text") == "yZ" and yanked.get("point") == "2",
+              f"clipboard set={stored}; after C-y text={yanked.get('text')!r} point={yanked.get('point')} "
+              f"message={yanked.get('message')!r}")
+        after = d.user32.GetKeyState(d.VK_CONTROL) < 0
+        record("INFO", "[M4a fix F2] keyboard state after the check", f"Ctrl held={after} (expected False)")
+    finally:
+        app.kill()
+
+
 def run_headless_checks(exe: pathlib.Path, out: pathlib.Path):
     """[C2]-[C6] and [C10] of the headless packet: the window, the guard of
     the driver, the private clipboard, every question kind and button, bad
@@ -1727,15 +1760,22 @@ def run_headless_checks(exe: pathlib.Path, out: pathlib.Path):
                            ("ShowWindow 9", lambda: d.user32.ShowWindow(app.hwnd, 9)),
                            ("SetWindowPos move", lambda: d.user32.SetWindowPos(app.hwnd, None, 0, 0, 0, 0,
                                                                                d.SWP_NOSIZE | d.SWP_NOACTIVATE)),
-                           ("MoveWindow", lambda: d.user32.MoveWindow(app.hwnd, 0, 0, 10, 10, True))]:
+                           ("MoveWindow", lambda: d.user32.MoveWindow(app.hwnd, 0, 0, 10, 10, True)),
+                           ("AttachThreadInput", lambda: d.user32.AttachThreadInput(0, 0, False)),
+                           ("SetKeyboardState", lambda: d.user32.SetKeyboardState(None))]:
             try:
                 call()
             except d.DriverError:
                 refused.append(name)
         check("[C3] the driver refuses SendInput, keybd_event, SetForegroundWindow, BringWindowToTop, "
-              "SetActiveWindow, the clipboard and window moves in headless mode",
-              sorted(guarded) == sorted(d._GUARDED) and len(refused) == 8,
+              "SetActiveWindow, the clipboard, window moves, AttachThreadInput and SetKeyboardState "
+              "(M4a fix F2) in headless mode",
+              sorted(guarded) == sorted(d._GUARDED) and len(refused) == 10 and
+              {"AttachThreadInput", "SetKeyboardState"} <= set(d._GUARDED),
               f"guarded={guarded} refused={refused}")
+
+        # [M4a fix F2] Keys carry their own modifiers (in a window of its own).
+        check_headless_keys_ignore_held_ctrl(exe, work, settings)
 
         # [C10] Requests that geditor does not understand.
         rejected0 = int(app.state()["rejected"])
@@ -3261,6 +3301,58 @@ def menu_items(app) -> dict:
     return {item.path: item for item in app.menu_bar()}
 
 
+def run_m4a_fix_cr_lf_check(exe: pathlib.Path, work: pathlib.Path, shots: pathlib.Path, settings: pathlib.Path,
+                            names: list):
+    """M4a fix F1 ([C2]): the user's case. A mixed file "a" CR, "x" LF,
+    "b" CRLF; emptying the LF line puts its LF right after the CR. Saving
+    writes it as CR (HEAD 8eb6d6f wrote b"a\\r\\nb\\r\\n", read back as one
+    line less), says how many, and the reopened file has the same lines."""
+    path = work / "m4a_fix_cr_lf.txt"
+    path.write_bytes(b"a\rx\nb\r\n")
+    app = d.App(exe, [str(path)], cwd=work, settings=settings, height=300)
+    try:
+        app.use_input()
+        before = wait_state(app, lambda s: s.get("text") == "a\nx\nb\n")
+        app.keys("M-< C-n C-k")
+        wait_state(app, lambda s: s.get("text") == "a\n\nb\n")
+        app.keys("C-x C-s")
+        state = wait_state(app, lambda s: s.get("modified") == "0")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m4a_05_cr_lf_saved.png")
+        names.append("m4a_05_cr_lf_saved.png")
+        data = path.read_bytes()
+        want_message = f"Wrote {path}; saved 1 LF line end after a CR as CR to keep the lines"
+        check("[M4a fix F1] an LF line end right after a CR line end is saved as CR; the echo area gives the count",
+              data == b"a\r\rb\r\n" and state.get("message") == want_message and state.get("modified") == "0" and
+              state.get("text") == "a\n\nb\n",
+              f"lines before={before.get('text')!r}; bytes={data!r} message={state.get('message')!r} "
+              f"modified={state.get('modified')}")
+        # Marks: the default is CRLF (one each of LF, CRLF, CR when read), so
+        # the two CR lines are eol_other (blue) and the CRLF line eol (green).
+        marks = []
+        for row, (text, kind) in enumerate([("a", "CR"), ("", "CR"), ("b", "CRLF")]):
+            box = cell_box(state, row, len(text), 2)
+            marks.append((kind, count_where(shot, is_green, box), count_where(shot, is_blue, box)))
+        check("[M4a fix F1] after the save the buffer's line ends are those of the file (marks: CR, CR, CRLF)",
+              [(g > 0, b > 0) for _, g, b in marks] == [(False, True), (False, True), (True, False)] and
+              state.get("eol") == "Mixed(CRLF)",
+              f"(kind, eol px, eol_other px) per row {marks}; eol={state.get('eol')} (m4a_05_cr_lf_saved.png)")
+    finally:
+        app.kill()
+    app = d.App(exe, [str(path)], cwd=work, settings=settings, height=300)
+    try:
+        app.use_input()
+        state = wait_state(app, lambda s: s.get("text") == "a\n\nb\n")
+        time.sleep(0.3)
+        app.capture(shots / "m4a_06_cr_lf_reopened.png")
+        names.append("m4a_06_cr_lf_reopened.png")
+        check("[M4a fix F1] reopening the saved file gives the same three lines and an empty last line",
+              state.get("text") == "a\n\nb\n" and path.read_bytes() == b"a\r\rb\r\n",
+              f"text={state.get('text')!r} eol={state.get('eol')} (m4a_06_cr_lf_reopened.png)")
+    finally:
+        app.kill()
+
+
 def run_m4a_checks(exe: pathlib.Path, out: pathlib.Path):
     """[C2] (real app part), [C4], [C5], [C6] (headless capture), [C7] and
     [C10] of the M4a packet on the real app."""
@@ -3404,7 +3496,8 @@ def run_m4a_checks(exe: pathlib.Path, out: pathlib.Path):
     old_backup = fault_dir / "f.txt~"
     old_backup.write_bytes(b"older backup")
     faults = [
-        ("save-backup", "making the backup: Access is denied"),
+        # M4a fix F5: the backup step names the backup.
+        ("save-backup", f"making the backup {target}~: Access is denied"),
         ("save-inspect", "reading the file attributes: Access is denied"),
         ("save-link", "resolving the link: The name of the file cannot be resolved"),
         ("save-temp-create", "creating the temporary file: Access is denied"),
@@ -3518,6 +3611,8 @@ def run_m4a_checks(exe: pathlib.Path, out: pathlib.Path):
           "the same bytes", all(ok for _, ok, _ in combos), "; ".join(f"{n} {'same' if ok else 'DIFFERENT'} ({e})"
                                                                  for n, ok, e in combos))
 
+    run_m4a_fix_cr_lf_check(exe, work, shots, settings, names)
+
     # [C4] F5: a hard link keeps both names in sync; a symbolic link stays a link.
     links = work / "links"
     links.mkdir(exist_ok=True)
@@ -3530,6 +3625,15 @@ def run_m4a_checks(exe: pathlib.Path, out: pathlib.Path):
     try:
         app.use_input()
         app.type("H")
+        # M4a fix F5: the backup copy of the hard-link path failing names the backup.
+        app.fault("save-backup")
+        app.keys("C-x C-s")
+        want = f"Cannot write {a}: making the backup {a}~: Access is denied"
+        state = wait_state(app, lambda s: s.get("message") == want)
+        check("[M4a fix F5] a hard link: 'save-backup' fails naming the backup; nothing is written",
+              state.get("message") == want and a.read_bytes() == b"old\n" and b.read_bytes() == b"old\n" and
+              not pathlib.Path(str(a) + "~").exists() and not temporaries(links) and state.get("modified") == "1",
+              f"message={state.get('message')!r} a={a.read_bytes()!r} b={b.read_bytes()!r}")
         app.keys("C-x C-s")
         wait_state(app, lambda s: s.get("modified") == "0")
         nlink = os.stat(a).st_nlink

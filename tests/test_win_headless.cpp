@@ -205,3 +205,23 @@ TEST(win_state_line_keeps_every_value_on_one_line) {
            std::wstring(L"clipboard_text=a\\\\b\\r\\nc\n"));
   CHECK_EQ(geditor::win::state_line(L"message", L""), std::wstring(L"message=\n"));
 }
+
+// M4a fix F2: the modifiers of a headless key come from its lParam bits
+// (25 Ctrl, 26 Shift, 27 Alt) and match tools/app_driver.py
+// HEADLESS_KEY_BITS; the other bits of a real key message mean nothing.
+TEST(win_headless_key_modifiers_come_from_lparam_bits) {
+  using geditor::win::headless_key_modifiers;
+  CHECK_EQ(geditor::win::kHeadlessKeyCtrl, LPARAM{1} << 25);
+  CHECK_EQ(geditor::win::kHeadlessKeyShift, LPARAM{1} << 26);
+  CHECK_EQ(geditor::win::kHeadlessKeyAlt, LPARAM{1} << 27);
+  const LPARAM plain = 1 | (0x15 << 16);  // 'Y': repeat 1, scan code
+  geditor::win::ModifierState m = headless_key_modifiers(plain);
+  CHECK(!m.ctrl && !m.shift && !m.alt);
+  // The context bit (29) and the transition bits are not Alt.
+  m = headless_key_modifiers(plain | (LPARAM{1} << 29) | (LPARAM{1} << 30) | (LPARAM{1} << 31));
+  CHECK(!m.ctrl && !m.shift && !m.alt);
+  m = headless_key_modifiers(plain | geditor::win::kHeadlessKeyCtrl);
+  CHECK(m.ctrl && !m.shift && !m.alt);
+  m = headless_key_modifiers(plain | geditor::win::kHeadlessKeyShift | geditor::win::kHeadlessKeyAlt);
+  CHECK(!m.ctrl && m.shift && m.alt);
+}

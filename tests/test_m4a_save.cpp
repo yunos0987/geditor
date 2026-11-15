@@ -34,6 +34,19 @@ void edit_and_save(Session& s, const wchar_t* text) {
   s.keys(L"C-x C-s");
 }
 
+// Whether the last save_file call asked for a backup. No call at all is a
+// failure (and false), never an out-of-range access (M4a fix F6).
+bool last_save_asked_backup(const FakeHost& host) {
+  CHECK(!host.saves.empty());
+  return !host.saves.empty() && host.saves.back().second;
+}
+
+// The text of the last yes/no question; no question is a failure (and "").
+std::wstring last_yes_no_question(const FakeHost& host) {
+  CHECK_EQ(host.yes_no_questions.empty(), false);
+  return host.yes_no_questions.empty() ? std::wstring() : host.yes_no_questions.back();
+}
+
 }  // namespace
 
 // ---- [C4] / F3: "<file>~" on the first save of a file in this process ----
@@ -58,7 +71,7 @@ TEST(m4a_backup_only_on_the_first_save_of_a_file) {
   s.host.open_answers.push_back(geditor::OpenChoice::kReplace);
   s.ed.request_open(kPath);
   edit_and_save(s, L"4");
-  CHECK(!s.host.saves.back().second);
+  CHECK(!last_save_asked_backup(s.host));
   CHECK_EQ(s.host.file(kBackup), std::string("v1"));
 }
 
@@ -68,12 +81,12 @@ TEST(m4a_new_files_get_no_backup) {
   s.type(L"n");
   s.keys(L"C-x C-s");
   CHECK_EQ(s.host.file(L"C:\\work\\new.txt"), std::string("n"));
-  CHECK(!s.host.saves.back().second);
+  CHECK(!last_save_asked_backup(s.host));
   CHECK(!s.host.has_file(L"C:\\work\\new.txt~"));
   // The second save of it in this process: no backup either.
   s.type(L"m");
   s.keys(L"C-x C-s");
-  CHECK(!s.host.saves.back().second);
+  CHECK(!last_save_asked_backup(s.host));
   CHECK(!s.host.has_file(L"C:\\work\\new.txt~"));
   // write-file of an untitled buffer to a new name: none.
   Session u;
@@ -82,7 +95,7 @@ TEST(m4a_new_files_get_no_backup) {
   u.type(L"u.txt");
   u.keys(L"RET");
   CHECK_EQ(u.host.file(L"C:\\work\\u.txt"), std::string("x"));
-  CHECK(!u.host.saves.back().second);
+  CHECK(!last_save_asked_backup(u.host));
 }
 
 TEST(m4a_backup_setting_off_makes_none) {
@@ -90,7 +103,7 @@ TEST(m4a_backup_setting_off_makes_none) {
   s.settings(R"({"backup": false})");
   open_bytes(s, "v1");
   edit_and_save(s, L"2");
-  CHECK(!s.host.saves.back().second);
+  CHECK(!last_save_asked_backup(s.host));
   CHECK(!s.host.has_file(kBackup));
 }
 
@@ -100,13 +113,14 @@ TEST(m4a_backup_failure_stops_the_save) {
   open_bytes(s, "v1");
   s.host.fail_step = FakeHost::SaveStep::kBackup;
   edit_and_save(s, L"2");
-  CHECK_EQ(s.message(), std::wstring(L"Cannot write C:\\work\\s.txt: making the backup: Access is denied"));
+  CHECK_EQ(s.message(),
+           std::wstring(L"Cannot write C:\\work\\s.txt: making the backup C:\\work\\s.txt~: Access is denied"));
   CHECK_EQ(s.host.file(kPath), std::string("v1"));
   CHECK(!s.host.has_file(kBackup));
   CHECK(s.modified());
   // The next save is still the first successful one: it makes the backup.
   s.keys(L"C-x C-s");
-  CHECK(s.host.saves.back().second);
+  CHECK(last_save_asked_backup(s.host));
   CHECK_EQ(s.host.file(kBackup), std::string("v1"));
   CHECK(!s.modified());
 }
@@ -124,7 +138,7 @@ TEST(m4a_each_save_step_failure_is_reported_and_changes_nothing) {
       {FakeHost::SaveStep::kFlush, false, L"flushing the temporary file: The disk is full"},
       {FakeHost::SaveStep::kReplace, false, L"replacing the file: Access is denied"},
       {FakeHost::SaveStep::kMove, true, L"moving the temporary file: Access is denied"},
-      {FakeHost::SaveStep::kBackup, false, L"making the backup: Access is denied"},
+      {FakeHost::SaveStep::kBackup, false, L"making the backup C:\\work\\s.txt~: Access is denied"},
   };
   for (const Row& r : rows) {
     Session s;
@@ -159,7 +173,8 @@ TEST(m4a_external_change_asks_and_no_writes_nothing) {
   s.host.yes_no_answers.push_back(false);
   edit_and_save(s, L"2");
   CHECK_EQ(s.host.yes_no_dialogs, 1);
-  CHECK_EQ(s.host.yes_no_questions.back(),
+  CHECK_EQ(s.host.yes_no_questions.size(), size_t{1});
+  CHECK_EQ(last_yes_no_question(s.host),
            std::wstring(L"s.txt has changed on disk since it was read; save anyway?"));
   CHECK_EQ(s.message(), std::wstring(L"Not saved"));
   CHECK_EQ(s.host.file(kPath), std::string("changed elsewhere"));
@@ -203,7 +218,7 @@ TEST(m4a_deleted_file_is_saved_as_new_without_a_question) {
   edit_and_save(s, L"2");
   CHECK_EQ(s.host.yes_no_dialogs, 0);
   CHECK_EQ(s.host.file(kPath), std::string("v12"));
-  CHECK(!s.host.saves.back().second);  // a new file: no backup
+  CHECK(!last_save_asked_backup(s.host));  // a new file: no backup
   CHECK(!s.host.has_file(kBackup));
 }
 
@@ -230,7 +245,7 @@ TEST(m4a_write_file_elsewhere_uses_the_overwrite_question) {
   s.type(L"b.txt");
   s.keys(L"RET");
   CHECK_EQ(s.host.yes_no_dialogs, 1);
-  CHECK_EQ(s.host.yes_no_questions.back(), std::wstring(L"File C:\\work\\b.txt exists; overwrite?"));
+  CHECK_EQ(last_yes_no_question(s.host), std::wstring(L"File C:\\work\\b.txt exists; overwrite?"));
   CHECK_EQ(s.host.file(L"C:\\work\\b.txt"), std::string("xv1"));
 }
 

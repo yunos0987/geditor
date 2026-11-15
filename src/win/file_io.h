@@ -69,11 +69,17 @@ SaveFault save_fault_from_name(std::wstring_view name, bool* known);
 
 // Host::save_file (docs/PLAN.md 4.8, decisions F3 - F5):
 //  - an existing file: a temporary file ".<name>.<pid>.<n>.geditor-tmp" in
-//    the same folder is written and flushed, then ReplaceFileW swaps it in;
-//    the old file goes to a second temporary name and, with `backup`, is
-//    then renamed to "<file>~" (so that "<file>~" changes only when the save
+//    the same folder is written and flushed, then ReplaceFileW swaps it in
+//    (merge errors are not ignored: attributes or an ACL that cannot be
+//    carried over fail the save, M4a fix F4); the old file goes to
+//    a second temporary name ("...geditor-old") and, with `backup`, is then
+//    renamed to "<file>~" (so that "<file>~" changes only when the save
 //    succeeded; when that rename fails, the old file is put back and the save
 //    fails), else it is deleted;
+//  - temporary names: <name> is cut so that the whole name fits the longest
+//    name of the volume (GetVolumeInformationW; 255 when it cannot be read),
+//    M4a fix F3. When "<file>~" itself would be longer than that, the file
+//    is saved without a backup and the note says so;
 //  - a new file: the temporary file is moved to `path` (MoveFileExW);
 //  - a symbolic link: the same for the file it points to (its final path);
 //    "<file>~" goes next to that file;
@@ -82,10 +88,11 @@ SaveFault save_fault_from_name(std::wstring_view name, bool* known);
 //    sees the new content. A failure in the middle of that write leaves the
 //    file partly written; the error says so and names the backup;
 //  - a file with the read-only attribute: fails ("Access is denied").
-// On failure `error` is "<step>: <reason>", every temporary file is removed,
-// and the file and "<file>~" are unchanged (except the in-place case). On
-// success `error` may hold a note (a temporary file that could not be
-// removed).
+// On failure `error` is "<step>: <reason>" (the backup step names the
+// backup: "making the backup <file>~: <reason>", M4a fix F5), every temporary
+// file is removed, and the file and "<file>~" are unchanged (except the
+// in-place case). On success `error` may hold a note (no backup because of
+// the name length; a temporary file that could not be removed).
 bool save_file(const std::wstring& path, std::string_view bytes, bool backup, std::wstring& error,
                SaveFault fault = SaveFault::kNone);
 FileKind file_kind(const std::wstring& path);

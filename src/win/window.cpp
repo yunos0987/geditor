@@ -274,12 +274,33 @@ bool MainWindow::pre_translate(const MSG& msg) {
   // Another key before the release that would open the menu bar cancels it.
   if (menu_key_ != 0 && msg.wParam != menu_key_) menu_key_ = 0;
   ModifierState mods;
-  mods.ctrl = GetKeyState(VK_CONTROL) < 0;
-  mods.alt = GetKeyState(VK_MENU) < 0;
-  mods.shift = GetKeyState(VK_SHIFT) < 0;
+  if (headless_) {
+    // M4a fix F2: the modifiers come with the key (headless.h), never from
+    // the keyboard state, which the user's real keys also change.
+    mods = headless_key_modifiers(msg.lParam);
+  } else {
+    mods.ctrl = GetKeyState(VK_CONTROL) < 0;
+    mods.alt = GetKeyState(VK_MENU) < 0;
+    mods.shift = GetKeyState(VK_SHIFT) < 0;
+  }
   const unsigned scan_code = static_cast<unsigned>((msg.lParam >> 16) & 0x1FF);
   const std::optional<Key> key =
       translate_key_down(static_cast<unsigned>(msg.wParam), scan_code, mods, &layout_char, nullptr);
+  if (!key && headless_ && !mods.ctrl && !mods.alt) {
+    // TranslateMessage would make the character from the keyboard state:
+    // make it here from the layout and the posted Shift instead.
+    const char32_t c = layout_char(nullptr, static_cast<unsigned>(msg.wParam), scan_code, mods.shift);
+    if (c == 0) return false;
+    start_input_measure();
+    if (c >= 0x10000) {
+      const char32_t v = c - 0x10000;
+      handle_char(static_cast<wchar_t>(0xD800 + (v >> 10)));
+      handle_char(static_cast<wchar_t>(0xDC00 + (v & 0x3FF)));
+    } else {
+      handle_char(static_cast<wchar_t>(c));
+    }
+    return true;
+  }
   if (!key) return false;
   if (passes_to_system_when_unbound(*key) && !editor_.key_is_bound(*key)) return false;
   // Shift+F10 opens the context menu (decision B6, WM_CONTEXTMENU from

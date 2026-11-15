@@ -211,9 +211,20 @@ bool Editor::save_to(const std::wstring& path) {
   }
   // Decision F3: "<file>~" on the first save of an existing file.
   const bool backup = config_.backup && now.exists && !saved_before(path);
+  // M4a fix F1: an LF line end right after a CR line end is saved as CR, and
+  // the buffer gets the same line ends (not an undo step), so that no line
+  // is lost when the file is read again. A failed save puts the pieces back.
+  PieceList kept;
+  const size_t cr_kept = cr_kept_line_ends(main_.text, &kept);
+  PieceList original;
+  if (cr_kept > 0) {
+    original = main_.text.pieces();
+    main_.text.assign_pieces(kept);
+  }
   const std::string bytes = encode_utf8(main_.text, main_.format);
   error.clear();
   if (!host_.save_file(path, bytes, backup, error)) {
+    if (cr_kept > 0) main_.text.assign_pieces(original);
     fail(L"Cannot write " + path + (error.empty() ? std::wstring() : L": " + error));
     return false;
   }
@@ -223,6 +234,10 @@ bool Editor::save_to(const std::wstring& path) {
   main_.undo.mark_saved();
   message_ = L"Wrote " + path;
   if (!note.empty()) message_ += L" (" + note + L")";
+  if (cr_kept > 0) {
+    message_ += L"; saved " + std::to_wstring(cr_kept) + (cr_kept == 1 ? L" LF line end" : L" LF line ends") +
+                L" after a CR as CR to keep the lines";
+  }
   // The new state on disk for the next check.
   FileInfo after;
   std::wstring after_error;

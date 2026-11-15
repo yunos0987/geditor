@@ -53,6 +53,15 @@ PieceTree make_piece_tree(DecodedText& decoded);
 // lone surrogate is written as U+FFFD.
 std::string encode_utf8(const PieceTree& tree, const FileFormat& format);
 
+// An LF line end right after a CR line end would be written "\r" "\n" and
+// read back as one CRLF, losing a line (M4a fix F1). Returns how many such
+// LF line ends `tree` has, counting a run of them after one CR ("\r" then
+// "\n\n"): each one follows a CR once the one before it is CR. When the
+// count is not 0, `pieces` receives the pieces of `tree` with those line
+// ends made CR (the same text; other line ends unchanged), else it is
+// cleared.
+size_t cr_kept_line_ends(const PieceTree& tree, PieceList* pieces);
+
 // "LF" / "CRLF" / "CR".
 const wchar_t* eol_name(Eol eol);
 // "lf" / "crlf" / "cr" (set-eol and the settings); false for anything else.

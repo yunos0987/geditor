@@ -154,7 +154,7 @@ bool FakeHost::save_file(const std::wstring& path, std::string_view bytes, bool 
     return false;
   }
   if (exists && backup && fail == SaveStep::kBackup) {
-    error = L"making the backup: Access is denied";
+    error = L"making the backup " + path + L"~: Access is denied";
     return false;
   }
   const std::string old = exists ? existing->second.bytes : std::string();

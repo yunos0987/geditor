@@ -32,6 +32,17 @@
 // names the submenu that a visible window drops down (menu_open: File).
 // A request that is not understood returns 0, is counted in the state
 // ("rejected", "last_rejected") and goes to OutputDebugString.
+//
+// Headless keys (M4a fix F2): the tools post WM_KEYDOWN / WM_SYSKEYDOWN
+// with the modifiers of that key in bits of lParam that Windows leaves 0
+// (25-28 are reserved): kHeadlessKeyCtrl, kHeadlessKeyShift and
+// kHeadlessKeyAlt. A headless window takes the modifiers from these bits
+// only, never from GetKeyState, so the user's real keys (a held Ctrl) do not
+// mix in, and the tools do not touch the keyboard state (no
+// AttachThreadInput / SetKeyboardState). A key without Ctrl and Alt that
+// makes a character is turned into that character with the keyboard layout
+// and the Shift bit (instead of TranslateMessage, which reads the keyboard
+// state). A visible window keeps GetKeyState and TranslateMessage.
 #pragma once
 
 #include <cstddef>
@@ -42,9 +53,23 @@
 
 #include <windows.h>
 
+#include "input.h"
 #include "question.h"
 
 namespace geditor::win {
+
+inline constexpr LPARAM kHeadlessKeyCtrl = LPARAM{1} << 25;
+inline constexpr LPARAM kHeadlessKeyShift = LPARAM{1} << 26;
+inline constexpr LPARAM kHeadlessKeyAlt = LPARAM{1} << 27;
+
+// The modifiers of a headless key message (the bits above).
+inline ModifierState headless_key_modifiers(LPARAM lparam) {
+  ModifierState mods;
+  mods.ctrl = (lparam & kHeadlessKeyCtrl) != 0;
+  mods.shift = (lparam & kHeadlessKeyShift) != 0;
+  mods.alt = (lparam & kHeadlessKeyAlt) != 0;
+  return mods;
+}
 
 inline constexpr ULONG_PTR kCopyDataState = 0x41545347;          // 'GSTA'
 inline constexpr ULONG_PTR kCopyDataClipboardWrite = 0x57424347;  // 'GCBW'

@@ -47,7 +47,7 @@ std::string get(const std::wstring& path) {
 }
 
 bool exists(const std::wstring& path) {
-  return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+  return GetFileAttributesW(geditor::win::extended_length_path(path).c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 // The names in `dir`, sorted, for "no temporary file is left" checks.
@@ -77,7 +77,7 @@ bool has_temporary(const std::wstring& dir) {
 
 void remove_tree(const std::wstring& dir) {
   for (const std::wstring& n : listing(dir)) {
-    const std::wstring p = dir + L"\\" + n;
+    const std::wstring p = geditor::win::extended_length_path(dir + L"\\" + n);
     SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
     if (!DeleteFileW(p.c_str())) RemoveDirectoryW(p.c_str());
   }
@@ -152,7 +152,8 @@ TEST(win_save_each_step_failure_changes_nothing) {
       {SaveFault::kTempWrite, false, L"writing the temporary file: The disk is full"},
       {SaveFault::kFlush, false, L"flushing the temporary file: The disk is full"},
       {SaveFault::kReplace, false, L"replacing the file: Access is denied"},
-      {SaveFault::kBackup, false, L"making the backup: Access is denied"},
+      // "<B>": the backup path (M4a fix F5).
+      {SaveFault::kBackup, false, L"making the backup <B>: Access is denied"},
       {SaveFault::kTempWrite, true, L"writing the temporary file: The disk is full"},
       {SaveFault::kFlush, true, L"flushing the temporary file: The disk is full"},
       {SaveFault::kMove, true, L"moving the temporary file: Access is denied"},
@@ -165,8 +166,10 @@ TEST(win_save_each_step_failure_changes_nothing) {
     const std::vector<std::wstring> before = listing(dir);
     std::wstring error;
     CHECK(!geditor::win::save_file(file, "new content", true, error, r.fault));
-    if (error != r.step) std::printf("  fault %d\n", static_cast<int>(r.fault));
-    CHECK_EQ(error, std::wstring(r.step));
+    std::wstring expected = r.step;
+    if (const size_t b = expected.find(L"<B>"); b != std::wstring::npos) expected.replace(b, 3, file + L"~");
+    if (error != expected) std::printf("  fault %d\n", static_cast<int>(r.fault));
+    CHECK_EQ(error, expected);
     CHECK_EQ(get(file), r.new_file ? std::string("<missing>") : std::string("original"));
     CHECK_EQ(get(file + L"~"), std::string("older backup"));
     CHECK(!has_temporary(dir));
@@ -184,7 +187,7 @@ TEST(win_save_real_backup_failure_puts_the_old_file_back) {
   CreateDirectoryW((file + L"~").c_str(), nullptr);
   std::wstring error;
   CHECK(!geditor::win::save_file(file, "new", true, error));
-  CHECK(error.find(L"making the backup: ") == 0);
+  CHECK(error.find(L"making the backup " + file + L"~: ") == 0);
   CHECK_EQ(get(file), std::string("original"));
   CHECK((GetFileAttributesW((file + L"~").c_str()) & FILE_ATTRIBUTE_DIRECTORY) != 0);
   CHECK(!has_temporary(dir));
@@ -236,7 +239,7 @@ TEST(win_save_hard_link_writes_in_place) {
   CHECK_EQ(link_count(a + L"~"), DWORD{1});
   // A failure of the backup copy stops before writing.
   CHECK(!geditor::win::save_file(a, "newer", true, error, SaveFault::kBackup));
-  CHECK_EQ(error, std::wstring(L"making the backup: Access is denied"));
+  CHECK_EQ(error, L"making the backup " + a + L"~: Access is denied");
   CHECK_EQ(get(a), std::string("new"));
   CHECK_EQ(get(a + L"~"), std::string("old content"));
   // A failure of the in-place write says so and names the backup.
@@ -245,6 +248,105 @@ TEST(win_save_hard_link_writes_in_place) {
                       L"~ has the old content");
   CHECK_EQ(get(a + L"~"), std::string("new"));  // the backup of this attempt
   CHECK(!has_temporary(dir));
+  remove_tree(dir);
+}
+
+// M4a fix F5: a real failure of the hard-link backup ("<file>~" is a folder)
+// names the backup too, and nothing is written.
+TEST(win_save_hard_link_backup_failure_names_the_backup) {
+  const std::wstring dir = make_dir(L"hard_backup");
+  const std::wstring a = dir + L"\\a.txt";
+  const std::wstring b = dir + L"\\b.txt";
+  put(a, "old content");
+  CHECK(CreateHardLinkW(b.c_str(), a.c_str(), nullptr));
+  CreateDirectoryW((a + L"~").c_str(), nullptr);
+  std::wstring error;
+  CHECK(!geditor::win::save_file(a, "new", true, error));
+  CHECK(error.find(L"making the backup " + a + L"~: ") == 0);
+  CHECK_EQ(get(a), std::string("old content"));
+  CHECK_EQ(get(b), std::string("old content"));
+  CHECK(!has_temporary(dir));
+  remove_tree(dir);
+}
+
+namespace {
+
+// The longest name of the volume of the test folder (255 on NTFS).
+size_t volume_name_limit() {
+  const std::wstring root = exe_directory().substr(0, 3);  // "C:\"
+  DWORD length = 0;
+  if (!GetVolumeInformationW(root.c_str(), nullptr, 0, nullptr, &length, nullptr, nullptr, 0)) return 255;
+  return length;
+}
+
+}  // namespace
+
+// M4a fix F3: a 240-character name is saved with "<file>~" (the temporary
+// names are cut to fit); a name of the volume's limit is saved, without a
+// backup when one is asked for, and the note names it. No temporary file is
+// left. HEAD 8eb6d6f failed the 240 case at "creating the temporary file".
+TEST(win_save_long_names_fit_the_volume_limit) {
+  const size_t limit = volume_name_limit();
+  std::printf("  volume name limit: %zu\n", limit);
+  CHECK(limit >= 240);
+  const std::wstring dir = make_dir(L"long");
+  std::wstring error;
+
+  const std::wstring f240 = dir + L"\\" + std::wstring(236, L'n') + L".txt";
+  put(f240, "v1");
+  CHECK(geditor::win::save_file(f240, "v2", true, error));
+  CHECK(error.empty());
+  CHECK_EQ(get(f240), std::string("v2"));
+  CHECK_EQ(get(f240 + L"~"), std::string("v1"));
+  CHECK(!has_temporary(dir));
+
+  // 240 units with surrogate pairs where the temporary name is cut.
+  std::wstring pairs;
+  for (int i = 0; i < 18; ++i) pairs += L"\xD83D\xDE00";
+  const std::wstring e240 = dir + L"\\" + std::wstring(200, L'e') + pairs + L".txt";
+  CHECK_EQ(e240.size() - dir.size() - 1, size_t{240});
+  put(e240, "e1");
+  CHECK(geditor::win::save_file(e240, "e2", true, error));
+  CHECK(error.empty());
+  CHECK_EQ(get(e240), std::string("e2"));
+  CHECK_EQ(get(e240 + L"~"), std::string("e1"));
+  CHECK(!has_temporary(dir));
+
+  const std::wstring full = dir + L"\\" + std::wstring(limit - 4, L'm') + L".txt";
+  put(full, "w1");
+  CHECK(geditor::win::save_file(full, "w2", false, error));
+  CHECK(error.empty());
+  CHECK_EQ(get(full), std::string("w2"));
+  CHECK(geditor::win::save_file(full, "w3", true, error));
+  CHECK_EQ(error, L"no backup: " + full + L"~ would be longer than " + std::to_wstring(limit) + L" characters");
+  CHECK_EQ(get(full), std::string("w3"));
+  CHECK(!exists(full + L"~"));
+  CHECK(!has_temporary(dir));
+
+  // A new file of the limit (no backup to make).
+  const std::wstring fresh = dir + L"\\" + std::wstring(limit, L'k');
+  CHECK(geditor::win::save_file(fresh, "k", true, error));
+  CHECK(error.empty());
+  CHECK_EQ(get(fresh), std::string("k"));
+  CHECK(!has_temporary(dir));
+  CHECK_EQ(listing(dir).size(), size_t{6});  // f240, its ~, e240, its ~, full, fresh
+  remove_tree(dir);
+}
+
+// M4a fix F4: an injected ReplaceFileW failure on a long name keeps PLAN 4.8
+// (the old file and "<file>~" unchanged, no temporary file).
+TEST(win_save_replace_failure_on_a_long_name_changes_nothing) {
+  const std::wstring dir = make_dir(L"long_fault");
+  const std::wstring file = dir + L"\\" + std::wstring(236, L'r') + L".txt";
+  put(file, "original");
+  put(file + L"~", "older backup");
+  std::wstring error;
+  CHECK(!geditor::win::save_file(file, "new", true, error, SaveFault::kReplace));
+  CHECK_EQ(error, std::wstring(L"replacing the file: Access is denied"));
+  CHECK_EQ(get(file), std::string("original"));
+  CHECK_EQ(get(file + L"~"), std::string("older backup"));
+  CHECK(!has_temporary(dir));
+  CHECK_EQ(listing(dir).size(), size_t{2});
   remove_tree(dir);
 }
 

@@ -246,12 +246,36 @@ void split_path(const std::wstring& path, std::wstring* dir, std::wstring* name)
   *name = slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
-// A name in `dir` that no other save uses: ".<name>.<pid>.<n>.<suffix>".
-std::wstring temporary_name(const std::wstring& dir, const std::wstring& name, const wchar_t* suffix) {
+// The longest name (one path component) that the volume of `dir` allows;
+// 255 when it cannot be read (M4a fix F3).
+size_t max_name_length(const std::wstring& dir) {
+  constexpr size_t kDefault = 255;
+  if (dir.empty()) return kDefault;
+  const std::wstring path = extended_length_path(dir);
+  std::wstring root(path.size() + MAX_PATH, L'\0');
+  if (!GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size()))) return kDefault;
+  root.resize(wcslen(root.c_str()));
+  DWORD length = 0;
+  if (!GetVolumeInformationW(root.c_str(), nullptr, 0, nullptr, &length, nullptr, nullptr, 0) || length == 0) {
+    return kDefault;
+  }
+  return length;
+}
+
+// A name in `dir` that no other save uses: ".<name>.<pid>.<n>.<suffix>". The
+// <name> part is cut so that the whole name has at most `limit` characters
+// (M4a fix F3); the process id and the counter keep it unique.
+std::wstring temporary_name(const std::wstring& dir, const std::wstring& name, const wchar_t* suffix,
+                            size_t limit) {
   static unsigned long counter = 0;  // constant-initialized: no static initializer
   ++counter;
-  return dir + L"." + name + L"." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(counter) +
-         L"." + suffix;
+  const std::wstring tail =
+      L"." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(counter) + L"." + suffix;
+  const size_t room = limit > tail.size() + 1 ? limit - tail.size() - 1 : 0;
+  std::wstring part = name.substr(0, room);
+  // Never half of a surrogate pair.
+  if (part.size() < name.size() && !part.empty() && (part.back() & 0xFC00) == 0xD800) part.pop_back();
+  return dir + L"." + part + tail;
 }
 
 // The final path of a link, without the "\\?\" prefix.
@@ -290,14 +314,14 @@ bool write_all(HANDLE file, std::string_view bytes, DWORD* error) {
 
 // Writes and flushes a new temporary file next to `target`; on failure it is
 // removed.
-bool write_temporary(const std::wstring& target, std::string_view bytes, SaveFault fault, std::wstring* temp,
-                     std::wstring& error) {
+bool write_temporary(const std::wstring& target, std::string_view bytes, SaveFault fault, size_t limit,
+                     std::wstring* temp, std::wstring& error) {
   std::wstring dir;
   std::wstring name;
   split_path(target, &dir, &name);
   HANDLE h = INVALID_HANDLE_VALUE;
   for (int attempt = 0; attempt < 16 && h == INVALID_HANDLE_VALUE; ++attempt) {
-    *temp = temporary_name(dir, name, L"geditor-tmp");
+    *temp = temporary_name(dir, name, L"geditor-tmp", limit);
     if (fault == SaveFault::kTempCreate) return step_failed(error, L"creating the temporary file", ERROR_ACCESS_DENIED);
     h = CreateFileW(extended_length_path(*temp).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                     FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -333,9 +357,10 @@ bool write_temporary(const std::wstring& target, std::string_view bytes, SaveFau
   return step_failed(error, step, e);
 }
 
-bool save_new(const std::wstring& path, std::string_view bytes, SaveFault fault, std::wstring& error) {
+bool save_new(const std::wstring& path, std::string_view bytes, SaveFault fault, size_t limit,
+              std::wstring& error) {
   std::wstring temp;
-  if (!write_temporary(path, bytes, fault, &temp, error)) return false;
+  if (!write_temporary(path, bytes, fault, limit, &temp, error)) return false;
   // No MOVEFILE_REPLACE_EXISTING: a file that appeared meanwhile is not
   // overwritten.
   if (fault == SaveFault::kMove ||
@@ -347,19 +372,22 @@ bool save_new(const std::wstring& path, std::string_view bytes, SaveFault fault,
   return true;
 }
 
-bool save_replace(const std::wstring& target, std::string_view bytes, bool backup, SaveFault fault,
+bool save_replace(const std::wstring& target, std::string_view bytes, bool backup, SaveFault fault, size_t limit,
                   std::wstring& error) {
   std::wstring temp;
-  if (!write_temporary(target, bytes, fault, &temp, error)) return false;
+  if (!write_temporary(target, bytes, fault, limit, &temp, error)) return false;
   std::wstring dir;
   std::wstring name;
   split_path(target, &dir, &name);
   // The old file goes to a private name first: "<file>~" changes only when
   // everything else worked.
-  const std::wstring old = temporary_name(dir, name, L"geditor-old");
+  const std::wstring old = temporary_name(dir, name, L"geditor-old", limit);
+  // No flags (M4a fix F4: merge errors are not ignored): when the attributes
+  // or the ACL of the old file cannot be carried over, the save fails like
+  // any other failure of ReplaceFileW.
   if (fault == SaveFault::kReplace ||
       !ReplaceFileW(extended_length_path(target).c_str(), extended_length_path(temp).c_str(),
-                    extended_length_path(old).c_str(), REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) {
+                    extended_length_path(old).c_str(), 0, nullptr, nullptr)) {
     const DWORD e = fault == SaveFault::kReplace ? ERROR_ACCESS_DENIED : GetLastError();
     std::wstring extra;
     if (!path_exists(target) && path_exists(old)) {
@@ -377,6 +405,8 @@ bool save_replace(const std::wstring& target, std::string_view bytes, bool backu
   }
   if (backup) {
     const std::wstring backup_path = target + L"~";
+    // M4a fix F5: the message names the backup.
+    const std::wstring step = L"making the backup " + backup_path;
     if (fault == SaveFault::kBackup ||
         !MoveFileExW(extended_length_path(old).c_str(), extended_length_path(backup_path).c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -385,11 +415,11 @@ bool save_replace(const std::wstring& target, std::string_view bytes, bool backu
       if (!MoveFileExW(extended_length_path(old).c_str(), extended_length_path(target).c_str(),
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         const DWORD back = GetLastError();
-        step_failed(error, L"making the backup", e);
+        step_failed(error, step.c_str(), e);
         error += L"; the file has the new content and the old one is " + old + L" (" + error_text(back) + L")";
         return false;
       }
-      return step_failed(error, L"making the backup", e);
+      return step_failed(error, step.c_str(), e);
     }
   } else if (!DeleteFileW(extended_length_path(old).c_str())) {
     error = L"cannot remove " + old + L": " + error_text(GetLastError());  // a note: the save worked
@@ -398,14 +428,14 @@ bool save_replace(const std::wstring& target, std::string_view bytes, bool backu
 }
 
 // A file with several hard links is written in place (decision F5).
-bool save_in_place(const std::wstring& target, std::string_view bytes, bool backup, SaveFault fault,
+bool save_in_place(const std::wstring& target, std::string_view bytes, bool backup, SaveFault fault, size_t limit,
                    std::wstring& error) {
   const std::wstring backup_path = target + L"~";
   if (backup) {
     std::wstring dir;
     std::wstring name;
     split_path(target, &dir, &name);
-    const std::wstring copy = temporary_name(dir, name, L"geditor-tmp");
+    const std::wstring copy = temporary_name(dir, name, L"geditor-tmp", limit);
     DWORD e = ERROR_ACCESS_DENIED;
     bool ok = fault != SaveFault::kBackup &&
               CopyFileW(extended_length_path(target).c_str(), extended_length_path(copy).c_str(), TRUE);
@@ -420,7 +450,7 @@ bool save_in_place(const std::wstring& target, std::string_view bytes, bool back
         SetFileAttributesW(extended_length_path(copy).c_str(), FILE_ATTRIBUTE_NORMAL);
         delete_file(copy);
       }
-      return step_failed(error, L"making the backup", e);
+      return step_failed(error, (L"making the backup " + backup_path).c_str(), e);
     }
   }
   Handle file(CreateFileW(extended_length_path(target).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
@@ -463,7 +493,10 @@ bool save_file(const std::wstring& path, std::string_view bytes, bool backup, st
   if (!GetFileAttributesExW(extended_length_path(path).c_str(), GetFileExInfoStandard, &own)) {
     const DWORD e = GetLastError();
     if (file_kind_from_error(e) != FileKind::kNone) return step_failed(error, L"reading the file attributes", e);
-    return save_new(path, bytes, fault, error);
+    std::wstring dir;
+    std::wstring name;
+    split_path(path, &dir, &name);
+    return save_new(path, bytes, fault, max_name_length(dir), error);
   }
   if ((own.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
     error = L"reading the file attributes: the path is a folder";
@@ -491,8 +524,21 @@ bool save_file(const std::wstring& path, std::string_view bytes, bool backup, st
     error = error_text(ERROR_ACCESS_DENIED) + L" (the file is read-only)";
     return false;
   }
-  if (info.nNumberOfLinks >= 2) return save_in_place(target, bytes, backup, fault, error);
-  return save_replace(target, bytes, backup, fault, error);
+  std::wstring dir;
+  std::wstring name;
+  split_path(target, &dir, &name);
+  const size_t limit = max_name_length(dir);
+  // M4a fix F3: "<name>~" longer than the volume allows cannot exist; the
+  // file is saved without a backup and the note says so.
+  std::wstring note;
+  if (backup && name.size() + 1 > limit) {
+    backup = false;
+    note = L"no backup: " + target + L"~ would be longer than " + std::to_wstring(limit) + L" characters";
+  }
+  const bool saved = info.nNumberOfLinks >= 2 ? save_in_place(target, bytes, backup, fault, limit, error)
+                                              : save_replace(target, bytes, backup, fault, limit, error);
+  if (saved && !note.empty()) error = error.empty() ? note : note + L"; " + error;
+  return saved;
 }
 
 FileKind file_kind(const std::wstring& path) {

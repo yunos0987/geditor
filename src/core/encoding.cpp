@@ -235,6 +235,49 @@ std::string encode_utf8(const PieceTree& tree, const FileFormat& format) {
   return out;
 }
 
+size_t cr_kept_line_ends(const PieceTree& tree, PieceList* pieces) {
+  pieces->clear();
+  const PieceList in = tree.pieces();
+  size_t changed = 0;
+  size_t offset = 0;
+  bool after_cr = false;  // the text so far ends with a CR line end
+  for (const Piece& p : in) {
+    if (p.length == 0) {
+      pieces->push_back(p);
+      continue;
+    }
+    if (after_cr && p.eol == Eol::kLf && p.line_feeds > 0) {
+      // Only the '\n' at the start of the piece follow the CR directly.
+      size_t lead = 0;
+      while (lead < p.length && tree.char_at(offset + lead) == L'\n') ++lead;
+      if (lead > 0) {
+        Piece head = p;
+        head.length = lead;
+        head.line_feeds = lead;
+        head.eol = Eol::kCr;
+        pieces->push_back(head);
+        changed += lead;
+        if (lead < p.length) {
+          Piece tail = p;
+          tail.start += lead;
+          tail.length -= lead;
+          tail.line_feeds -= lead;
+          pieces->push_back(tail);
+        }
+        // A piece of line ends only: the text still ends with a CR.
+        after_cr = lead == p.length;
+        offset += p.length;
+        continue;
+      }
+    }
+    pieces->push_back(p);
+    after_cr = p.eol == Eol::kCr && tree.char_at(offset + p.length - 1) == L'\n';
+    offset += p.length;
+  }
+  if (changed == 0) pieces->clear();
+  return changed;
+}
+
 const wchar_t* eol_name(Eol eol) {
   switch (eol) {
     case Eol::kCrLf: return L"CRLF";

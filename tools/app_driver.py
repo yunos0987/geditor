@@ -3,14 +3,18 @@
 Used by tools/app_check.py. With HEADLESS (the default of this module and
 of app_check; a caller sets HEADLESS = False to show windows) every
 geditor is started with --headless: its window is outside every monitor and
-never activated, keys are posted (WM_KEYDOWN / WM_CHAR with the modifier
-state set through AttachThreadInput + SetKeyboardState), the clipboard is a
-private store inside geditor and questions are read and answered through
-WM_COPYDATA (App.state / wait_question / answer). In headless mode the
-calls that would take the user's foreground, keyboard, clipboard or screen
-(SendInput, SetForegroundWindow, BringWindowToTop, SetActiveWindow,
-keybd_event, the clipboard functions, MoveWindow, activating ShowWindow /
-SetWindowPos) raise DriverError instead of running (see _GUARDED).
+never activated, keys are posted (WM_KEYDOWN / WM_CHAR; the modifiers of
+each key ride in lParam bits 25-27, src/win/headless.h, so that the shared
+keyboard state, which the user's real keys change, is never read or set),
+the clipboard is a private store inside geditor and questions are read and
+answered through WM_COPYDATA (App.state / wait_question / answer). In
+headless mode the calls that would take the user's foreground, keyboard,
+clipboard or screen (SendInput, SetForegroundWindow, BringWindowToTop,
+SetActiveWindow, SetFocus, keybd_event, AttachThreadInput,
+SetKeyboardState, the clipboard functions, MoveWindow, activating
+ShowWindow / SetWindowPos) raise DriverError instead of running (see
+_GUARDED). The one exception is held_keyboard_state(), which only the F2
+check of app_check uses to play the user's held Ctrl.
 
 Without HEADLESS (--visible) keys are sent with SendInput, which only
 reaches the foreground window: every send first checks that the geditor
@@ -84,6 +88,8 @@ _GUARDED = {
     "BringWindowToTop": None, "SetActiveWindow": None, "SetFocus": None,
     "OpenClipboard": None, "EmptyClipboard": None, "SetClipboardData": None,
     "GetClipboardData": None, "MoveWindow": None,
+    # M4a fix F2: the keyboard state is shared with the user's real keys.
+    "AttachThreadInput": None, "SetKeyboardState": None,
     "ShowWindow": _show_does_not_activate,
     "SetWindowPos": _set_pos_does_not_move_or_activate,
 }
@@ -149,6 +155,9 @@ PW_RENDERFULLCONTENT = 0x00000002
 VK_SHIFT = 0x10
 VK_CONTROL = 0x11
 VK_MENU = 0x12
+# M4a fix F2 (src/win/headless.h): the modifiers of a headless key in
+# lParam bits that Windows leaves 0.
+HEADLESS_KEY_BITS = {VK_CONTROL: 1 << 25, VK_SHIFT: 1 << 26, VK_MENU: 1 << 27}
 
 NAMED_KEYS = {
     "RET": 0x0D, "TAB": 0x09, "ESC": 0x1B, "DEL": 0x08, "SPC": 0x20,
@@ -613,9 +622,11 @@ class App:
             time.sleep(pause_s)
 
     def _post_key(self, key: str):
-        """Posts WM_KEYDOWN / WM_SYSKEYDOWN with the modifier state set
-        through the shared input state of AttachThreadInput (GetKeyState in
-        geditor then sees Ctrl / Alt / Shift as if they were held)."""
+        """Posts WM_KEYDOWN / WM_SYSKEYDOWN. Headless: the modifiers ride in
+        lParam bits (HEADLESS_KEY_BITS). Visible (--input post or a locked
+        desktop): the modifier state is set through the shared input state of
+        AttachThreadInput (GetKeyState in geditor then sees Ctrl / Alt /
+        Shift as if they were held)."""
         vk, mods = _parse_chord(key)
         self._post_vk(vk, mods)
 
@@ -624,6 +635,9 @@ class App:
         self._post_vk(vk, [vk] if vk in (VK_MENU, VK_CONTROL, VK_SHIFT) else [])
 
     def _post_vk(self, vk: int, mods: list):
+        if self.headless:
+            self._post_vk_headless(vk, mods)
+            return
         app_thread = user32.GetWindowThreadProcessId(self.hwnd, None)
         own_thread = ctypes.windll.kernel32.GetCurrentThreadId()
         if not user32.AttachThreadInput(own_thread, app_thread, True):
@@ -645,6 +659,20 @@ class App:
             user32.SetKeyboardState((ctypes.c_ubyte * 256)())
         finally:
             user32.AttachThreadInput(own_thread, app_thread, False)
+
+    def _post_vk_headless(self, vk: int, mods: list):
+        """M4a fix F2: the key with its own modifiers in lParam; the keyboard
+        state is left alone."""
+        alt = VK_MENU in mods
+        scan = user32.MapVirtualKeyW(vk, 0)
+        lparam = 1 | (scan << 16) | ((1 << 24) if vk in EXTENDED_KEYS else 0) | ((1 << 29) if alt else 0)
+        for m in mods:
+            lparam |= HEADLESS_KEY_BITS[m]
+        user32.PostMessageW(self.hwnd, WM_SYSKEYDOWN if alt else WM_KEYDOWN, vk, lparam)
+        time.sleep(0.05)
+        up = lparam | (1 << 30) | (1 << 31)  # same bits: nothing reads them on the release
+        user32.PostMessageW(self.hwnd, WM_SYSKEYUP if alt else WM_KEYUP, vk, up)
+        time.sleep(0.05)
 
     def type(self, text: str, pause_s: float = 0.05):
         """Types text with KEYEVENTF_UNICODE (VK_PACKET -> WM_CHAR), or posts
@@ -728,6 +756,37 @@ def _send(inputs: list):
     sent = user32.SendInput(len(inputs), array, ctypes.sizeof(INPUT))
     if sent != len(inputs):
         raise DriverError(f"SendInput sent {sent} of {len(inputs)} (error {ctypes.get_last_error()})")
+
+
+class held_keyboard_state:
+    """Only for the M4a fix F2 check of app_check: attaches this thread to
+    the input of `hwnd`'s thread and marks the virtual keys `vks` as held in
+    the shared keyboard state, as the user's real keys would while a headless
+    run posts keys. It calls AttachThreadInput / SetKeyboardState around the
+    headless guard; the keyboard state is cleared and the thread detached on
+    exit. Never used to send keys."""
+
+    def __init__(self, hwnd, vks: list):
+        self.hwnd = hwnd
+        self.vks = vks
+        self.own = ctypes.windll.kernel32.GetCurrentThreadId()
+        self.app = user32.GetWindowThreadProcessId(hwnd, None)
+
+    def __enter__(self):
+        raw = user32._dll
+        if not raw.AttachThreadInput(self.own, self.app, True):
+            raise DriverError("AttachThreadInput failed")
+        state = (ctypes.c_ubyte * 256)()
+        for vk in self.vks:
+            state[vk] = 0x80
+        raw.SetKeyboardState(state)
+        return self
+
+    def __exit__(self, *_):
+        raw = user32._dll
+        raw.SetKeyboardState((ctypes.c_ubyte * 256)())
+        raw.AttachThreadInput(self.own, self.app, False)
+        return False
 
 
 class COPYDATASTRUCT(ctypes.Structure):
