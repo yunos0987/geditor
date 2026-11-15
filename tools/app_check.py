@@ -3381,7 +3381,7 @@ def run_m4a_fix_cr_lf_check(exe: pathlib.Path, work: pathlib.Path, shots: pathli
                             names: list):
     """M4a fix F1 ([C2]): the user's case. A mixed file "a" CR, "x" LF,
     "b" CRLF; emptying the LF line puts its LF right after the CR. Saving
-    writes it as CR (HEAD 8eb6d6f wrote b"a\\r\\nb\\r\\n", read back as one
+    writes it as CR (HEAD edef20c wrote b"a\\r\\nb\\r\\n", read back as one
     line less), says how many, and the reopened file has the same lines."""
     path = work / "m4a_fix_cr_lf.txt"
     path.write_bytes(b"a\rx\nb\r\n")

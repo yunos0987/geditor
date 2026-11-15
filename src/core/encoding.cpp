@@ -274,7 +274,7 @@ bool mb_to_wide(const CodePage& cp, bool strict, std::string_view bytes, std::ws
 // `expected` (when not 0, reading a file: the bytes of the file) sizes the
 // first buffer without a size query (it costs as much as the conversion);
 // without it the size is asked first, so that the bytes keep no spare
-// capacity (encode_text: saving keeps the memory of HEAD 368313b, retry R2).
+// capacity (encode_text: saving keeps the memory of HEAD 63a24a6, retry R2).
 bool wide_to_mb(const CodePage& cp, std::wstring_view text, std::string* out, bool* used_default,
                 size_t expected = 0) {
   out->clear();

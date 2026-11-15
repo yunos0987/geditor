@@ -2,8 +2,8 @@
 // (before M6): decode_detected no longer decodes Shift_JIS as UTF-8 first,
 // no conversion asks for its size first, and the fallbacks for files that
 // do not give their bytes back as a whole read stretches of 64 KiB in one
-// call. The result must be what the reading of HEAD 368313b gave. `head`
-// below is a copy of that reading (encoding.cpp at 368313b: mb_to_wide,
+// call. The result must be what the reading of HEAD 63a24a6 gave. `head`
+// below is a copy of that reading (encoding.cpp at 63a24a6: mb_to_wide,
 // wide_to_mb, raw_dbcs, raw_iso2022jp, raw_codepage and the detection
 // order), and every test compares the two on generated inputs: the text,
 // the line ends, U+FFFD and its positions, the noted byte and line, "!"
@@ -236,7 +236,7 @@ size_t lines_before(const std::wstring& text, size_t index) {
   return lines;
 }
 
-// finish_decoding of 368313b for raw code page text: the line ends are
+// finish_decoding of 63a24a6 for raw code page text: the line ends are
 // split by the (unchanged) UTF-16 path of decode_as, the rest is set as it
 // set it. The code pages never give surrogates (checked).
 DecodedText finish(RawText&& raw, Codec codec) {
@@ -268,7 +268,7 @@ DecodedText decode_as(std::string_view bytes, Codec codec) {
   return finish(std::move(raw), codec);
 }
 
-// decode_detected of 368313b for bytes without a BOM and without NUL bytes
+// decode_detected of 63a24a6 for bytes without a BOM and without NUL bytes
 // (the branches before UTF-8 are unchanged and not taken here).
 DecodedText decode_detected(std::string_view bytes) {
   FileFormat encoding;

@@ -284,7 +284,7 @@ size_t volume_name_limit() {
 // M4a fix F3: a 240-character name is saved with "<file>~" (the temporary
 // names are cut to fit); a name of the volume's limit is saved, without a
 // backup when one is asked for, and the note names it. No temporary file is
-// left. HEAD 8eb6d6f failed the 240 case at "creating the temporary file".
+// left. HEAD edef20c failed the 240 case at "creating the temporary file".
 TEST(win_save_long_names_fit_the_volume_limit) {
   const size_t limit = volume_name_limit();
   std::printf("  volume name limit: %zu\n", limit);

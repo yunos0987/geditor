@@ -1,7 +1,7 @@
 // SearchPattern::find_backward after the deferred performance work (before
 // M6): long lines are scanned in windows back from max_start instead of
 // from the line start. `head_find_backward` below is a copy of
-// find_backward at HEAD 368313b (every match of a forward scan of each line,
+// find_backward at HEAD 63a24a6 (every match of a forward scan of each line,
 // the last one that qualifies), on a pattern compiled with the same options;
 // the tests compare the two on generated lines and patterns.
 
@@ -57,7 +57,7 @@ class HeadPattern {
   HeadPattern& operator=(const HeadPattern&) = delete;
   bool valid() const { return code_ != nullptr; }
 
-  // find_backward of 368313b on the text `text` (the whole buffer).
+  // find_backward of 63a24a6 on the text `text` (the whole buffer).
   SearchResult find_backward(const std::wstring& text, size_t max_start, size_t end_bound, SearchMatch* out) {
     max_start = std::min(max_start, text.size());
     end_bound = std::min(end_bound, text.size());

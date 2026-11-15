@@ -55,7 +55,7 @@ TEST(m4a_fix_lf_after_cr_is_saved_as_cr_and_no_line_is_lost) {
   s.keys(L"C-d");
   CHECK_EQ(s.text(), std::wstring(L"a\n\nb\n"));
   CHECK_EQ(eol_names(line_ends(s.ed.buffer().text)), std::string("RLW"));
-  // HEAD 8eb6d6f wrote "a\r\nb\r\n" here: three lines when read again.
+  // HEAD edef20c wrote "a\r\nb\r\n" here: three lines when read again.
   s.keys(L"C-x C-s");
   const std::string saved = s.host.file(kPath);
   CHECK_EQ(saved, std::string("a\r\rb\r\n"));
@@ -132,7 +132,7 @@ TEST(m4a_fix_failed_save_keeps_the_line_ends) {
 }
 
 // [C1] negative: without an LF right after a CR the bytes are those of
-// HEAD 8eb6d6f (each line end as it was) and there is no such message.
+// HEAD edef20c (each line end as it was) and there is no such message.
 TEST(m4a_fix_other_line_end_orders_are_saved_unchanged) {
   struct Row {
     const char* before;
