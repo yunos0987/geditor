@@ -10,13 +10,15 @@ std::wstring own_executable_path();
 
 // The command line of a new window: `exe`, then --headless when `headless`,
 // then --settings=`settings` when not empty (new windows keep the settings
-// file and the headless mode of this one), then `file`, each quoted.
+// file and the headless mode of this one), then --encoding=`encoding` when
+// not empty (find-file-with-encoding), then `file`, each quoted.
 std::wstring editor_command_line(const std::wstring& exe, const std::wstring& file,
-                                 const std::wstring& settings, bool headless = false);
+                                 const std::wstring& settings, bool headless = false,
+                                 const std::wstring& encoding = std::wstring());
 
 // Starts `exe` with editor_command_line. On failure `error` gets a message
 // for the echo area.
 bool launch_editor(const std::wstring& exe, const std::wstring& file, const std::wstring& settings,
-                   std::wstring& error, bool headless = false);
+                   std::wstring& error, bool headless = false, const std::wstring& encoding = std::wstring());
 
 }  // namespace geditor::win

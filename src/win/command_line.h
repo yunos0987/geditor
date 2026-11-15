@@ -1,6 +1,6 @@
-// Command line of geditor.exe: [--settings=PATH] [+LINE] [file]
-// (docs/PLAN.md 2 "startup arguments"; --encoding arrives in M4), plus the
-// measurement flags and --headless.
+// Command line of geditor.exe: [--encoding=NAME] [--settings=PATH] [+LINE]
+// [file] (docs/PLAN.md 2 "startup arguments"), plus the measurement flags
+// and --headless.
 #pragma once
 
 #include <cstddef>
@@ -14,6 +14,10 @@ struct CommandLine {
   std::wstring file;           // empty when no file is given
   size_t line = 0;             // 1-based line from +LINE; 0 when not given
   std::wstring settings;       // PATH of --settings=PATH as written; empty when not given
+  // NAME of --encoding=NAME (one of encoding_names(): the file is read in it
+  // instead of detecting); empty when not given or not one of them (an
+  // unknown name is reported in `errors`).
+  std::wstring encoding;
   bool measure_startup = false;  // --measure-startup
   bool measure_input = false;    // --measure-input (tools/measure_input.py)
   // --headless: an off-screen window that never takes the foreground, a

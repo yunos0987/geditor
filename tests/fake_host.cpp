@@ -67,6 +67,11 @@ void FakeHost::add_file(const std::wstring& path, const std::string& bytes) {
   names[key_of(path)] = path;
 }
 
+unsigned long long FakeHost::write_time(const std::wstring& path) const {
+  const auto it = files.find(key_of(path));
+  return it == files.end() ? 0 : it->second.write_time;
+}
+
 void FakeHost::touch_file(const std::wstring& path, const std::string& bytes) {
   add_file(path, bytes);
 }
@@ -245,12 +250,13 @@ bool FakeHost::ask_yes_no(const std::wstring& question) {
   return c;
 }
 
-bool FakeHost::launch_new_window(const std::wstring& path, std::wstring& error) {
+bool FakeHost::launch_new_window(const std::wstring& path, const std::wstring& encoding, std::wstring& error) {
   if (fail_launch) {
     error = L"launch failed";
     return false;
   }
   launched.push_back(path);
+  launched_encodings.push_back(encoding);
   return true;
 }
 

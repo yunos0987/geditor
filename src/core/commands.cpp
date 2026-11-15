@@ -793,6 +793,39 @@ void set_eol(Editor& ed) {
   ed.set_eol(eol);
 }
 
+// ---- Encodings (M4b) ----
+
+// The encoding argument at `index` (the minibuffer accepts only the nine
+// names; a key binding or M-x argument may hold anything).
+const std::wstring* encoding_arg(Editor& ed, size_t index) {
+  const std::vector<CommandArg>& args = ed.command_args();
+  FileFormat format;
+  if (args.size() <= index || !parse_encoding(args[index].text, &format)) {
+    ed.fail(unknown_encoding_message(args.size() > index ? args[index].text : std::wstring()));
+    return nullptr;
+  }
+  return &args[index].text;
+}
+
+// find-file-with-encoding FILE ENCODING.
+void find_file_with_encoding(Editor& ed) {
+  const std::wstring* name = encoding_arg(ed, 1);
+  if (name == nullptr) return;
+  ed.find_file_with_encoding(ed.command_args().front().text, *name);
+}
+
+// revert-buffer-with-coding-system ENCODING.
+void revert_buffer_with_coding_system(Editor& ed) {
+  const std::wstring* name = encoding_arg(ed, 0);
+  if (name != nullptr) ed.revert_buffer_with_coding_system(*name);
+}
+
+// set-buffer-file-coding-system ENCODING.
+void set_buffer_file_coding_system(Editor& ed) {
+  const std::wstring* name = encoding_arg(ed, 0);
+  if (name != nullptr) ed.set_buffer_file_coding_system(*name);
+}
+
 void quit(Editor& ed) {
   ed.quit();
 }
@@ -930,7 +963,7 @@ constexpr CommandInfo kCommands[] = {
     {"execute-extended-command", &execute_extended_command},
     {"exit-minibuffer", &exit_minibuffer},
     {"find-file", &find_file},
-    {"find-file-with-encoding", nullptr, kFileEncodingParams},
+    {"find-file-with-encoding", &find_file_with_encoding, kFileEncodingParams},
     {"find-user-init-file", &find_user_init_file},
     {"forward-char", &forward_char},
     {"forward-word", &forward_word},
@@ -979,13 +1012,13 @@ constexpr CommandInfo kCommands[] = {
     {"read-only-mode", &read_only_mode},
     {"recenter-top-bottom", &recenter_top_bottom},
     {"redo", &redo},
-    {"revert-buffer-with-coding-system", nullptr, kEncodingParams},
+    {"revert-buffer-with-coding-system", &revert_buffer_with_coding_system, kEncodingParams},
     {"save-buffer", &save_buffer},
     {"scroll-down-command", &scroll_down_command},
     {"scroll-up-command", &scroll_up_command},
     {"select-all", &select_all},
     {"self-insert-command", &self_insert_command},
-    {"set-buffer-file-coding-system", nullptr, kEncodingParams},
+    {"set-buffer-file-coding-system", &set_buffer_file_coding_system, kEncodingParams},
     {"set-eol", &set_eol, kEolParams},
     {"set-mark-command", &set_mark_command},
     {"set-wrap-mode", &set_wrap_mode, kWrapParams},

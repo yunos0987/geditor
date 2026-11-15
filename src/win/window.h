@@ -53,7 +53,7 @@ class MainWindow final : public Host {
   OpenChoice ask_open_choice(const std::wstring& path) override;
   SaveChoice ask_save_changes(const std::wstring& buffer_name) override;
   bool ask_yes_no(const std::wstring& question) override;
-  bool launch_new_window(const std::wstring& path, std::wstring& error) override;
+  bool launch_new_window(const std::wstring& path, const std::wstring& encoding, std::wstring& error) override;
   void quit() override;
   void open_menu_bar() override;
   int visible_lines() override;

@@ -516,5 +516,5 @@ TEST(m4a_mode_line_shows_the_line_end_part) {
   CHECK_EQ(s.ed.mode_line(), std::wstring(L"--- m.txt  UTF-8 Mixed(CRLF)  L1 C0  wrap:max"));
   Session c;
   open_bytes(c, "\xEF\xBB\xBF" "a\rb");
-  CHECK_EQ(c.ed.mode_line(), std::wstring(L"--- m.txt  UTF-8 BOM CR  L1 C0  wrap:max"));
+  CHECK_EQ(c.ed.mode_line(), std::wstring(L"--- m.txt  UTF-8-BOM CR  L1 C0  wrap:max"));
 }

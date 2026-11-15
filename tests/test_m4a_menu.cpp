@@ -1,7 +1,7 @@
 // M4-9 for M4a ([C7]): the File menu's Line Endings radio and Read Only
 // check follow set-eol, reopening, mixed files, C-x C-q and the read-only
-// attribute; these items are enabled, the Encoding for Saving items stay
-// disabled until M4b.
+// attribute; these items are enabled (and, since M4b, the Encoding for
+// Saving items).
 
 #include <cstdio>
 #include <span>
@@ -120,7 +120,9 @@ TEST(m4a_menu_line_endings_and_read_only_follow_the_buffer) {
   }
 }
 
-TEST(m4a_menu_line_endings_and_read_only_are_enabled_encoding_is_not) {
+// M4b enabled the Encoding for Saving items too (test_m4b_encoding.cpp has
+// their marks).
+TEST(m4a_menu_line_endings_read_only_and_encoding_are_enabled) {
   Session s;
   open_bytes(s, "a\n", L"C:\\work\\a.txt");
   for (const wchar_t* name : {L"LF", L"CRLF", L"CR"}) {
@@ -131,12 +133,12 @@ TEST(m4a_menu_line_endings_and_read_only_are_enabled_encoding_is_not) {
   CHECK(read_only != nullptr && geditor::menu_item_enabled(s.ed, *read_only));
   for (const wchar_t* name : geditor::encoding_names()) {
     const MenuItem* item = file_item(L"Encoding for Saving", name);
-    CHECK(item != nullptr && !geditor::menu_item_enabled(s.ed, *item));
+    CHECK(item != nullptr && geditor::menu_item_enabled(s.ed, *item));
   }
   // The commands are no longer "not implemented yet".
   CHECK(geditor::find_command("set-eol")->fn != nullptr);
   CHECK(geditor::find_command("read-only-mode")->fn != nullptr);
-  CHECK(geditor::find_command("set-buffer-file-coding-system")->fn == nullptr);
+  CHECK(geditor::find_command("set-buffer-file-coding-system")->fn != nullptr);
   s.keys(L"C-x RET e");
   s.type(L"crlf");
   s.keys(L"RET");

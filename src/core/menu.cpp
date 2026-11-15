@@ -225,8 +225,15 @@ bool menu_item_checked(const Editor& editor, const MenuItem& item) {
     WrapMode mode = WrapMode::kNone;
     return item.argument != nullptr && parse_wrap_mode(item.argument, &mode) && mode == editor.wrap_mode();
   }
-  // File menu (M4-9): Line Endings marks the default line end (also of a
-  // mixed file), Read Only follows read-only-mode. Encoding for Saving: M4b.
+  // File menu (M4-9): Encoding for Saving marks the encoding of the next
+  // save (set-buffer-file-coding-system, the detected or named encoding of
+  // the file), Line Endings the default line end (also of a mixed file),
+  // Read Only follows read-only-mode.
+  if (command == "set-buffer-file-coding-system") {
+    FileFormat format;
+    return item.argument != nullptr && parse_encoding(item.argument, &format) &&
+           format.codec == editor.buffer().format.codec && format.bom == editor.buffer().format.bom;
+  }
   if (command == "set-eol") {
     Eol eol = Eol::kLf;
     return item.argument != nullptr && parse_eol(item.argument, &eol) && eol == editor.buffer().format.eol;

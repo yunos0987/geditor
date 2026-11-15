@@ -360,11 +360,16 @@ constexpr ReadOnlyRow kReadOnlyRows[] = {
 constexpr const char* kNonEditingCommands[] = {
     "backward-char", "backward-word", "beginning-of-buffer", "beginning-of-line", "copy", "digit-argument",
     "end-of-buffer", "end-of-line", "exchange-point-and-mark", "execute-extended-command", "exit-minibuffer",
-    "find-file", "find-user-init-file", "forward-char", "forward-word", "keyboard-escape-quit", "keyboard-quit",
+    "find-file", "find-file-with-encoding", "find-user-init-file", "forward-char", "forward-word",
+    "keyboard-escape-quit", "keyboard-quit",
     "kill-ring-save", "mark-whole-buffer", "menu-bar-open", "minibuffer-complete", "negative-argument",
     "next-history-element", "next-line", "previous-history-element", "previous-line", "quit",
-    "read-only-mode", "recenter-top-bottom", "save-buffer", "scroll-down-command", "scroll-up-command",
-    "select-all", "set-mark-command", "set-wrap-mode", "text-scale-decrease", "text-scale-increase",
+    "read-only-mode", "recenter-top-bottom", "revert-buffer-with-coding-system", "save-buffer",
+    "scroll-down-command", "scroll-up-command", "select-all",
+    // M4b: changes only the encoding of the next save (refused in
+    // read-only-mode all the same: test_m4b_encoding.cpp).
+    "set-buffer-file-coding-system", "set-mark-command", "set-wrap-mode", "text-scale-decrease",
+    "text-scale-increase",
     "text-scale-reset", "toggle-eol-marks", "toggle-line-numbers", "toggle-whitespace-marks",
     "universal-argument", "write-file",
 };

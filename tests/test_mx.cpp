@@ -211,9 +211,8 @@ constexpr LaterKey kLaterKeys[] = {
     {L"C-M-%", "query-replace-regexp"},
     {L"M-g g", "goto-line"},
     {L"M-g M-g", "goto-line"},
-    {L"C-x RET f", "set-buffer-file-coding-system"},
-    {L"C-x RET r", "revert-buffer-with-coding-system"},
-    {L"C-x RET c", "find-file-with-encoding"},
+    // C-x RET f / r / c (the encoding commands): implemented in M4b
+    // (test_m4b_encoding.cpp).
     // C-x RET e set-eol: implemented in M4a (test_m4a_eol.cpp).
     // <f10> menu-bar-open: implemented in M3b (test_menu.cpp).
     {L"C-x (", "kmacro-start-macro"},

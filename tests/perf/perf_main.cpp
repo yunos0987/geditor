@@ -116,7 +116,7 @@ class PerfHost : public geditor::Host {
   geditor::OpenChoice ask_open_choice(const std::wstring&) override { return geditor::OpenChoice::kCancel; }
   geditor::SaveChoice ask_save_changes(const std::wstring&) override { return geditor::SaveChoice::kCancel; }
   bool ask_yes_no(const std::wstring&) override { return false; }
-  bool launch_new_window(const std::wstring&, std::wstring&) override { return false; }
+  bool launch_new_window(const std::wstring&, const std::wstring&, std::wstring&) override { return false; }
   void quit() override {}
   void open_menu_bar() override {}
   int visible_lines() override { return 40; }

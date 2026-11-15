@@ -1,5 +1,6 @@
 #include "command_line.h"
 
+#include "encoding.h"
 #include "path.h"
 
 namespace geditor::win {
@@ -109,6 +110,18 @@ CommandLine parse_command_line(std::wstring_view command_line) {
           result.settings = a.substr(kPrefix);
         } else {
           result.errors.push_back(L"Invalid option: " + a + L" (use --settings=PATH)");
+        }
+        continue;
+      }
+      if (a.rfind(L"--encoding", 0) == 0) {
+        constexpr size_t kPrefix = sizeof("--encoding=") - 1;
+        geditor::FileFormat format;
+        if (a.size() <= kPrefix || a[kPrefix - 1] != L'=') {
+          result.errors.push_back(L"Invalid option: " + a + L" (use --encoding=NAME)");
+        } else if (!geditor::parse_encoding(std::wstring_view(a).substr(kPrefix), &format)) {
+          result.errors.push_back(geditor::unknown_encoding_message(std::wstring_view(a).substr(kPrefix)));
+        } else {
+          result.encoding = a.substr(kPrefix);
         }
         continue;
       }

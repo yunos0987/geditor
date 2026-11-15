@@ -375,7 +375,15 @@ void Editor::start_reading_arguments(const CommandInfo& info, const PrefixArg& p
   }
   reading_call_ = CommandCall{info.name, {}};
   minibuffer_prefix_ = prefix;
-  start_minibuffer(MinibufferPurpose::kCommandArgument, info.params.front().prompt, L"");
+  // find-file-with-encoding: the file name starts like find-file's.
+  const bool file_name = reading_call_.name == "find-file-with-encoding";
+  start_minibuffer(MinibufferPurpose::kCommandArgument, info.params.front().prompt,
+                   file_name ? default_directory() : std::wstring());
+}
+
+bool Editor::reads_file_name() const {
+  return purpose_ == MinibufferPurpose::kCommandArgument && reading_call_.name == "find-file-with-encoding" &&
+         reading_call_.args.empty();
 }
 
 void Editor::finish_command_name(const std::wstring& input) {
@@ -685,11 +693,17 @@ std::wstring Editor::buffer_name() const {
 }
 
 std::wstring Editor::mode_line() const {
-  const bool modified = main_.modified();
-  const wchar_t* flag = main_.read_only ? (modified ? L"%*" : L"%%") : (modified ? L"**" : L"--");
-  return std::wstring(L"-") + flag + L" " + buffer_name() + L"  " + encoding_name(main_.format) + L" " +
-         eol_text() + L"  L" + std::to_wstring(point_line() + 1) + L" C" +
-         std::to_wstring(point_column()) + L"  wrap:" + wrap_mode_name(wrap_mode());
+  const bool is_modified = modified();
+  const wchar_t* flag = main_.read_only ? (is_modified ? L"%*" : L"%%") : (is_modified ? L"**" : L"--");
+  return std::wstring(L"-") + flag + L" " + buffer_name() + L"  " + encoding_text() + L" " + eol_text() +
+         L"  L" + std::to_wstring(point_line() + 1) + L" C" + std::to_wstring(point_column()) + L"  wrap:" +
+         wrap_mode_name(wrap_mode());
+}
+
+std::wstring Editor::encoding_text() const {
+  std::wstring text = encoding_name(main_.format);
+  if (main_.format.undecodable) text += L'!';
+  return text;
 }
 
 size_t Editor::other_line_ends() const {
@@ -724,10 +738,16 @@ void Editor::apply_view_settings() {
   eol_marks_view_.reload(config_.eol_marks_show);
   whitespace_view_.reload(whitespace_flags(config_));
   wrap_view_.reload(config_.wrap_mode);
-  // A buffer that is still new and empty takes new_file.eol (decision F1).
+  // A buffer that is still new and empty takes new_file.eol (decision F1)
+  // and new_file.encoding (unless its encoding was chosen).
   if (main_.text.length() == 0 && main_.undo.undo_count() == 0 && main_.undo.redo_count() == 0 &&
       !(disk_known_ && disk_.exists)) {
     main_.format.eol = new_file_eol();
+    if (!encoding_named_) {
+      const FileFormat format = new_file_format();
+      main_.format.codec = format.codec;
+      main_.format.bom = format.bom;
+    }
   }
 }
 
@@ -1204,6 +1224,8 @@ void Editor::complete_minibuffer() {
     std::vector<std::wstring> names;
     for (const CommandInfo& c : all_commands()) names.push_back(widen(c.name));
     r = complete_name(input, std::move(names));
+  } else if (reads_file_name()) {
+    r = complete_file_name(input, host_);
   } else if (purpose_ == MinibufferPurpose::kCommandArgument) {
     const CommandInfo* info = find_command(reading_call_.name);
     if (info == nullptr || reading_call_.args.size() >= info->params.size() ||

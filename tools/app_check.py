@@ -1,4 +1,4 @@
-"""Real-app checks of geditor M1, M2, M3a - M3d and M4a (run by hand; Windows only).
+"""Real-app checks of geditor M1, M2, M3a - M3d, M4a and M4b (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
@@ -32,7 +32,13 @@ marks, save (the bytes of each line end, "<file>~", the external-change
 question, a deleted file), make each step of the save fail ('GFLT'
 "save-..." / "file-info"), open a file with the read-only attribute, round
 trip utf-8 / utf-8-bom with four kinds of line ends, and save through a hard
-link and (when it can be created) a symbolic link.
+link and (when it can be created) a symbolic link. The M4b checks
+(--only-m4b) open files of each BOM kind, UTF-16LE without BOM and
+Shift_JIS by detection, run find-file-with-encoding through the minibuffer
+(with completion) and through the menu (F10 answered with 'GANS', into a new
+window that gets --encoding), start with --encoding (a wrong one shows "!"),
+revert with the question answered No and Yes, stop a Shift_JIS save at an
+emoji and read the Encoding for Saving radio of the real HMENU.
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
@@ -1945,12 +1951,13 @@ def run_headless_checks(exe: pathlib.Path, out: pathlib.Path):
 
 # The command items of PLAN 4.9 with the key text of decision B1 (built-in
 # keys, no settings) and whether the command is implemented now (else grey;
-# M3b, and set-eol since M4a). tests/test_menu.cpp holds the same table for the core model.
+# M3b, set-eol since M4a, the encoding commands since M4b). tests/test_menu.cpp
+# holds the same table for the core model.
 M3B_ITEMS = [
-    ("File > Open...", "C-x C-f", True), ("File > Open with Encoding...", "C-x RET c", False),
-    ("File > Reopen with Encoding...", "C-x RET r", False), ("File > Save", "C-M-s", True),
+    ("File > Open...", "C-x C-f", True), ("File > Open with Encoding...", "C-x RET c", True),
+    ("File > Reopen with Encoding...", "C-x RET r", True), ("File > Save", "C-M-s", True),
     ("File > Save As...", "C-x C-w", True),
-    *[(f"File > Encoding for Saving > {name}", "", False) for name in (
+    *[(f"File > Encoding for Saving > {name}", "", True) for name in (
         "utf-8", "utf-8-bom", "utf-16le", "utf-16le-bom", "utf-16be", "utf-16be-bom", "shift_jis", "euc-jp",
         "iso-2022-jp")],
     # set-eol: implemented in M4a.
@@ -3400,11 +3407,12 @@ def run_m4a_checks(exe: pathlib.Path, out: pathlib.Path):
         items = menu_items(app)
         radio = {k: items[f"File > Line Endings > {k}"] for k in ("LF", "CRLF", "CR")}
         enc = [i for p, i in items.items() if p.startswith("File > Encoding for Saving > ")]
-        check("[M4a C7] File > Line Endings marks CRLF (the default of the mixed file); LF / CRLF / CR and "
-              "Read Only enabled; Encoding for Saving items disabled",
+        # Since M4b the Encoding for Saving items are enabled too (--only-m4b has their marks).
+        check("[M4a C7] File > Line Endings marks CRLF (the default of the mixed file); LF / CRLF / CR, "
+              "Read Only and (M4b) the Encoding for Saving items enabled",
               radio["CRLF"].checked and not radio["LF"].checked and not radio["CR"].checked and
               all(i.enabled and i.radio for i in radio.values()) and items["File > Read Only"].enabled and
-              not items["File > Read Only"].checked and enc and not any(i.enabled for i in enc),
+              not items["File > Read Only"].checked and len(enc) == 9 and all(i.enabled for i in enc),
               "; ".join(i.line() for i in radio.values()) + f"; {items['File > Read Only'].line()}; "
               f"{len(enc)} encoding items, enabled {[i.path for i in enc if i.enabled]}")
 
@@ -3671,6 +3679,236 @@ def run_m4a_checks(exe: pathlib.Path, out: pathlib.Path):
     record("INFO", "[M4a] screenshots", ", ".join(names))
 
 
+# ---- M4b: encodings ----
+
+M4B_TEXT = "日本語テキスト\r\nかな ABC\r\n"
+M4B_WANT = M4B_TEXT.replace("\r\n", "\n")
+
+
+def m4b_open(exe: pathlib.Path, path: pathlib.Path, settings: pathlib.Path, args: list[str] | None = None):
+    app = d.App(exe, [*(args or []), str(path)], cwd=path.parent, settings=settings, height=300)
+    app.use_input()
+    return app
+
+
+def encoding_marks(app) -> list[str]:
+    """The checked items of File > Encoding for Saving in the real HMENU."""
+    prefix = "File > Encoding for Saving > "
+    return [p[len(prefix):] for p, i in menu_items(app).items() if p.startswith(prefix) and i.checked]
+
+
+def run_m4b_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C9] of the M4b packet: detection, find-file-with-encoding (minibuffer
+    and menu), revert-buffer-with-coding-system, the "!" of the mode line, a
+    refused save, --encoding and the Encoding for Saving radio of the real
+    HMENU, all on the real app."""
+    work = out / "files_m4b"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    settings.write_bytes(settings_json({"line_numbers": False}))
+    names = []
+
+    # Detection: each BOM kind, UTF-16LE without BOM, Shift_JIS, UTF-8.
+    samples = [
+        ("utf-8-bom", b"\xef\xbb\xbf" + M4B_TEXT.encode("utf-8")),
+        ("utf-16le-bom", b"\xff\xfe" + M4B_TEXT.encode("utf-16-le")),
+        ("utf-16be-bom", b"\xfe\xff" + M4B_TEXT.encode("utf-16-be")),
+        ("utf-16le", M4B_TEXT.encode("utf-16-le")),
+        ("shift_jis", M4B_TEXT.encode("cp932")),
+        ("utf-8", M4B_TEXT.encode("utf-8")),
+    ]
+    rows = []
+    for name, data in samples:
+        path = work / f"m4b_detect_{name}.txt"
+        path.write_bytes(data)
+        app = m4b_open(exe, path, settings)
+        try:
+            state = wait_state(app, lambda s: s.get("text") == M4B_WANT)
+            if name == "shift_jis":
+                time.sleep(0.3)
+                app.capture(shots / "m4b_01_detect_shift_jis.png")
+                names.append("m4b_01_detect_shift_jis.png")
+            rows.append((name, state.get("encoding"), state.get("text") == M4B_WANT, encoding_marks(app),
+                         state.get("encoding_text")))
+        finally:
+            app.kill()
+    check("[M4b C9] detection: each BOM kind, UTF-16LE without BOM, Shift_JIS and UTF-8 open with their encoding "
+          "and the right text; the real HMENU's Encoding for Saving radio marks it",
+          all(enc == name and ok and marks == [name] for name, enc, ok, marks, _ in rows),
+          "; ".join(f"{n}: encoding={e} text {'ok' if ok else 'WRONG'} radio={m} mode line {t}"
+                    for n, e, ok, m, t in rows) + " (m4b_01_detect_shift_jis.png)")
+
+    # find-file-with-encoding through the minibuffer with completion.
+    euc = work / "m4b_euc.txt"
+    euc.write_bytes(M4B_TEXT.encode("euc_jp"))
+    iso = work / "m4b_iso.txt"
+    iso.write_bytes(M4B_TEXT.encode("iso2022_jp"))
+    start = work / "m4b_start.txt"
+    start.write_bytes(b"start\n")
+    app = m4b_open(exe, start, settings)
+    try:
+        app.keys("C-x RET c")
+        prompt = wait_state(app, lambda s: s.get("minibuffer") == "1").get("echo")
+        app.type("m4b_eu")
+        app.keys("TAB")
+        completed = wait_state(app, lambda s: s.get("echo", "").endswith("m4b_euc.txt")).get("echo")
+        app.keys("RET")
+        app.type("eu")
+        app.keys("TAB")
+        coding = wait_state(app, lambda s: s.get("echo") == "Coding system: euc-jp").get("echo")
+        app.keys("RET")
+        question = answer(app, "Open in this window", timeout_s=3.0)
+        state = wait_state(app, lambda s: s.get("text") == M4B_WANT)
+        time.sleep(0.3)
+        app.capture(shots / "m4b_02_find_file_with_encoding.png")
+        names.append("m4b_02_find_file_with_encoding.png")
+        check("[M4b C9] C-x RET c: the file name completes in the minibuffer, the encoding completes (euc -> "
+              "euc-jp), and the file opens in EUC-JP",
+              prompt == f"Find file: {work}\\" and completed == f"Find file: {euc}" and
+              coding == "Coding system: euc-jp" and question is not None and state.get("encoding") == "euc-jp" and
+              state.get("text") == M4B_WANT and "  EUC-JP CRLF  " in state.get("mode_line", ""),
+              f"prompt={prompt!r} completed={completed!r} coding={coding!r} {describe(question)} "
+              f"encoding={state.get('encoding')} mode_line={state.get('mode_line')!r} "
+              "(m4b_02_find_file_with_encoding.png)")
+
+        # The menu (F10, answered through 'GANS'), into a new window: the
+        # encoding goes with it (detection would read ISO-2022-JP as UTF-8).
+        app.keys("<f10>")
+        pending = app.wait_question(3.0)
+        accepted = app.answer("File > Open with Encoding...")
+        menu_prompt = wait_state(app, lambda s: s.get("minibuffer") == "1").get("echo")
+        app.type(iso.name)
+        app.keys("RET")
+        app.type("iso-2022-jp")
+        app.keys("RET")
+        before = set(d.started_windows())
+        question = answer(app, "Open in a new window", timeout_s=3.0)
+        new = d.wait_for(lambda: [h for h in d.started_windows() if h not in before], 10.0) or []
+        theirs = d.wait_for(lambda: (lambda s: s if s.get("text") == M4B_WANT else None)(d.read_state(new[0])),
+                            5.0) if new else None
+        theirs = theirs or (d.read_state(new[0]) if new else {})
+        check("[M4b C9] File > Open with Encoding... (F10 answered through GANS) reads both arguments; "
+              "'Open in a new window' starts a window that reads the file in that encoding (--encoding)",
+              pending is not None and pending.get("question") == "menu_bar" and accepted and
+              menu_prompt == f"Find file: {euc.parent}\\" and question is not None and bool(new) and
+              theirs.get("encoding") == "iso-2022-jp" and theirs.get("text") == M4B_WANT and
+              theirs.get("headless") == "1",
+              f"pending={pending and pending.get('question')} accepted={accepted} prompt={menu_prompt!r} "
+              f"{describe(question)} new windows={len(new)} encoding={theirs.get('encoding')} "
+              f"text={'ok' if theirs.get('text') == M4B_WANT else theirs.get('text')!r}")
+        for h in new:
+            d.user32.PostMessageW(h, d.WM_CLOSE, 0, 0)  # unmodified: closes
+        d.wait_for(lambda: not any(d.user32.IsWindow(h) for h in new), 5.0)
+    finally:
+        app.kill()
+
+    # --encoding at start-up (a wrong one: "!"), then revert with the right
+    # one, the question answered No and then Yes.
+    sjis = work / "m4b_sjis.txt"
+    sjis.write_bytes(M4B_TEXT.encode("cp932"))
+    app = m4b_open(exe, sjis, settings, ["--encoding=utf-8"])
+    try:
+        state = wait_state(app, lambda s: s.get("encoding_text") == "UTF-8!")
+        time.sleep(0.3)
+        app.capture(shots / "m4b_03_undecodable_mark.png")
+        names.append("m4b_03_undecodable_mark.png")
+        check("[M4b C9] --encoding=utf-8 reads a Shift_JIS file as UTF-8: U+FFFD, the first byte position and "
+              "line in the echo area, and UTF-8! in the mode line",
+              state.get("encoding") == "utf-8" and "�" in state.get("text", "") and
+              state.get("message") == f"{sjis}: bytes that are not valid UTF-8 were read as U+FFFD "
+                                      "(first at byte offset 0, line 1)" and
+              "  UTF-8! CRLF  " in state.get("mode_line", ""),
+              f"message={state.get('message')!r} mode_line={state.get('mode_line')!r} "
+              "(m4b_03_undecodable_mark.png: 'UTF-8!' in the mode line)")
+        app.keys("M->")
+        app.type("x")
+        edited = wait_state(app, lambda s: s.get("modified") == "1")
+        app.keys("C-x RET r")
+        app.type("shift_jis")
+        app.keys("RET")
+        question = answer(app, "No", timeout_s=3.0)
+        state = wait_state(app, lambda s: s.get("question") == "none" and s.get("message") == "Cancelled")
+        check("[M4b C9] revert with unsaved changes asks; No changes nothing",
+              question is not None and question.get("question") == "yes_no" and
+              question.get("instruction") == "Discard the changes to m4b_sjis.txt and read it again as Shift_JIS?"
+              and state.get("text") == edited.get("text") and state.get("modified") == "1" and
+              state.get("encoding") == "utf-8" and state.get("point") == edited.get("point"),
+              f"{describe(question)} message={state.get('message')!r} encoding={state.get('encoding')}")
+        app.keys("C-x RET r")
+        app.type("shift_jis")
+        app.keys("RET")
+        question = answer(app, "Yes", timeout_s=3.0)
+        state = wait_state(app, lambda s: s.get("encoding") == "shift_jis" and s.get("text") == M4B_WANT)
+        time.sleep(0.3)
+        app.capture(shots / "m4b_04_reverted.png")
+        names.append("m4b_04_reverted.png")
+        check("[M4b C9] Yes reads the file again from disk in Shift_JIS: right text, no '!', unmodified, the "
+              "radio on shift_jis",
+              question is not None and state.get("text") == M4B_WANT and state.get("encoding_text") == "Shift_JIS"
+              and state.get("modified") == "0" and encoding_marks(app) == ["shift_jis"],
+              f"{describe(question)} message={state.get('message')!r} mode_line={state.get('mode_line')!r} "
+              "(m4b_04_reverted.png)")
+
+        # A character Shift_JIS cannot write: the save stops, the file stays.
+        mtime = sjis.stat().st_mtime_ns
+        app.keys("M-<")
+        app.set_clipboard("\U0001F600")
+        app.keys("C-y")
+        wait_state(app, lambda s: s.get("modified") == "1")
+        app.keys("C-x C-s")
+        want = ("Cannot save as Shift_JIS: U+1F600 at line 1, column 0 cannot be written in Shift_JIS; "
+                "choose another encoding with set-buffer-file-coding-system")
+        state = wait_state(app, lambda s: s.get("message") == want)
+        time.sleep(0.3)
+        app.capture(shots / "m4b_05_refused_save.png")
+        names.append("m4b_05_refused_save.png")
+        check("[M4b C9] an emoji stops the Shift_JIS save at its position; the file, its time and the folder "
+              "(no temporary file) are unchanged; the buffer stays modified",
+              state.get("message") == want and sjis.read_bytes() == M4B_TEXT.encode("cp932") and
+              sjis.stat().st_mtime_ns == mtime and not temporaries(work) and state.get("modified") == "1",
+              f"message={state.get('message')!r} temporaries={temporaries(work)} (m4b_05_refused_save.png)")
+
+        # Encoding for Saving from the real HMENU (WM_COMMAND), then the save works.
+        items = menu_items(app)
+        app.menu_command(items["File > Encoding for Saving > utf-16le-bom"].id)
+        state = wait_state(app, lambda s: s.get("encoding") == "utf-16le-bom")
+        marks = encoding_marks(app)
+        app.keys("C-x C-s")
+        saved = wait_state(app, lambda s: s.get("modified") == "0")
+        data = sjis.read_bytes()
+        check("[M4b C9] File > Encoding for Saving > utf-16le-bom: the radio moves, the text stays, the buffer is "
+              "modified; the save writes UTF-16LE with BOM",
+              marks == ["utf-16le-bom"] and state.get("modified") == "1" and
+              "  UTF-16LE-BOM CRLF  " in state.get("mode_line", "") and
+              data == b"\xff\xfe" + ("\U0001F600" + M4B_TEXT).encode("utf-16-le") and
+              saved.get("message") == f"Wrote {sjis}",
+              f"radio={marks} mode_line={state.get('mode_line')!r} bytes={data[:12]!r}... "
+              f"message={saved.get('message')!r}")
+    finally:
+        app.kill()
+
+    # --encoding=euc-jp at start-up; an unknown name is reported.
+    app = m4b_open(exe, euc, settings, ["--encoding=euc-jp"])
+    try:
+        state = wait_state(app, lambda s: s.get("text") == M4B_WANT)
+        check("[M4b C9] --encoding=euc-jp at start-up reads the file in EUC-JP",
+              state.get("encoding") == "euc-jp" and state.get("text") == M4B_WANT and not state.get("message"),
+              f"encoding={state.get('encoding')} message={state.get('message')!r}")
+    finally:
+        app.kill()
+    app = m4b_open(exe, euc, settings, ["--encoding=big5"])
+    try:
+        state = wait_state(app, lambda s: "Unknown encoding" in s.get("message", ""))
+        check("[M4b C9] an unknown --encoding is reported in the echo area (the file is detected)",
+              "Unknown encoding: big5 (use utf-8, utf-8-bom, " in state.get("message", "") and
+              state.get("encoding") != "big5",
+              f"message={state.get('message')!r} encoding={state.get('encoding')}")
+    finally:
+        app.kill()
+    record("INFO", "[M4b] screenshots", ", ".join(names))
+
+
 # ---- --only-visible: the checks that need the real screen ----
 
 def run_visible_checks(exe: pathlib.Path, out: pathlib.Path):
@@ -3781,6 +4019,8 @@ def main() -> int:
                         help="run only the M3d colour emoji, redraw benchmark and F10 wrap-around checks")
     parser.add_argument("--only-m4a", action="store_true",
                         help="run only the M4a line end, save and read-only checks")
+    parser.add_argument("--only-m4b", action="store_true",
+                        help="run only the M4b encoding checks")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -3803,7 +4043,7 @@ def main() -> int:
     saved = None if d.HEADLESS else clipboard_text()
     sequence0 = d.user32.GetClipboardSequenceNumber()
     only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_m3c or
-            args.only_m3d or args.only_m4a or args.only_headless or args.only_visible)
+            args.only_m3d or args.only_m4a or args.only_m4b or args.only_headless or args.only_visible)
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
@@ -3840,6 +4080,8 @@ def main() -> int:
                 run_m3d_visible_checks(exe, out)
         if not only or args.only_m4a:
             run_m4a_checks(exe, out)
+        if not only or args.only_m4b:
+            run_m4b_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)

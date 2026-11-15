@@ -28,6 +28,15 @@ line numbers on, wrap max).
 geditor also gets --headless (its window stays off the screen and out of
 the foreground; it draws the same frames) unless --visible is given. A build
 without --headless must be measured with --visible.
+
+--m4-5 (M4-5, the 100 MB loading of M4b) measures instead: the 100 MB file
+above, a 100 MB file holding a single line (single_line_100mb.txt, the
+cursor moved to its end with <end> and characters typed there), and a 100 MB
+file whose lines end in LF and CRLF by turns (lines_100mb_lf_crlf.txt,
+opened only). Limits: open_ms 1000 for the first two and 2000 for the third,
+and the median of the typed characters at the end of the single line 16 ms
+(one screen redrawn per character; use --wrap window for M4-5). The exit
+code is 1 when any is over.
 """
 
 import argparse
@@ -80,6 +89,25 @@ def generate_single_line(path: pathlib.Path, target_bytes: int):
             w = rng.choice(WORDS) + " "
             f.write(w)
             written += len(w.encode("utf-8"))
+
+
+def generate_lf_crlf(path: pathlib.Path, target_bytes: int):
+    """Lines of about 80 characters ending in LF and CRLF by turns."""
+    rng = random.Random(3)
+    with path.open("wb") as f:
+        written = 0
+        index = 0
+        while written < target_bytes:
+            parts = []
+            chars = 0
+            while chars < 80:
+                w = rng.choice(WORDS)
+                parts.append(w)
+                chars += len(w) + 1
+            line = " ".join(parts).encode("utf-8") + (b"\n" if index % 2 == 0 else b"\r\n")
+            f.write(line)
+            written += len(line)
+            index += 1
 
 
 def ensure_file(path: pathlib.Path, size: int, generator):
@@ -171,16 +199,21 @@ def main() -> int:
                         help="wrap mode written to the settings file (default: the built-in max)")
     parser.add_argument("--visible", action="store_true",
                         help="show the window on the screen (no --headless)")
+    parser.add_argument("--m4-5", dest="m4_5", action="store_true",
+                        help="M4-5: 100 MB single-line and LF/CRLF files, with open time limits")
     args = parser.parse_args()
     print(f"mode={'visible' if args.visible else 'headless'}", flush=True)
     if not args.exe.is_file():
         print(f"not found: {args.exe}", file=sys.stderr)
         return 2
     big = args.data_dir / "lines_100mb.txt"
-    single = args.data_dir / "single_line_10mb.txt"
+    single = args.data_dir / ("single_line_100mb.txt" if args.m4_5 else "single_line_10mb.txt")
+    lf_crlf = args.data_dir / "lines_100mb_lf_crlf.txt"
     try:
         ensure_file(big, 100 * MB, generate_lines)
-        ensure_file(single, 10 * MB, generate_single_line)
+        ensure_file(single, (100 if args.m4_5 else 10) * MB, generate_single_line)
+        if args.m4_5:
+            ensure_file(lf_crlf, 100 * MB, generate_lf_crlf)
         # A settings file of its own ("{}"): the measurement never depends on
         # (or reads) the user's %USERPROFILE%\.geditor.json.
         settings = args.data_dir / "settings.json"
@@ -194,13 +227,24 @@ def main() -> int:
         # Type in the middle of the 100 MB file.
         lines = run(args.exe, big, [*mode_args, settings_arg, "+500000"], args.chars, press_end=False)
         one = run(args.exe, single, [*mode_args, settings_arg], args.chars, press_end=True)
+        mixed = run(args.exe, lf_crlf, [*mode_args, settings_arg], 1, press_end=False) if args.m4_5 else None
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     mode = "visible" if args.visible else "headless"
     median = report("lines_100mb", lines, args.samples, mode)
-    report("single_line_10mb", one, args.samples, mode)
+    single_median = report(single.stem, one, args.samples, mode)
     ok = median <= args.limit_ms
+    if args.m4_5:
+        print(f"lines_100mb_lf_crlf: mode={mode} open_ms={mixed['open_ms']:.1f}")
+        checks = [("lines_100mb open_ms", lines["open_ms"], 1000.0),
+                  (f"{single.stem} open_ms", one["open_ms"], 1000.0),
+                  (f"{single.stem} median_ms at the end", single_median, args.limit_ms),
+                  ("lines_100mb_lf_crlf open_ms", mixed["open_ms"], 2000.0)]
+        for name, value, limit in checks:
+            fine = value <= limit
+            ok = ok and fine
+            print(f"M4-5: mode={mode} {name}={value:.1f} limit={limit:.0f} result={'OK' if fine else 'NG'}")
     print(f"mode={mode} limit_ms={args.limit_ms:.1f} median_ms={median:.2f} result={'OK' if ok else 'NG'}")
     return 0 if ok else 1
 

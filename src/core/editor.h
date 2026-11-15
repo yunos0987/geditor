@@ -51,8 +51,10 @@ class Editor {
   void insert_text(std::wstring_view text);
   // Opens `path` (absolute or relative to the current directory) following
   // the "open another file" rules: used by find-file, drag and drop and the
-  // command line.
-  void request_open(std::wstring_view path);
+  // command line. `encoding` (one of encoding_names(); empty: detect) reads
+  // the file in that encoding (find-file-with-encoding, --encoding) and is
+  // passed to a new window; an unknown name is refused with a message.
+  void request_open(std::wstring_view path, std::wstring_view encoding = {});
   // Runs a command by name as if its key had been pressed (for commands
   // without a default key, and the window's close button). Unknown names
   // show a message.
@@ -115,6 +117,12 @@ class Editor {
 
   // ---- State for drawing ----
   const Buffer& buffer() const { return main_; }
+  // The main buffer differs from its file: edited (buffer().modified()), or
+  // its encoding for saving was changed (set-buffer-file-coding-system).
+  bool modified() const { return main_.modified() || coding_changed_; }
+  // The encoding part of the mode line: "UTF-8", "Shift_JIS!" ("!": bytes
+  // that could not be read, PLAN 2 "bytes that cannot be read").
+  std::wstring encoding_text() const;
   bool minibuffer_active() const { return purpose_ != MinibufferPurpose::kNone; }
   const std::wstring& minibuffer_prompt() const { return prompt_; }
   const Buffer& minibuffer_buffer() const { return mini_; }
@@ -281,6 +289,19 @@ class Editor {
   void set_eol(Eol eol);
   // read-only-mode (C-x C-q, decision F6).
   void toggle_read_only();
+  // Encodings (M4b, PLAN 2 "encodings that can be named"); `name` is one of
+  // encoding_names() (another name fails with a message).
+  // set-buffer-file-coding-system: the encoding of the next save; the text
+  // stays as it is and the buffer becomes modified (as in Emacs). Refused in
+  // read-only-mode, like set-eol.
+  void set_buffer_file_coding_system(std::wstring_view name);
+  // revert-buffer-with-coding-system: reads the file again from disk in
+  // `name`, after a yes/no question when the buffer is modified. The undo
+  // history is dropped; point goes to the same line number. Nothing happens
+  // (with a message) without a file name or when the file is not on disk.
+  void revert_buffer_with_coding_system(std::wstring_view name);
+  // find-file-with-encoding: request_open(path, name).
+  void find_file_with_encoding(std::wstring_view path, std::wstring_view name);
 
   // File commands
   void find_file();
@@ -339,16 +360,24 @@ class Editor {
   void begin_mouse_command();
 
   std::wstring default_directory() const;
-  bool load_file(const std::wstring& path);
+  // Reads `path` into the main buffer: in `encoding` (a name of
+  // encoding_names()), or detected when it is empty. False (the buffer
+  // unchanged) when it cannot be read.
+  bool load_file(const std::wstring& path, std::wstring_view encoding = {});
   bool save_to(const std::wstring& path);
   // The line end of new buffers and of files without any (new_file.eol).
   Eol new_file_eol() const;
+  // The encoding of new buffers (new_file.encoding).
+  FileFormat new_file_format() const;
+  // The first argument of find-file-with-encoding is a file name: the
+  // minibuffer starts in default_directory() and completes file names.
+  bool reads_file_name() const;
   // True when `path` was saved by this process before (decision F3: only the
   // first save of a file makes "<file>~").
   bool saved_before(const std::wstring& path) const;
   void finish_write_file(const std::wstring& input);
   void run_after_save();
-  void open_after_choice(const std::wstring& path);
+  void open_after_choice(const std::wstring& path, const std::wstring& encoding);
 
   Host& host_;
   Buffer main_;
@@ -412,6 +441,18 @@ class Editor {
 
   AfterSave after_save_ = AfterSave::kNone;
   std::wstring after_save_path_;
+  std::wstring after_save_encoding_;  // the encoding of after_save_path_ ("": detect)
+
+  // Encodings (M4b). `coding_changed_`: set-buffer-file-coding-system since
+  // the file was read or saved. `encoding_named_`: the buffer's encoding was
+  // chosen (--encoding, find-file-with-encoding of a new file, or
+  // set-buffer-file-coding-system), so new_file.encoding does not replace
+  // it. `undecodable_byte_` / `undecodable_line_`: where the first problem
+  // of an undecodable file is (format.undecodable), for the save message.
+  bool coding_changed_ = false;
+  bool encoding_named_ = false;
+  size_t undecodable_byte_ = 0;
+  size_t undecodable_line_ = 0;
 
   // The file of the main buffer as it was when read or last saved (decision
   // F2); `disk_known_` is false when that could not be read.

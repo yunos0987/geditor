@@ -213,7 +213,7 @@ void MainWindow::apply_command_line(const CommandLine& command_line) {
   if (!command_line.file.empty()) {
     LARGE_INTEGER start{}, end{};
     QueryPerformanceCounter(&start);
-    editor_.request_open(command_line.file);
+    editor_.request_open(command_line.file, command_line.encoding);
     QueryPerformanceCounter(&end);
     open_ms_ = ms_between(start, end);
   }
@@ -399,9 +399,10 @@ bool MainWindow::ask_yes_no(const std::wstring& question) {
   return yes_no_for(ask_headless(yes_no_question(question))).value_or(false);
 }
 
-bool MainWindow::launch_new_window(const std::wstring& path, std::wstring& error) {
-  // H5: a new window of a headless one is headless too.
-  return launch_editor(own_executable_path(), path, settings_argument_, error, headless_);
+bool MainWindow::launch_new_window(const std::wstring& path, const std::wstring& encoding, std::wstring& error) {
+  // H5: a new window of a headless one is headless too; M4b: the encoding
+  // of find-file-with-encoding goes with it.
+  return launch_editor(own_executable_path(), path, settings_argument_, error, headless_, encoding);
 }
 
 void MainWindow::quit() {
@@ -997,7 +998,7 @@ bool MainWindow::write_state(const std::wstring& path) {
   text += state_line(L"settings", settings_argument_);
   text += state_line(L"title", title_);
   text += state_line(L"message", editor_.message());
-  text += state_line(L"modified", editor_.buffer().modified() ? L"1" : L"0");
+  text += state_line(L"modified", editor_.modified() ? L"1" : L"0");
   text += state_line(L"length", std::to_wstring(editor_.buffer().text.length()));
   // Line ends and read-only (M4a): the mode line, its line-end part, the
   // default line end, and read-only-mode.
@@ -1005,6 +1006,12 @@ bool MainWindow::write_state(const std::wstring& path) {
   text += state_line(L"eol", editor_.eol_text());
   text += state_line(L"eol_default", eol_name(editor_.buffer().format.eol));
   text += state_line(L"read_only", editor_.buffer().read_only ? L"1" : L"0");
+  // Encodings (M4b): the name of the encoding for saving, and its mode line
+  // part ("Shift_JIS!" for a file read with bytes that could not be read).
+  text += state_line(L"encoding", encoding_setting_name(editor_.buffer().format));
+  text += state_line(L"encoding_text", editor_.encoding_text());
+  // The echo area line (the minibuffer prompt and input while it is active).
+  text += state_line(L"echo", editor_.echo_area_text());
   text += state_line(L"path", editor_.buffer().path);
   if (headless_) {
     text += state_line(L"clipboard", clipboard_has_text_ ? L"text" : L"empty");
@@ -1195,7 +1202,7 @@ void MainWindow::after_input() {
 
 void MainWindow::update_title() {
   std::wstring title = editor_.buffer_name();
-  if (editor_.buffer().modified()) title += L'*';
+  if (editor_.modified()) title += L'*';
   title += L" - ";
   title += kAppName;
   if (title == title_) return;

@@ -65,6 +65,7 @@ class FakeHost : public geditor::Host {
   int yes_no_dialogs = 0;
   std::vector<std::wstring> yes_no_questions;  // the text of each yes/no question
   std::vector<std::wstring> launched;
+  std::vector<std::wstring> launched_encodings;  // the encoding of each launched window ("": none)
   std::vector<std::wstring> written;
   int quit_calls = 0;
 
@@ -74,6 +75,8 @@ class FakeHost : public geditor::Host {
   void add_file(const std::wstring& path, const std::string& bytes);
   bool has_file(const std::wstring& path) const;
   std::string file(const std::wstring& path) const;
+  // The write time of a file (0 when there is none).
+  unsigned long long write_time(const std::wstring& path) const;
 
   // Changes a file as another program would: new bytes and a new write time.
   void touch_file(const std::wstring& path, const std::string& bytes);
@@ -94,7 +97,7 @@ class FakeHost : public geditor::Host {
   geditor::OpenChoice ask_open_choice(const std::wstring& path) override;
   geditor::SaveChoice ask_save_changes(const std::wstring& buffer_name) override;
   bool ask_yes_no(const std::wstring& question) override;
-  bool launch_new_window(const std::wstring& path, std::wstring& error) override;
+  bool launch_new_window(const std::wstring& path, const std::wstring& encoding, std::wstring& error) override;
   void quit() override { ++quit_calls; }
   void open_menu_bar() override { ++menu_bar_opens; }
   int menu_bar_opens = 0;
@@ -126,7 +129,7 @@ struct Session {
   std::wstring text() const { return ed.buffer().text.text(); }
   size_t point() const { return ed.buffer().point; }
   std::wstring message() const { return ed.message(); }
-  bool modified() const { return ed.buffer().modified(); }
+  bool modified() const { return ed.modified(); }
 };
 
 std::string utf8(const std::wstring& s);

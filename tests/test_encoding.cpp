@@ -55,21 +55,34 @@ TEST(encoding_round_trip_is_byte_identical) {
   CHECK_EQ(round_trip("\xEF\xBB\xBF"), std::string("\xEF\xBB\xBF"));
 }
 
-TEST(encoding_invalid_utf8_is_refused) {
-  const char* bad[] = {
-      "abc\x80",              // stray continuation
-      "\xC0\xAF",             // overlong
-      "\xE0\x80\xAF",         // overlong 3-byte
-      "\xED\xA0\x80",         // surrogate
-      "\xF4\x90\x80\x80",     // above U+10FFFF
-      "ok \xE3\x81",          // truncated
-      "\xFF",
+// M4b (PLAN 2 "bytes that cannot be read"): invalid UTF-8 is read with
+// U+FFFD, one per maximal subpart, and marked undecodable (M4a refused it).
+TEST(encoding_invalid_utf8_reads_as_replacement_characters) {
+  struct Case {
+    const char* bytes;
+    const wchar_t* text;
   };
-  for (const char* b : bad) {
-    const DecodedText d = geditor::decode_utf8(b);
-    CHECK(d.status == DecodeStatus::kInvalidUtf8);
+  const Case bad[] = {
+      {"abc\x80", L"abc\xFFFD"},                        // stray continuation
+      {"\xC0\xAF", L"\xFFFD\xFFFD"},                    // overlong
+      {"\xE0\x80\xAF", L"\xFFFD\xFFFD\xFFFD"},          // overlong 3-byte
+      {"\xED\xA0\x80", L"\xFFFD\xFFFD\xFFFD"},          // surrogate
+      {"\xF4\x90\x80\x80", L"\xFFFD\xFFFD\xFFFD\xFFFD"},  // above U+10FFFF
+      {"ok \xE3\x81", L"ok \xFFFD"},                    // truncated: one maximal subpart
+      {"\xFF", L"\xFFFD"},
+      {"\xF0\x9F\x98x", L"\xFFFDx"},                    // truncated 4-byte before ASCII
+  };
+  for (const Case& c : bad) {
+    const DecodedText d = geditor::decode_utf8(c.bytes);
+    CHECK(d.status == DecodeStatus::kOk);
+    CHECK(d.format.undecodable);
+    CHECK(d.replaced);
+    CHECK_EQ(d.text, std::wstring(c.text));
   }
-  CHECK_EQ(geditor::decode_utf8("abc\x80").error_offset, size_t{3});
+  const DecodedText d = geditor::decode_utf8("ab\ncd\r\nabc\x80");
+  CHECK_EQ(d.error_offset, size_t{10});
+  CHECK_EQ(d.error_line, size_t{2});
+  CHECK(!geditor::decode_utf8("valid \xE3\x81\x82").format.undecodable);
 }
 
 // M1 refused mixed and CR-only line ends; M4a keeps them line by line.

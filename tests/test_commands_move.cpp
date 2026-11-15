@@ -260,7 +260,7 @@ TEST(mode_line_shows_state) {
   Session b;
   b.host.add_file(L"C:\\work\\b.txt", "\xEF\xBB\xBFx\r\ny\r\n");
   b.ed.request_open(L"C:\\work\\b.txt");
-  CHECK_EQ(b.ed.mode_line(), std::wstring(L"--- b.txt  UTF-8 BOM CRLF  L1 C0  wrap:max"));
+  CHECK_EQ(b.ed.mode_line(), std::wstring(L"--- b.txt  UTF-8-BOM CRLF  L1 C0  wrap:max"));
 }
 
 TEST(echo_area_shows_messages_and_minibuffer) {

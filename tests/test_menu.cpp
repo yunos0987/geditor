@@ -48,22 +48,23 @@ constexpr const char* kCoding = "set-buffer-file-coding-system";
 constexpr PlanRow kPlanRows[] = {
     // File
     {L"File > Open...", kCmd, "find-file", nullptr, kNo, true, L"C-x C-f"},
-    {L"File > Open with Encoding...", kCmd, "find-file-with-encoding", nullptr, kNo, false, L"C-x RET c"},
-    {L"File > Reopen with Encoding...", kCmd, "revert-buffer-with-coding-system", nullptr, kNo, false, L"C-x RET r"},
+    // M4b: the encoding commands are implemented (the items are enabled).
+    {L"File > Open with Encoding...", kCmd, "find-file-with-encoding", nullptr, kNo, true, L"C-x RET c"},
+    {L"File > Reopen with Encoding...", kCmd, "revert-buffer-with-coding-system", nullptr, kNo, true, L"C-x RET r"},
     {L"File > ─", kSep, nullptr, nullptr, kNo, false, L""},
     {L"File > Save", kCmd, "save-buffer", nullptr, kNo, true, L"C-M-s"},
     {L"File > Save As...", kCmd, "write-file", nullptr, kNo, true, L"C-x C-w"},
     {L"File > ─", kSep, nullptr, nullptr, kNo, false, L""},
     {L"File > Encoding for Saving ▶", kSub, nullptr, nullptr, kNo, true, L""},
-    {L"File > Encoding for Saving > utf-8", kCmd, kCoding, L"utf-8", kRad, false, L""},
-    {L"File > Encoding for Saving > utf-8-bom", kCmd, kCoding, L"utf-8-bom", kRad, false, L""},
-    {L"File > Encoding for Saving > utf-16le", kCmd, kCoding, L"utf-16le", kRad, false, L""},
-    {L"File > Encoding for Saving > utf-16le-bom", kCmd, kCoding, L"utf-16le-bom", kRad, false, L""},
-    {L"File > Encoding for Saving > utf-16be", kCmd, kCoding, L"utf-16be", kRad, false, L""},
-    {L"File > Encoding for Saving > utf-16be-bom", kCmd, kCoding, L"utf-16be-bom", kRad, false, L""},
-    {L"File > Encoding for Saving > shift_jis", kCmd, kCoding, L"shift_jis", kRad, false, L""},
-    {L"File > Encoding for Saving > euc-jp", kCmd, kCoding, L"euc-jp", kRad, false, L""},
-    {L"File > Encoding for Saving > iso-2022-jp", kCmd, kCoding, L"iso-2022-jp", kRad, false, L""},
+    {L"File > Encoding for Saving > utf-8", kCmd, kCoding, L"utf-8", kRad, true, L""},
+    {L"File > Encoding for Saving > utf-8-bom", kCmd, kCoding, L"utf-8-bom", kRad, true, L""},
+    {L"File > Encoding for Saving > utf-16le", kCmd, kCoding, L"utf-16le", kRad, true, L""},
+    {L"File > Encoding for Saving > utf-16le-bom", kCmd, kCoding, L"utf-16le-bom", kRad, true, L""},
+    {L"File > Encoding for Saving > utf-16be", kCmd, kCoding, L"utf-16be", kRad, true, L""},
+    {L"File > Encoding for Saving > utf-16be-bom", kCmd, kCoding, L"utf-16be-bom", kRad, true, L""},
+    {L"File > Encoding for Saving > shift_jis", kCmd, kCoding, L"shift_jis", kRad, true, L""},
+    {L"File > Encoding for Saving > euc-jp", kCmd, kCoding, L"euc-jp", kRad, true, L""},
+    {L"File > Encoding for Saving > iso-2022-jp", kCmd, kCoding, L"iso-2022-jp", kRad, true, L""},
     // M3c (decision G9): windows-1252, gb18030, big5 and euc-kr were removed.
     {L"File > Line Endings ▶", kSub, nullptr, nullptr, kNo, true, L""},
     // M4a: set-eol is implemented (the items are enabled).
@@ -326,14 +327,17 @@ TEST(menu_view_marks_follow_commands_and_settings) {
 
 // M4a computes Read Only and Line Endings (M4-9, test_m4a_menu.cpp); the
 // Encoding for Saving marks wait for M4b.
-TEST(menu_file_encoding_marks_wait_for_m4b) {
+// M4b: Encoding for Saving marks the buffer's encoding (test_m4b_encoding.cpp
+// has every command and encoding).
+TEST(menu_file_marks_follow_the_buffer) {
   Session s;
   s.load(L"abc");
   s.keys(L"C-x C-q");
   CHECK(s.ed.buffer().read_only);
   CHECK(checked(s, L"File > Read Only"));
   CHECK(checked(s, L"File > Line Endings > LF"));
-  CHECK(!checked(s, L"File > Encoding for Saving > utf-8"));
+  CHECK(checked(s, L"File > Encoding for Saving > utf-8"));
+  CHECK(!checked(s, L"File > Encoding for Saving > utf-8-bom"));
 }
 
 // ---- [C2] enabled rules (decision B2) ----

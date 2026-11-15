@@ -72,8 +72,9 @@ class Host {
   // Yes/no question, such as overwriting an existing file.
   virtual bool ask_yes_no(const std::wstring& question) = 0;
 
-  // Starts another geditor process for `path`.
-  virtual bool launch_new_window(const std::wstring& path, std::wstring& error) = 0;
+  // Starts another geditor process for `path`; a non-empty `encoding` (one
+  // of encoding_names()) is passed as --encoding=NAME (find-file-with-encoding).
+  virtual bool launch_new_window(const std::wstring& path, const std::wstring& encoding, std::wstring& error) = 0;
   // Closes the window and ends the process (after the current call returns).
   virtual void quit() = 0;
   // menu-bar-open (F10): enters the menu bar after the current command

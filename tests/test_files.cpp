@@ -58,14 +58,17 @@ TEST(file_round_trip_without_line_end) {
   CHECK_EQ(open_edit_revert_save("no line end"), std::string("no line end"));
 }
 
-TEST(file_invalid_utf8_is_refused_and_buffer_unchanged) {
+// M4b (PLAN 2 "undetectable bytes"): bytes that are neither UTF-8 nor
+// Shift_JIS open as UTF-8 with U+FFFD and "!" (M4a refused them).
+TEST(file_invalid_utf8_opens_with_replacement_characters) {
   Session s;
   s.load(L"keep");
-  s.host.add_file(L"C:\\work\\bad.txt", "ab\xC3(");
+  s.host.add_file(L"C:\\work\\bad.txt", "ab\xFD(");
   open_with_dialog(s, L"C:\\work\\bad.txt");
-  CHECK_EQ(s.text(), std::wstring(L"keep"));
-  CHECK_EQ(s.ed.buffer().path, std::wstring(L"C:\\work\\t.txt"));
-  CHECK(s.message().find(L"not valid UTF-8") != std::wstring::npos);
+  CHECK_EQ(s.text(), std::wstring(L"ab\xFFFD("));
+  CHECK_EQ(s.ed.buffer().path, std::wstring(L"C:\\work\\bad.txt"));
+  CHECK_EQ(s.ed.encoding_text(), std::wstring(L"UTF-8!"));
+  CHECK(s.message().find(L"not valid UTF-8 or Shift_JIS") != std::wstring::npos);
 }
 
 // M1 refused mixed and CR-only line ends; M4a opens them and keeps each
