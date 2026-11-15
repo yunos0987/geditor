@@ -346,6 +346,9 @@ constexpr ReadOnlyRow kReadOnlyRows[] = {
     {"newline", R"("newline")", L"<f12>", L"", 0, -1},
     {"open-line", R"("open-line")", L"<f12>", L"", 0, -1},
     {"paste", R"("paste")", L"<f12>", L"", 0, -1},
+    // M5: query-replace refuses to start (then "!" is a refused self-insert).
+    {"query-replace", R"(["query-replace", "ab", "x"])", L"<f12> !", L"", 0, -1},
+    {"query-replace-regexp", R"j(["query-replace-regexp", "a(b)", "$1"])j", L"<f12> !", L"", 0, -1},
     {"quoted-insert", R"("quoted-insert")", L"<f12> x", L"", 0, -1},
     {"redo", R"("redo")", L"<f12>", L"M-> z C-/", 0, -1},
     {"self-insert-command", nullptr, L"x", L"", 0, -1},
@@ -361,6 +364,10 @@ constexpr const char* kNonEditingCommands[] = {
     "backward-char", "backward-word", "beginning-of-buffer", "beginning-of-line", "copy", "digit-argument",
     "end-of-buffer", "end-of-line", "exchange-point-and-mark", "execute-extended-command", "exit-minibuffer",
     "find-file", "find-file-with-encoding", "find-user-init-file", "forward-char", "forward-word",
+    // M5: isearch and goto-line move point only.
+    "goto-line", "isearch-abort", "isearch-backward", "isearch-delete-char", "isearch-exit", "isearch-forward",
+    "isearch-query-replace", "isearch-repeat-backward", "isearch-repeat-forward", "isearch-toggle-case-fold",
+    "isearch-toggle-regexp", "query-replace-exit", "query-replace-skip",
     "keyboard-escape-quit", "keyboard-quit",
     "kill-ring-save", "mark-whole-buffer", "menu-bar-open", "minibuffer-complete", "negative-argument",
     "next-history-element", "next-line", "previous-history-element", "previous-line", "quit",
@@ -374,14 +381,25 @@ constexpr const char* kNonEditingCommands[] = {
     "universal-argument", "write-file",
 };
 
+// M5: the query-replace keys that replace. They edit only inside
+// query-replace, which cannot start in read-only-mode;
+// m4a_query_replace_actions_stop_when_read_only_mode_comes_on covers
+// read-only-mode turned on during query-replace.
+constexpr const char* kQueryReplaceActions[] = {
+    "query-replace-act",
+    "query-replace-act-and-exit",
+    "query-replace-all",
+};
+
 }  // namespace
 
-// The two lists cover every implemented command exactly once, so a new
+// The lists cover every implemented command exactly once, so a new
 // editing command cannot be missed by the table below.
 TEST(m4a_read_only_table_covers_every_registered_command) {
   std::set<std::string> listed;
   for (const ReadOnlyRow& r : kReadOnlyRows) CHECK(listed.insert(r.command).second);
   for (const char* c : kNonEditingCommands) CHECK(listed.insert(c).second);
+  for (const char* c : kQueryReplaceActions) CHECK(listed.insert(c).second);
   for (const geditor::CommandInfo& info : geditor::all_commands()) {
     if (info.fn == nullptr) continue;  // later milestones: "not implemented yet"
     if (listed.count(info.name) == 0) std::printf("  not in a list: %s\n", info.name);
@@ -423,6 +441,31 @@ TEST(m4a_every_editing_command_is_refused_in_read_only_mode) {
     s.keys(r.keys);
     if (s.text() == text && s.ed.buffer().format.eol == eol) std::printf("  %s: no edit when writable\n", r.command);
     CHECK(s.text() != text || s.ed.buffer().format.eol != eol);
+  }
+}
+
+// M5: C-x C-q during query-replace (through the global keymap) turns
+// read-only-mode on; the next y, "." or "!" ends query-replace with "Buffer
+// is read-only" and changes nothing more.
+TEST(m4a_query_replace_actions_stop_when_read_only_mode_comes_on) {
+  for (const wchar_t* key : {L"y", L".", L"!"}) {
+    Session s;
+    open_bytes(s, "ab ab ab\n");
+    s.keys(L"M-%");
+    s.type(L"ab");
+    s.keys(L"RET");
+    s.type(L"x");
+    s.keys(L"RET");
+    CHECK(s.ed.query_replace_active());
+    s.keys(L"y");  // one replacement while writable
+    CHECK_EQ(s.text(), std::wstring(L"x ab ab\n"));
+    s.keys(L"C-x C-q");
+    CHECK(s.ed.buffer().read_only);
+    CHECK(s.ed.query_replace_active());
+    s.keys(key);
+    CHECK(!s.ed.query_replace_active());
+    CHECK_EQ(s.message(), std::wstring(L"Buffer is read-only"));
+    CHECK_EQ(s.text(), std::wstring(L"x ab ab\n"));
   }
 }
 

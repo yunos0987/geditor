@@ -16,6 +16,7 @@
 #include "key.h"
 #include "keymap.h"
 #include "minibuffer.h"
+#include "search.h"
 
 namespace geditor {
 
@@ -114,6 +115,60 @@ class Editor {
   // Errors of the last settings text, sorted by position.
   const std::vector<Diagnostic>& settings_errors() const { return settings_errors_; }
   const Keymap& keymap(KeymapKind kind) const { return maps_[static_cast<int>(kind)]; }
+
+  // ---- Search and replace (M5) ----
+  bool isearch_active() const { return isearch_.active; }
+  bool query_replace_active() const { return replace_.active; }
+  // The minibuffer, isearch or query-replace reads the keys (PLAN 2 "menu
+  // bar": every menu item is greyed meanwhile).
+  bool input_mode_active() const { return minibuffer_active() || isearch_active() || query_replace_active(); }
+  // The isearch pattern being typed ("" outside isearch).
+  const std::wstring& isearch_pattern() const { return isearch_.now.pattern; }
+  // The matches to highlight in the `rows` screen rows from top(): every
+  // non-empty match ("search_match") and the current one
+  // ("search_current"), edges on cluster boundaries. Empty outside isearch
+  // and query-replace, and while the isearch pattern is empty, invalid or
+  // failing (failing: no current match).
+  struct SearchHighlights {
+    std::vector<SearchMatch> matches;
+    bool has_current = false;
+    SearchMatch current;
+  };
+  SearchHighlights search_highlights(int rows) const;
+  // The most matches search_highlights returns.
+  static constexpr size_t kMaxHighlights = 10000;
+
+  // isearch (PLAN 4.4 "during isearch"). Starting fails while the
+  // minibuffer, isearch or query-replace is active.
+  void isearch_start(bool forward, bool regexp);
+  // C-s / C-r: the next / previous match; the other direction first turns
+  // the search around on the current match. An empty pattern takes the last
+  // search string. A failing search wraps around the buffer.
+  void isearch_repeat(bool forward);
+  // DEL: back to the state before the last input (a character or a repeat).
+  void isearch_delete_char();
+  // RET: ends isearch at the match; the mark goes where the search started.
+  void isearch_exit();
+  // C-g: ends isearch with point and the view back where it started.
+  void isearch_abort();
+  void isearch_toggle_regexp();
+  void isearch_toggle_case_fold();
+  // M-%: ends isearch and reads the replacement of the isearch pattern.
+  void isearch_query_replace();
+  // query-replace FROM TO from point to the end of the buffer (PLAN 4.4
+  // "during query-replace"). The replacements of one run are one undo unit.
+  void query_replace(bool regexp, std::wstring_view from, std::wstring_view to);
+  // y / SPC (`and_exit`: "."), n / DEL, !, q / RET.
+  void query_replace_act(bool and_exit);
+  void query_replace_skip();
+  void query_replace_all();
+  void query_replace_exit();
+  // goto-line: point to the start of line `line` (1-based; clamped to the
+  // first and last line), after pushing the mark as Emacs does.
+  void goto_line(int64_t line);
+  // Ends isearch (as RET) or query-replace (as q): before the host opens a
+  // dropped file or ends the session, and before execute_command.
+  void end_search_modes();
 
   // ---- State for drawing ----
   const Buffer& buffer() const { return main_; }
@@ -321,7 +376,73 @@ class Editor {
  private:
   enum class AfterSave { kNone, kQuit, kOpen };
 
+  // The keymaps of the input mode now (the minibuffer, query-replace and
+  // isearch read their own keymap; the first two fall back to the global
+  // keymap without the Windows compatible keys).
   Keymap::Lookup lookup(const KeySequence& keys) const;
+  void handle_key_impl(const Key& key);
+  // After each input: query-replace follows edits and moves made by other
+  // commands; the echo area shows the prompt of isearch or query-replace
+  // (with the message of the input in brackets).
+  void after_input();
+  // The echo area prompt of isearch / query-replace.
+  std::wstring isearch_prompt() const;
+  std::wstring query_replace_prompt() const;
+
+  // isearch state. A step is what DEL goes back to.
+  struct IsearchStep {
+    std::wstring pattern;
+    bool forward = true;
+    bool regexp = false;
+    int case_override = -1;  // -1: search.case_fold; 0: ignore case; 1: case-sensitive (M-c)
+    bool has_match = false;  // `match` is the current match (also while failing: the last one)
+    SearchMatch match;
+    bool failing = false;
+    bool wrapped = false;
+    bool invalid = false;  // the regexp does not compile (the message is shown)
+    size_t origin = 0;     // where the search runs from without a match
+    size_t point = 0;
+  };
+  struct IsearchState {
+    bool active = false;
+    IsearchStep now;
+    std::vector<IsearchStep> history;
+    size_t start_point = 0;
+    RowPos start_top;
+  };
+  using LineReplacement = SearchPattern::LineReplacement;
+  struct ReplaceState {
+    bool active = false;
+    bool regexp = false;
+    std::wstring from;
+    std::wstring to;
+    size_t start_point = 0;
+    size_t undo_groups = 0;  // undo groups before the first replacement
+    size_t count = 0;        // replacements made
+    SearchMatch match;       // the current match
+    // What the last query-replace action left, to notice other commands.
+    uint64_t revision = 0;
+    size_t point = 0;
+  };
+  // Compiles the isearch pattern of `isearch_.now` into matcher_; false for
+  // an invalid regexp (now.invalid set and its message shown).
+  bool isearch_prepare();
+  // Searches for isearch_.now: `repeat` for C-s / C-r, else from the current
+  // match (the pattern or a toggle changed).
+  void isearch_search(bool repeat);
+  void isearch_add_text(std::wstring_view text);
+  void isearch_push();
+  // Ends isearch: the search string is kept for the next empty C-s; `abort`
+  // puts point back.
+  void isearch_end(bool abort);
+  // The current match of query-replace: the next one at or after `from`.
+  // Finishes query-replace when there is none. `show`: scroll it into view
+  // now (query_replace_all leaves that to the end of its command).
+  void query_replace_next(size_t from, bool not_empty_at_from, bool show = true);
+  void query_replace_finish(std::wstring message);
+  bool query_replace_replace_current();
+  // The match `m` widened to cluster boundaries.
+  SearchMatch snap_match(const SearchMatch& m) const;
   // Runs a key's binding with the pending prefix argument; then a command
   // chosen in the minibuffer (M-x), if any. False when a command failed.
   bool dispatch(const Binding& binding, bool typing);
@@ -384,6 +505,20 @@ class Editor {
   Buffer mini_;
   // global, minibuffer, isearch, query_replace (KeymapKind order).
   Keymap maps_[kKeymapCount];
+  // The global keymap without the Windows compatible keys: the fallback of
+  // the minibuffer and query-replace, and the keymap of a key that ends
+  // isearch (M5: the C-S- keys do not run inside these modes).
+  Keymap global_in_modes_;
+  // The key sequence being typed started in an input mode (it ended
+  // isearch): it is looked up in global_in_modes_.
+  bool sequence_in_mode_ = false;
+
+  // Search and replace (M5).
+  mutable SearchPattern matcher_;
+  IsearchState isearch_;
+  ReplaceState replace_;
+  // The last isearch strings (literal, regexp), for C-s on an empty pattern.
+  std::wstring last_search_[2];
 
   // Settings
   std::wstring settings_path_;

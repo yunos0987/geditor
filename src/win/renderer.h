@@ -133,8 +133,10 @@ class Renderer {
   // BeginDraw .. EndDraw on target_ with brush_.
   HRESULT draw_frame(const Editor& editor, ViewState& view);
   void draw_text_area(const Editor& editor, ViewState& view, float width, float height);
-  // Highlights the region cells of row_ (and its line end as one cell).
-  void draw_region(const Buffer& b, float x0, float y, D2D1_COLOR_F color);
+  // Fills the cells of row_ whose clusters start in [start, end) (and its
+  // line end as one cell when it is inside): the region, and the search
+  // matches (M5; a match never holds a line end).
+  void draw_range(size_t start, size_t end, float x0, float y, D2D1_COLOR_F color);
   void draw_mode_line(const Editor& editor, float y, float width);
   // The echo area from `y` down: one line, or the lines of a multi-line
   // message (settings errors) followed by the minibuffer line when active.

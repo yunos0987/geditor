@@ -382,10 +382,14 @@ void Renderer::draw_text_area(const Editor& editor, ViewState& view, float width
   const D2D1_COLOR_F foreground = color_of(editor, kColorForeground);
   const D2D1_COLOR_F whitespace = color_of(editor, kColorWhitespace);
   const D2D1_COLOR_F selection = color_of(editor, kColorSelection);
+  const D2D1_COLOR_F search_match = color_of(editor, kColorSearchMatch);
+  const D2D1_COLOR_F search_current = color_of(editor, kColorSearchCurrent);
   const PieceTree& text = b.text;
   RowPos pos = editor.top();
   if (pos.line >= text.line_count()) return;
   const int rows = static_cast<int>(std::ceil(height / lh));  // the last one may be partial
+  // M5: the matches of the rows drawn (empty outside isearch / query-replace).
+  const Editor::SearchHighlights highlights = editor.search_highlights(rows);
   float cursor_y = -1;
   for (int r = 0; r < rows; ++r) {
     const float y = static_cast<float>(r) * lh;
@@ -410,7 +414,24 @@ void Renderer::draw_text_area(const Editor& editor, ViewState& view, float width
         fill(x, y, x + static_cast<float>(c.width) * cw, y + lh, whitespace);
       }
     }
-    if (b.has_mark && b.mark_active && b.mark != b.point) draw_region(b, x0, y, selection);
+    if (b.has_mark && b.mark_active && b.mark != b.point) {
+      draw_range(std::min(b.mark, b.point), std::max(b.mark, b.point), x0, y, selection);
+    }
+    // Search matches over the region (PLAN 4.7), the current one last. The
+    // ranges come from the core (Editor::search_highlights); the renderer
+    // does not search.
+    if (!highlights.matches.empty() || highlights.has_current) {
+      const size_t row_start = row_.cells.empty() ? row_.line_end : row_.cells.front().offset;
+      for (const SearchMatch& m : highlights.matches) {
+        if (m.end > row_start && m.start <= row_.line_end && !(highlights.has_current && m == highlights.current)) {
+          draw_range(m.start, m.end, x0, y, search_match);
+        }
+      }
+      if (highlights.has_current && highlights.current.end > row_start &&
+          highlights.current.start <= row_.line_end) {
+        draw_range(highlights.current.start, highlights.current.end, x0, y, search_current);
+      }
+    }
     // Characters, then whitespace marks in their own colour. A cluster of
     // several code points (or an emoji) is drawn from its text in the buffer.
     for (int pass = 0; pass < 2; ++pass) {
@@ -447,12 +468,10 @@ void Renderer::draw_text_area(const Editor& editor, ViewState& view, float width
   }
 }
 
-void Renderer::draw_region(const Buffer& b, float x0, float y, D2D1_COLOR_F color) {
+void Renderer::draw_range(size_t region_start, size_t region_end, float x0, float y, D2D1_COLOR_F color) {
   const float cw = measurer_.cell_width();
   const float lh = measurer_.line_height();
-  const size_t region_start = std::min(b.mark, b.point);
-  const size_t region_end = std::max(b.mark, b.point);
-  // Runs of region cells, and the line end as one cell.
+  // Runs of cells in the range, and the line end as one cell.
   int run_start = 0;
   int run_end = 0;
   bool in_run = false;

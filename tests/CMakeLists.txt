@@ -22,6 +22,7 @@ add_executable(geditor_tests
   test_m4a_save.cpp
   test_m4b_commands.cpp
   test_m4b_encoding.cpp
+  test_m5_search.cpp
   test_layout_wrap.cpp
   test_menu.cpp
   test_minibuffer.cpp

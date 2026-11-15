@@ -43,6 +43,12 @@ class UndoHistory {
   bool undo(PieceTree& tree, EditListener* listener, size_t* point, Eol* default_eol = nullptr);
   bool redo(PieceTree& tree, EditListener* listener, size_t* point, Eol* default_eol = nullptr);
 
+  // query-replace (M5, one undo unit for the whole replacement): the groups
+  // from index `first` (an undo_count() taken before them) to the newest
+  // become one group, whose cursor before it is `point_before`. Nothing
+  // happens when there are none.
+  void merge_groups_since(size_t first, size_t point_before);
+
   // The current state becomes the saved state.
   void mark_saved();
   bool modified() const;

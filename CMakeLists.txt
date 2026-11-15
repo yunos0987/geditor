@@ -44,10 +44,12 @@ add_library(geditor_core STATIC
   src/core/mouse.cpp
   src/core/path.cpp
   src/core/piece_tree.cpp
+  src/core/search.cpp
   src/core/undo.cpp
   src/core/unicode.cpp)
 target_include_directories(geditor_core PUBLIC src/core)
-target_link_libraries(geditor_core PRIVATE geditor_options)
+# PCRE2 (search.*, M5): its first call is the first search, not start-up.
+target_link_libraries(geditor_core PRIVATE geditor_options pcre2_16)
 
 # Pure logic of the Win32 layer (key translation, command line, clipboard
 # text, file access, process start, the HMENUs of the menu model): shared by

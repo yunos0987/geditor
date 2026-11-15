@@ -84,10 +84,10 @@ TEST(mx_not_implemented_command) {
   test::Session s;
   s.load(L"abc");
   s.keys(L"M-x");
-  s.type(L"goto-line");
+  s.type(L"kmacro-start-macro");  // M6 (goto-line, used here before, is M5)
   s.keys(L"RET");
-  CHECK(!s.ed.minibuffer_active());  // no argument prompt for it either
-  CHECK_EQ(s.message(), std::wstring(L"goto-line is not implemented yet"));
+  CHECK(!s.ed.minibuffer_active());
+  CHECK_EQ(s.message(), std::wstring(L"kmacro-start-macro is not implemented yet"));
 }
 
 TEST(mx_asks_for_the_arguments_of_insert_text) {
@@ -205,12 +205,8 @@ struct LaterKey {
 };
 
 constexpr LaterKey kLaterKeys[] = {
-    {L"C-s", "isearch-forward"},
-    {L"C-r", "isearch-backward"},
-    {L"M-%", "query-replace"},
-    {L"C-M-%", "query-replace-regexp"},
-    {L"M-g g", "goto-line"},
-    {L"M-g M-g", "goto-line"},
+    // C-s / C-r / M-% / C-M-% / M-g g / M-g M-g and C-S-f / C-S-h / C-S-r /
+    // C-S-g (search, replace, goto-line): implemented in M5 (test_m5_*.cpp).
     // C-x RET f / r / c (the encoding commands): implemented in M4b
     // (test_m4b_encoding.cpp).
     // C-x RET e set-eol: implemented in M4a (test_m4a_eol.cpp).
@@ -220,10 +216,6 @@ constexpr LaterKey kLaterKeys[] = {
     {L"C-x )", "kmacro-end-macro"},
     {L"C-x e", "kmacro-end-and-call-macro"},
     {L"<f4>", "kmacro-end-and-call-macro"},
-    {L"C-S-f", "isearch-forward"},
-    {L"C-S-h", "query-replace"},
-    {L"C-S-r", "query-replace"},
-    {L"C-S-g", "goto-line"},
 };
 
 // The View commands of M3a (menu View / M-x, text-scale also by key).

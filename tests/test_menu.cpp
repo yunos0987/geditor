@@ -89,9 +89,10 @@ constexpr PlanRow kPlanRows[] = {
     {L"Edit > Paste", kCmd, "paste", nullptr, kNo, true, L"C-S-v  C-y"},
     {L"Edit > Select All", kCmd, "select-all", nullptr, kNo, true, L"C-S-a  C-x h"},
     {L"Edit > ─", kSep, nullptr, nullptr, kNo, false, L""},
-    {L"Edit > Find...", kCmd, "isearch-forward", nullptr, kNo, false, L"C-S-f  C-s"},
-    {L"Edit > Replace...", kCmd, "query-replace", nullptr, kNo, false, L"C-S-h  M-%"},
-    {L"Edit > Go to Line...", kCmd, "goto-line", nullptr, kNo, false, L"C-S-g  M-g g"},
+    // M5: isearch-forward, query-replace and goto-line are implemented.
+    {L"Edit > Find...", kCmd, "isearch-forward", nullptr, kNo, true, L"C-S-f  C-s"},
+    {L"Edit > Replace...", kCmd, "query-replace", nullptr, kNo, true, L"C-S-h  M-%"},
+    {L"Edit > Go to Line...", kCmd, "goto-line", nullptr, kNo, true, L"C-S-g  M-g g"},
     // View
     {L"View > Line Numbers", kCmd, "toggle-line-numbers", nullptr, kChk, true, L""},
     {L"View > Line Ending Marks", kCmd, "toggle-eol-marks", nullptr, kChk, true, L""},
@@ -501,10 +502,14 @@ TEST(menu_not_implemented_items_are_disabled) {
     if (enabled(s, *rows[i].item) != expected) std::printf("  %s\n", test::to_display(want.path).c_str());
     CHECK_EQ(enabled(s, *rows[i].item), expected);
   }
-  // Running a disabled item does nothing.
+  // Since M5 every command of the menus is implemented. Running a disabled
+  // item (here during isearch, which greys every item) does nothing.
   const MenuItem* goto_line = find_item(L"Edit > Go to Line...");
+  s.keys(L"C-s");
+  CHECK(s.ed.isearch_active());
   CHECK(goto_line != nullptr && !s.ed.execute_menu_item(*goto_line));
   CHECK(!s.ed.minibuffer_active());
+  CHECK(s.ed.isearch_active());
 }
 
 TEST(menu_every_item_is_disabled_while_the_minibuffer_is_active) {

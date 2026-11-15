@@ -1,4 +1,4 @@
-"""Real-app checks of geditor M1, M2, M3a - M3d, M4a and M4b (run by hand; Windows only).
+"""Real-app checks of geditor M1, M2, M3a - M3d, M4a, M4b and M5 (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
@@ -38,7 +38,13 @@ Shift_JIS by detection, run find-file-with-encoding through the minibuffer
 (with completion) and through the menu (F10 answered with 'GANS', into a new
 window that gets --encoding), start with --encoding (a wrong one shows "!"),
 revert with the question answered No and Yes, stop a Shift_JIS save at an
-emoji and read the Encoding for Saving radio of the real HMENU.
+emoji and read the Encoding for Saving radio of the real HMENU. The M5
+checks (--only-m5, headless only) look at the search_match / search_current
+pixels of isearch and query-replace (and that none are left after them),
+read the grey items of the real HMENU during both modes, run Edit > Find /
+Replace / Go to Line through WM_COMMAND, the C-S-f / C-S-g / C-S-h / C-S-r
+keys and C-S-s / C-S-z inside isearch, and time a search for a word near
+the end of a 100MB file (made once under build/m5_search/).
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
@@ -1970,8 +1976,9 @@ M3B_ITEMS = [
     # same-action commands kill-region / kill-ring-save / yank / mark-whole-buffer.
     ("Edit > Cut", "C-S-x  C-w", True), ("Edit > Copy", "C-S-c  M-w", True), ("Edit > Paste", "C-S-v  C-y", True),
     ("Edit > Select All", "C-S-a  C-x h", True),
-    ("Edit > Find...", "C-S-f  C-s", False), ("Edit > Replace...", "C-S-h  M-%", False),
-    ("Edit > Go to Line...", "C-S-g  M-g g", False),
+    # isearch-forward, query-replace and goto-line: implemented in M5.
+    ("Edit > Find...", "C-S-f  C-s", True), ("Edit > Replace...", "C-S-h  M-%", True),
+    ("Edit > Go to Line...", "C-S-g  M-g g", True),
     ("View > Line Numbers", "", True), ("View > Line Ending Marks", "", True),
     ("View > Whitespace Marks", "", True), ("View > Wrap > None", "", True), ("View > Wrap > Window", "", True),
     ("View > Wrap > Fixed", "", True), ("View > Wrap > Max", "", True), ("View > Zoom In", "C-x C-+", True),
@@ -2516,7 +2523,8 @@ def run_m3b_menu_bar(app, run: M3bRun, settings: pathlib.Path, wrap10: dict):
           f"(e.g. {items['Edit > Undo'].text!r} {items['Edit > Undo'].key!r})")
     check("[C6] not implemented items are grey in the HMENU",
           all(not items[p].enabled for p, _, implemented in M3B_ITEMS if not implemented and p in items),
-          "grey: " + ", ".join(p for p, _, implemented in M3B_ITEMS if not implemented)[:200])
+          "grey: " + (", ".join(p for p, _, implemented in M3B_ITEMS if not implemented)[:200] or
+                      "none (every menu command is implemented since M5)"))
 
     # Invoking items through the WM_COMMAND id of the real menu.
     app.menu_command(items["View > Line Numbers"].id)
@@ -2548,13 +2556,19 @@ def run_m3b_menu_bar(app, run: M3bRun, settings: pathlib.Path, wrap10: dict):
     check("[C10] a menu command that fails shows its message like M-x",
           from_menu == from_mx == "No further redo information",
           f"menu: {from_menu!r}; M-x: {from_mx!r}")
+    # Since M5 every menu command is implemented: an item is grey while the
+    # minibuffer is active (M-x here).
+    keys("M-x")
+    time.sleep(0.2)
     rejected = int(run.state()["rejected"])
     app.menu_command(items["Edit > Go to Line..."].id)
     time.sleep(0.3)
     state = run.state()
+    keys("C-g")
     check("[C10] WM_COMMAND of a grey item runs nothing and is logged",
           int(state["rejected"]) == rejected + 1 and "is disabled" in state["last_rejected"] and
-          state["minibuffer"] == "0", f"rejected {rejected} -> {state['rejected']}: {state['last_rejected']!r}")
+          state["echo"] == "M-x ", f"rejected {rejected} -> {state['rejected']}: {state['last_rejected']!r}; "
+          f"echo={state['echo']!r}")
 
     # While the minibuffer is active every item is grey.
     keys("M-x")
@@ -4054,6 +4068,235 @@ def run_visible_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
 
+# ---- M5: search and replace ----
+
+M5_COLORS = {
+    "background": "#000000", "foreground": "#ff0000", "cursor": "#ffffff", "selection": "#400040",
+    "whitespace": "#000000", "eol": "#000000", "search_match": "#00ff00", "search_current": "#0000ff",
+}
+# Row 0: "foo" at 0 and 8; row 1: "foo" at 3 (offsets 15..18); row 2: none.
+M5_TEXT = "foo bar foo\nxx foo\nnothing\n"
+M5_ROWS = [(0, 0), (0, 8), (1, 3)]  # (screen row, first cell) of each "foo"
+# The 100MB file of [M5-5]: lines of 79 ASCII characters and "\n"; the word
+# is on the 100th line from the end and starts with "§", which no other line
+# has, so the first key of the search already scans the whole file.
+M5_BIG_WORD = "§zebracorn"
+M5_BIG_LINES = 1_310_720
+
+
+def m5_big_file(folder: pathlib.Path) -> tuple[pathlib.Path, int]:
+    """The 100MB sample (made once under build/) and the offset of the word."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "m5_100mb.txt"
+    line = ("the quick brown fox jumps over the lazy dog 0123456789 " + "abcdefghijklmnopqrstuvwxyz")[:79] + "\n"
+    target = M5_BIG_LINES - 100
+    word_line = M5_BIG_WORD + line[len(M5_BIG_WORD):]
+    offset = target * 80
+    size = M5_BIG_LINES * 80 + len(M5_BIG_WORD.encode("utf-8")) - len(M5_BIG_WORD)
+    if not path.exists() or path.stat().st_size != size:
+        block = (line * 4096).encode("ascii")
+        with path.open("wb") as f:
+            for _ in range(target // 4096):
+                f.write(block)
+            f.write(line.encode("ascii") * (target % 4096))
+            f.write(word_line.encode("utf-8"))
+            f.write(line.encode("ascii") * (M5_BIG_LINES - target - 1))
+    return path, offset
+
+
+def m5_highlight_counts(shot, state) -> list[tuple[int, int]]:
+    """(green, blue) pixels in the three "foo" cells of M5_TEXT."""
+    return [(count_where(shot, is_green, cell_box(state, row, first, 3)),
+             count_where(shot, is_blue, cell_box(state, row, first, 3))) for row, first in M5_ROWS]
+
+
+def m5_text_area_colour(shot, state, pred) -> int:
+    lh = float(state["line_height"])
+    return count_where(shot, pred, (0, 0, shot[0], int(3 * lh)))
+
+
+def run_m5_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C5] (headless key-to-found), [C6], [C7], [C9] and [C11] of the M5
+    packet on the real app (headless)."""
+    work = out / "files_m5"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    settings.write_bytes(settings_json({"colors": M5_COLORS, "line_numbers": False,
+                                        "eol_marks": {"show": False}}))
+    sample = work / "m5_sample.txt"
+    sample.write_bytes(M5_TEXT.encode("utf-8"))
+    app = d.App(exe, [str(sample)], cwd=work, settings=settings, height=400)
+    try:
+        record("INFO", "M5 input mode", app.use_input())
+        state = wait_state(app, lambda s: s.get("text") == M5_TEXT)
+        # [C11] no pattern compiled before the first search.
+        check("[M5 C11] PCRE2 compiles nothing until the first search (search_compiles=0 after start-up)",
+              state.get("search_compiles") == "0", f"search_compiles={state.get('search_compiles')!r}")
+
+        # [C9] isearch: every visible match in search_match (green), the
+        # current one in search_current (blue).
+        app.keys("C-s")
+        app.type("foo")
+        state = wait_state(app, lambda s: s.get("search_current") == "0-3")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m5_01_isearch_highlights.png")
+        counts = m5_highlight_counts(shot, state)
+        bar = (count_where(shot, is_green, cell_box(state, 0, 4, 3)), count_where(shot, is_blue, cell_box(state, 0, 4, 3)))
+        check("[M5 C9] isearch: the current match (row 0 col 0) is search_current, the other two matches "
+              "search_match, and \"bar\" neither",
+              counts[0][1] > 0 and counts[0][0] == 0 and all(g > 0 and b == 0 for g, b in counts[1:]) and
+              bar == (0, 0),
+              f"(green, blue) px per match {counts}, \"bar\" {bar}; state matches={state.get('search_matches')!r} "
+              f"current={state.get('search_current')!r} echo={state.get('echo')!r} (m5_01_isearch_highlights.png)")
+        check("[M5 C11] the first search compiled its pattern",
+              int(state.get("search_compiles", "0")) > 0, f"search_compiles={state.get('search_compiles')!r}")
+        app.keys("C-s")
+        state = wait_state(app, lambda s: s.get("search_current") == "8-11")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m5_02_isearch_next.png")
+        counts = m5_highlight_counts(shot, state)
+        check("[M5 C9] C-s moves search_current to the second match",
+              counts[1][1] > 0 and counts[1][0] == 0 and counts[0][0] > 0 and counts[0][1] == 0,
+              f"(green, blue) px per match {counts}; point={state.get('point')} (m5_02_isearch_next.png)")
+        # [C7] every menu item grey during isearch.
+        items = menu_items(app)
+        enabled = [p for p, i in items.items() if i.enabled and not i.separator and " > " in p]
+        check("[M5 C7] during isearch every item of the real HMENU is grey", not enabled and len(items) > 10,
+              f"{len(items)} items, enabled: {enabled[:5]}")
+        app.keys("RET")
+        state = wait_state(app, lambda s: s.get("isearch") == "0")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m5_03_after_isearch.png")
+        green, blue = m5_text_area_colour(shot, state, is_green), m5_text_area_colour(shot, state, is_blue)
+        items = menu_items(app)
+        back = [p for p, _, on in M3B_ITEMS if on and p in items and not items[p].enabled]
+        check("[M5 C9] after RET no search_match / search_current pixel is left (negative)",
+              green == 0 and blue == 0 and state.get("search_matches") == "" and state.get("search_current") == "none",
+              f"green px {green}, blue px {blue}, matches={state.get('search_matches')!r} (m5_03_after_isearch.png)")
+        check("[M5 C7] after isearch the items are enabled again", not back, f"still grey: {back[:5]}")
+
+        # [C9] query-replace: the same colours; after it ends nothing.
+        app.keys("M-<")
+        app.keys("M-%")
+        app.type("foo")
+        app.keys("RET")
+        app.type("X")
+        app.keys("RET")
+        state = wait_state(app, lambda s: s.get("query_replace") == "1")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m5_04_query_replace.png")
+        counts = m5_highlight_counts(shot, state)
+        items = menu_items(app)
+        enabled = [p for p, i in items.items() if i.enabled and not i.separator and " > " in p]
+        check("[M5 C9] query-replace: the current match search_current, the others search_match",
+              counts[0][1] > 0 and counts[0][0] == 0 and all(g > 0 and b == 0 for g, b in counts[1:]),
+              f"(green, blue) px per match {counts}; echo={state.get('echo')!r} (m5_04_query_replace.png)")
+        check("[M5 C7] during query-replace every item of the real HMENU is grey", not enabled,
+              f"enabled: {enabled[:5]}")
+        app.type("y")
+        state = wait_state(app, lambda s: s.get("search_current") == "6-9")
+        app.type("q")
+        state = wait_state(app, lambda s: s.get("query_replace") == "0")
+        time.sleep(0.3)
+        shot = app.capture(shots / "m5_05_after_query_replace.png")
+        green, blue = m5_text_area_colour(shot, state, is_green), m5_text_area_colour(shot, state, is_blue)
+        items = menu_items(app)
+        back = [p for p, _, on in M3B_ITEMS if on and p in items and not items[p].enabled]
+        check("[M5 C9] query-replace y then q: one replacement, and no highlight is left (negative)",
+              state.get("text") == M5_TEXT.replace("foo", "X", 1) and green == 0 and blue == 0 and
+              state.get("message") == "Replaced 1 occurrence",
+              f"text={state.get('text')!r} message={state.get('message')!r} green {green} blue {blue} "
+              f"(m5_05_after_query_replace.png)")
+        check("[M5 C7] after query-replace the items are enabled again", not back, f"still grey: {back[:5]}")
+        app.keys("C-/")
+        state = wait_state(app, lambda s: s.get("text") == M5_TEXT)
+        check("[M5 C2] one undo restores the replaced text", state.get("text") == M5_TEXT,
+              f"text={state.get('text')!r}")
+
+        # [C7] Edit > Find / Replace / Go to Line through WM_COMMAND on the real HMENU.
+        items = menu_items(app)
+        app.menu_command(items["Edit > Find..."].id)
+        find_state = wait_state(app, lambda s: s.get("isearch") == "1")
+        app.keys("C-g")
+        app.menu_command(items["Edit > Replace..."].id)
+        replace_state = wait_state(app, lambda s: s.get("echo") == "Query replace: ")
+        app.keys("C-g")
+        app.menu_command(items["Edit > Go to Line..."].id)
+        goto_state = wait_state(app, lambda s: s.get("echo") == "Goto line: ")
+        app.type("2")
+        app.keys("RET")
+        line_state = wait_state(app, lambda s: s.get("point") == "12")
+        check("[M5 C7] Edit > Find..., Replace... and Go to Line... are enabled and start isearch, the "
+              "query-replace prompt and the goto-line prompt",
+              all(items[p].enabled for p in ("Edit > Find...", "Edit > Replace...", "Edit > Go to Line...")) and
+              find_state.get("echo") == "I-search: " and replace_state.get("echo") == "Query replace: " and
+              goto_state.get("echo") == "Goto line: " and line_state.get("point") == "12",
+              f"{items['Edit > Find...'].line()}; find echo={find_state.get('echo')!r}, replace echo="
+              f"{replace_state.get('echo')!r}, goto echo={goto_state.get('echo')!r}, point after 2 RET="
+              f"{line_state.get('point')}")
+
+        # [C6] the Windows keys through posted Ctrl+Shift keys.
+        app.keys("M-<")
+        app.keys("C-S-f")
+        app.type("bar")
+        f_state = wait_state(app, lambda s: s.get("point") == "7")
+        app.keys("RET")
+        app.keys("C-S-g")
+        g_state = wait_state(app, lambda s: s.get("echo") == "Goto line: ")
+        app.keys("C-g")
+        app.keys("C-S-h")
+        h_state = wait_state(app, lambda s: s.get("echo") == "Query replace: ")
+        app.keys("C-g")
+        app.keys("C-S-r")
+        r_state = wait_state(app, lambda s: s.get("echo") == "Query replace: ")
+        app.keys("C-g")
+        check("[M5 C6] C-S-f searches, C-S-g asks for a line, C-S-h and C-S-r ask what to replace",
+              f_state.get("isearch") == "1" and f_state.get("point") == "7" and
+              g_state.get("echo") == "Goto line: " and h_state.get("echo") == "Query replace: " and
+              r_state.get("echo") == "Query replace: ",
+              f"C-S-f: isearch={f_state.get('isearch')} point={f_state.get('point')}; C-S-g echo="
+              f"{g_state.get('echo')!r}; C-S-h echo={h_state.get('echo')!r}; C-S-r echo={r_state.get('echo')!r}")
+        # [C8] C-S-s in isearch is the next match (not save), C-S-z ends it without undo.
+        app.keys("M-<")
+        app.keys("C-s")
+        app.type("foo")
+        app.keys("C-S-s")
+        s_state = wait_state(app, lambda s: s.get("point") == "11")
+        app.keys("C-S-z")
+        z_state = wait_state(app, lambda s: s.get("isearch") == "0")
+        check("[M5 C8] in isearch C-S-s goes to the next match (no save) and C-S-z ends isearch without undo",
+              s_state.get("point") == "11" and s_state.get("modified") == "0" and
+              z_state.get("text") == M5_TEXT and z_state.get("message") == "C-S-z is undefined",
+              f"after C-S-s point={s_state.get('point')} echo={s_state.get('echo')!r}; after C-S-z "
+              f"message={z_state.get('message')!r}")
+    finally:
+        app.kill()
+
+    # [C5] a word near the end of a 100MB file, from the key to the state.
+    big, offset = m5_big_file(out.parent.parent / "m5_search")
+    app = d.App(exe, [str(big)], cwd=work, settings=settings, height=400)
+    try:
+        loaded = wait_state(app, lambda s: s.get("length") == str(big.stat().st_size - 1), 20.0)
+        app.keys("C-s")
+        wait_state(app, lambda s: s.get("isearch") == "1")
+        start = time.perf_counter()
+        app.post_chars("§", pause_s=0)
+        state = d.wait_for(lambda: (lambda s: s if s.get("point") == str(offset + 1) else None)(app.state()),
+                           10.0, 0.005)
+        elapsed = (time.perf_counter() - start) * 1000
+        ok = bool(state)
+        record("INFO", "[M5 C5] 100MB file: \"§\" typed in isearch (the word on the 100th line from the end) "
+               "to point at the match, headless, through a posted WM_CHAR and the state",
+               f"{elapsed:.0f} ms incl. state polling every 5 ms (each 'GSTA' writes a file); found={ok}; "
+               f"length={loaded.get('length')}")
+        check("[M5 C5] the word near the end of the 100MB file is found (headless key to state within 1 s)",
+              ok and elapsed < 1000, f"{elapsed:.0f} ms; point={state.get('point') if state else None} "
+              f"(want {offset + 1})")
+    finally:
+        app.kill()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("exe", type=pathlib.Path)
@@ -4076,6 +4319,8 @@ def main() -> int:
                         help="run only the M4a line end, save and read-only checks")
     parser.add_argument("--only-m4b", action="store_true",
                         help="run only the M4b encoding checks")
+    parser.add_argument("--only-m5", action="store_true",
+                        help="run only the M5 search, replace and goto-line checks")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -4098,7 +4343,10 @@ def main() -> int:
     saved = None if d.HEADLESS else clipboard_text()
     sequence0 = d.user32.GetClipboardSequenceNumber()
     only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_m3c or
-            args.only_m3d or args.only_m4a or args.only_m4b or args.only_headless or args.only_visible)
+            args.only_m3d or args.only_m4a or args.only_m4b or args.only_m5 or args.only_headless or
+            args.only_visible)
+    if args.only_m5 and args.visible:
+        parser.error("--only-m5 runs headless only")
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
@@ -4137,6 +4385,8 @@ def main() -> int:
             run_m4a_checks(exe, out)
         if not only or args.only_m4b:
             run_m4b_checks(exe, out)
+        if d.HEADLESS and (not only or args.only_m5):
+            run_m5_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)

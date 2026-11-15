@@ -121,7 +121,7 @@ TEST(win_menu_bar_hmenu_matches_the_core_model) {
   const MenuEntry* undo = entry(entries, L"Edit > Undo");
   CHECK(undo != nullptr && undo->text == L"&Undo" && undo->key_text == L"C-S-z  C-/" && undo->enabled);
   const MenuEntry* find = entry(entries, L"Edit > Find...");
-  CHECK(find != nullptr && !find->enabled);
+  CHECK(find != nullptr && find->enabled);  // isearch-forward: implemented in M5
   const MenuEntry* max = entry(entries, L"View > Wrap > Max");
   CHECK(max != nullptr && max->radio && max->checked);
   DestroyMenu(bar);
@@ -262,7 +262,10 @@ TEST(win_menu_question_lists_items_and_takes_enabled_ones) {
   CHECK_EQ(geditor::win::question_button_id(q, L"-"), 0);
   DestroyMenu(popup);
 
-  // Not implemented items are listed but are no buttons.
+  // Disabled items are listed but are no buttons. Since M5 every menu
+  // command is implemented; a bar built during isearch greys every item.
+  s.keys(L"C-s");
+  CHECK(s.ed.isearch_active());
   HMENU bar = geditor::win::create_menu_bar(s.ed);
   CHECK(bar != nullptr);
   if (bar == nullptr) return;
@@ -271,11 +274,23 @@ TEST(win_menu_question_lists_items_and_takes_enabled_ones) {
   const std::wstring bar_state = geditor::win::question_state(mq);
   CHECK(bar_state.find(L"question=menu_bar\n") != std::wstring::npos);
   CHECK(bar_state.find(L"menu_item=Edit > Go to Line...\tC-S-g  M-g g\tdisabled\n") != std::wstring::npos);
-  CHECK(bar_state.find(L"menu_item=View > Wrap > Max\t\tenabled checked radio\n") != std::wstring::npos);
-  CHECK(bar_state.find(L"menu_item=View > Wrap\t\tsubmenu enabled\n") != std::wstring::npos);
+  CHECK(bar_state.find(L"menu_item=View > Wrap > Max\t\tdisabled checked radio\n") != std::wstring::npos);
   CHECK_EQ(geditor::win::question_button_id(mq, L"Edit > Go to Line..."), 0);
-  CHECK(geditor::win::question_button_id(mq, L"View > Wrap > None") != 0);
+  CHECK_EQ(geditor::win::question_button_id(mq, L"View > Wrap > None"), 0);
   CHECK_EQ(geditor::win::question_button_id(mq, L"View > Wrap"), 0);
+  s.keys(L"C-g");
+  CHECK(!s.ed.isearch_active());
+  DestroyMenu(bar);
+  bar = geditor::win::create_menu_bar(s.ed);
+  CHECK(bar != nullptr);
+  if (bar == nullptr) return;
+  const geditor::win::Question after =
+      geditor::win::menu_question(geditor::win::QuestionKind::kMenuBar, geditor::win::read_menu(bar), POINT{});
+  const std::wstring after_state = geditor::win::question_state(after);
+  CHECK(after_state.find(L"menu_item=Edit > Go to Line...\tC-S-g  M-g g\tenabled\n") != std::wstring::npos);
+  CHECK(after_state.find(L"menu_item=View > Wrap\t\tsubmenu enabled\n") != std::wstring::npos);
+  CHECK(geditor::win::question_button_id(after, L"Edit > Go to Line...") != 0);
+  CHECK(geditor::win::question_button_id(after, L"View > Wrap > None") != 0);
   DestroyMenu(bar);
 }
 

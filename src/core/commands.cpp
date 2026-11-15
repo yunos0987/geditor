@@ -405,7 +405,15 @@ void select_all(Editor& ed) {
 }
 
 void keyboard_quit(Editor& ed) {
-  if (ed.minibuffer_active()) ed.abort_minibuffer();
+  // C-g closes the minibuffer only (also one opened during query-replace,
+  // which then goes on). Without a minibuffer, C-g in query-replace (through
+  // the global keymap) ends it; the replacements made stay (one undo unit),
+  // as in Emacs.
+  if (ed.minibuffer_active()) {
+    ed.abort_minibuffer();
+  } else if (ed.query_replace_active()) {
+    ed.query_replace_exit();
+  }
   ed.main_buffer().mark_active = false;
   ed.minibuffer().mark_active = false;
   ed.fail(L"Quit");
@@ -415,7 +423,7 @@ void keyboard_quit(Editor& ed) {
 // elsewhere it deactivates the region quietly (a prefix argument typed
 // before it is used up by this command).
 void keyboard_escape_quit(Editor& ed) {
-  if (ed.minibuffer_active()) {
+  if (ed.minibuffer_active() || ed.query_replace_active()) {
     keyboard_quit(ed);
     return;
   }
@@ -880,6 +888,90 @@ void menu_bar_open(Editor& ed) {
   ed.host().open_menu_bar();
 }
 
+// ---- Search and replace (M5) ----
+
+// C-s / C-r; with a prefix argument (C-u C-s) a regexp search.
+void isearch_forward(Editor& ed) {
+  ed.isearch_start(true, ed.has_prefix_arg());
+}
+
+void isearch_backward(Editor& ed) {
+  ed.isearch_start(false, ed.has_prefix_arg());
+}
+
+void isearch_repeat_forward(Editor& ed) {
+  ed.isearch_repeat(true);
+}
+
+void isearch_repeat_backward(Editor& ed) {
+  ed.isearch_repeat(false);
+}
+
+void isearch_delete_char(Editor& ed) {
+  ed.isearch_delete_char();
+}
+
+void isearch_exit(Editor& ed) {
+  ed.isearch_exit();
+}
+
+void isearch_abort(Editor& ed) {
+  ed.isearch_abort();
+}
+
+void isearch_toggle_regexp(Editor& ed) {
+  ed.isearch_toggle_regexp();
+}
+
+void isearch_toggle_case_fold(Editor& ed) {
+  ed.isearch_toggle_case_fold();
+}
+
+void isearch_query_replace(Editor& ed) {
+  ed.isearch_query_replace();
+}
+
+// query-replace FROM TO / query-replace-regexp REGEXP TO.
+void query_replace(Editor& ed) {
+  const std::vector<CommandArg>& args = ed.command_args();
+  if (args.size() == 2) ed.query_replace(false, args[0].text, args[1].text);
+}
+
+void query_replace_regexp(Editor& ed) {
+  const std::vector<CommandArg>& args = ed.command_args();
+  if (args.size() == 2) ed.query_replace(true, args[0].text, args[1].text);
+}
+
+void query_replace_act(Editor& ed) {
+  ed.query_replace_act(false);
+}
+
+void query_replace_act_and_exit(Editor& ed) {
+  ed.query_replace_act(true);
+}
+
+void query_replace_skip(Editor& ed) {
+  ed.query_replace_skip();
+}
+
+void query_replace_all(Editor& ed) {
+  ed.query_replace_all();
+}
+
+void query_replace_exit(Editor& ed) {
+  ed.query_replace_exit();
+}
+
+// goto-line LINE (the prefix argument gives LINE directly, Editor::run_call).
+void goto_line(Editor& ed) {
+  const std::vector<CommandArg>& args = ed.command_args();
+  if (args.empty() || args.front().type != CommandArg::Type::kInteger) {
+    ed.fail(L"Line number must be a whole number");
+    return;
+  }
+  ed.goto_line(args.front().integer);
+}
+
 // ---- Prefix argument and M-x ----
 
 void universal_argument(Editor& ed) {
@@ -940,6 +1032,12 @@ constexpr Param kFileEncodingParams[] = {{L"Find file: ", ParamType::kText, {}},
                                          {L"Coding system: ", ParamType::kChoice, kEncodingNames}};
 constexpr Param kEolParams[] = {{L"Line ending (lf, crlf, cr): ", ParamType::kChoice, kEolChoices}};
 constexpr Param kWrapParams[] = {{L"Wrap mode (none, window, fixed, max): ", ParamType::kChoice, kWrapChoices}};
+// The second prompt names the first argument ("Query replace foo with: ",
+// Editor::finish_argument); these are the prompts without it.
+constexpr Param kQueryReplaceParams[] = {{L"Query replace: ", ParamType::kText, {}},
+                                         {L"Query replace with: ", ParamType::kText, {}}};
+constexpr Param kQueryReplaceRegexpParams[] = {{L"Query replace regexp: ", ParamType::kText, {}},
+                                               {L"Query replace regexp with: ", ParamType::kText, {}}};
 
 // Commands with a null function are registered for later milestones
 // (decision D9): they can be bound, completed in M-x and run, which shows
@@ -967,19 +1065,19 @@ constexpr CommandInfo kCommands[] = {
     {"find-user-init-file", &find_user_init_file},
     {"forward-char", &forward_char},
     {"forward-word", &forward_word},
-    {"goto-line", nullptr, kLineParams},
+    {"goto-line", &goto_line, kLineParams},
     {"insert-tab", &insert_tab},
     {"insert-text", &insert_text, kTextParams},
-    {"isearch-abort", nullptr},
-    {"isearch-backward", nullptr},
-    {"isearch-delete-char", nullptr},
-    {"isearch-exit", nullptr},
-    {"isearch-forward", nullptr},
-    {"isearch-query-replace", nullptr},
-    {"isearch-repeat-backward", nullptr},
-    {"isearch-repeat-forward", nullptr},
-    {"isearch-toggle-case-fold", nullptr},
-    {"isearch-toggle-regexp", nullptr},
+    {"isearch-abort", &isearch_abort},
+    {"isearch-backward", &isearch_backward},
+    {"isearch-delete-char", &isearch_delete_char},
+    {"isearch-exit", &isearch_exit},
+    {"isearch-forward", &isearch_forward},
+    {"isearch-query-replace", &isearch_query_replace},
+    {"isearch-repeat-backward", &isearch_repeat_backward},
+    {"isearch-repeat-forward", &isearch_repeat_forward},
+    {"isearch-toggle-case-fold", &isearch_toggle_case_fold},
+    {"isearch-toggle-regexp", &isearch_toggle_regexp},
     {"keyboard-escape-quit", &keyboard_escape_quit},
     {"keyboard-quit", &keyboard_quit},
     {"kill-line", &kill_line},
@@ -1000,13 +1098,13 @@ constexpr CommandInfo kCommands[] = {
     {"paste", &yank},
     {"previous-history-element", &previous_history_element},
     {"previous-line", &previous_line},
-    {"query-replace", nullptr},
-    {"query-replace-act", nullptr},
-    {"query-replace-act-and-exit", nullptr},
-    {"query-replace-all", nullptr},
-    {"query-replace-exit", nullptr},
-    {"query-replace-regexp", nullptr},
-    {"query-replace-skip", nullptr},
+    {"query-replace", &query_replace, kQueryReplaceParams},
+    {"query-replace-act", &query_replace_act},
+    {"query-replace-act-and-exit", &query_replace_act_and_exit},
+    {"query-replace-all", &query_replace_all},
+    {"query-replace-exit", &query_replace_exit},
+    {"query-replace-regexp", &query_replace_regexp, kQueryReplaceRegexpParams},
+    {"query-replace-skip", &query_replace_skip},
     {"quit", &quit},
     {"quoted-insert", &quoted_insert},
     {"read-only-mode", &read_only_mode},

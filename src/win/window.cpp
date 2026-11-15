@@ -649,6 +649,7 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_QUERYENDSESSION: {
       // Log off / shutdown: same save question as quit. Cancel, a failed
       // save or an untitled buffer waiting for a file name block the end.
+      editor_.end_search_modes();  // M5
       const bool may_end = editor_.confirm_session_end();
       after_input();
       if (may_end) {
@@ -1025,6 +1026,26 @@ bool MainWindow::write_state(const std::wstring& path) {
   text += state_line(L"top_line", std::to_wstring(editor_.top().line));
   text += state_line(L"top_row", std::to_wstring(editor_.top().row));
   text += state_line(L"minibuffer", editor_.minibuffer_active() ? L"1" : L"0");
+  // Search (M5): the modes, the isearch pattern, the highlighted matches of
+  // the rows on screen ("start-end" offsets, comma-separated; the current
+  // one apart, "none" without one) and the patterns compiled so far (0 until
+  // the first search: PCRE2 is not used at start-up).
+  text += state_line(L"isearch", editor_.isearch_active() ? L"1" : L"0");
+  text += state_line(L"query_replace", editor_.query_replace_active() ? L"1" : L"0");
+  text += state_line(L"isearch_pattern", editor_.isearch_pattern());
+  {
+    const Editor::SearchHighlights h = editor_.search_highlights(visible_lines());
+    std::wstring matches;
+    for (const SearchMatch& m : h.matches) {
+      if (!matches.empty()) matches += L',';
+      matches += std::to_wstring(m.start) + L'-' + std::to_wstring(m.end);
+    }
+    text += state_line(L"search_matches", matches);
+    text += state_line(L"search_current", h.has_current ? std::to_wstring(h.current.start) + L'-' +
+                                                              std::to_wstring(h.current.end)
+                                                        : std::wstring(L"none"));
+  }
+  text += state_line(L"search_compiles", std::to_wstring(search_pattern_compiles()));
   if (b.text.length() <= 65536) text += state_line(L"text", b.text.text());
   // The grid of the last frame in client pixels, for posting mouse messages.
   {
@@ -1177,6 +1198,7 @@ void MainWindow::handle_drop(HDROP drop) {
   DragFinish(drop);
   if (path.empty()) return;
   if (!headless_) SetForegroundWindow(hwnd_);  // H1: headless stays in the background
+  editor_.end_search_modes();  // M5: isearch / query-replace end before the buffer can change
   editor_.request_open(path);
   // One window holds one file: say that the other dropped files were not
   // opened (after request_open's own message, if any).

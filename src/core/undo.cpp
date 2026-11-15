@@ -148,6 +148,23 @@ bool UndoHistory::redo(PieceTree& tree, EditListener* listener, size_t* point, E
   return true;
 }
 
+void UndoHistory::merge_groups_since(size_t first, size_t point_before) {
+  if (first >= undo_.size()) return;
+  Group& merged = undo_[first];
+  for (size_t i = first + 1; i < undo_.size(); ++i) {
+    Group& g = undo_[i];
+    // A saved state inside the merged groups can no longer be reached.
+    if (merged.id == saved_id_) saved_id_ = kUnreachable;
+    for (Op& op : g.ops) merged.ops.push_back(std::move(op));
+    merged.point_after = g.point_after;
+    merged.id = g.id;  // the newest id: a save after the last group stays saved
+  }
+  merged.point_before = point_before;
+  merged.typed = 0;
+  undo_.resize(first + 1);
+  last_was_typing_ = false;
+}
+
 void UndoHistory::mark_saved() {
   saved_id_ = top_id();
   last_was_typing_ = false;

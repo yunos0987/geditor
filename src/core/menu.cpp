@@ -245,7 +245,9 @@ std::wstring MenuKeyTexts::text_for(const MenuItem& item) const {
 }
 
 bool menu_item_enabled(const Editor& editor, const MenuItem& item) {
-  if (editor.minibuffer_active()) return false;
+  // The minibuffer, isearch and query-replace grey every item (PLAN 2 "menu
+  // bar", M5-7).
+  if (editor.input_mode_active()) return false;
   if (item.kind == MenuItemKind::kSeparator) return false;
   if (item.kind == MenuItemKind::kSubmenu) return true;
   const CommandInfo* info = item.command != nullptr ? find_command(item.command) : nullptr;

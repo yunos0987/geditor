@@ -85,17 +85,29 @@ Editor::Editor(Host& host) : host_(host) {
 // ---- Key dispatch ----
 
 Keymap::Lookup Editor::lookup(const KeySequence& keys) const {
-  if (minibuffer_active()) {
-    // An explicit null in minibuffer_keys does not fall through to global.
-    const Keymap::Lookup r = keymap(KeymapKind::kMinibuffer).lookup(keys);
+  // M5: inside the minibuffer and query-replace a key that their own keymap
+  // does not have falls back to the global keymap without the Windows
+  // compatible keys (an explicit null in their keymap does not fall
+  // through). isearch has only its own keymap: handle_key_impl ends isearch
+  // for any other key and looks it up again in global_in_modes_.
+  if (minibuffer_active() || query_replace_active()) {
+    const KeymapKind kind = minibuffer_active() ? KeymapKind::kMinibuffer : KeymapKind::kQueryReplace;
+    const Keymap::Lookup r = keymap(kind).lookup(keys);
     if (r.result != Keymap::Result::kUndefined) return r;
+    return global_in_modes_.lookup(keys);
   }
-  return keymap(KeymapKind::kGlobal).lookup(keys);
+  if (isearch_active()) return keymap(KeymapKind::kIsearch).lookup(keys);
+  return (sequence_in_mode_ ? global_in_modes_ : keymap(KeymapKind::kGlobal)).lookup(keys);
 }
 
 void Editor::handle_key(const Key& key) {
   message_.clear();
   message_is_settings_ = false;
+  handle_key_impl(key);
+  after_input();
+}
+
+void Editor::handle_key_impl(const Key& key) {
   if (quoted_insert_pending_) {
     quoted_insert_pending_ = false;
     handle_quoted_insert(key);
@@ -146,6 +158,37 @@ void Editor::handle_key(const Key& key) {
   const Keymap::Lookup r =
       lookup_shift_translated(pending_, [this](const KeySequence& s) { return lookup(s); });
   if (r.result == Keymap::Result::kPrefix) return;
+  sequence_in_mode_ = false;  // the key sequence is complete
+
+  if (isearch_active() && r.result == Keymap::Result::kUndefined) {
+    const Key last = pending_.back();
+    const bool printable = pending_.size() == 1 && last.is_char() && (last.mods & ~kModShift) == 0 &&
+                           is_self_insert_key(Key{last.code, 0}) && !(last.code >= 0xD800 && last.code <= 0xDFFF);
+    if (printable) {
+      // A character extends the search string (isearch-printing-char).
+      pending_.clear();
+      pending_display_.clear();
+      prefix_ = PrefixArg();
+      prefix_display_.clear();
+      last_key_ = last;
+      this_command_ = "isearch-printing-char";
+      isearch_add_text(to_utf16((last.mods & kModShift) != 0 ? to_upper(last.code) : last.code));
+      finish_command(main_);
+      return;
+    }
+    // Any other key ends isearch at the current match and then runs as it
+    // would have outside isearch (as in Emacs), but without the Windows
+    // compatible keys (M5): C-S-z is C-z there, not undo.
+    const KeySequence keys = std::move(pending_);
+    pending_.clear();
+    pending_display_.clear();
+    isearch_end(false);
+    for (const Key& again : keys) {
+      sequence_in_mode_ = true;
+      handle_key_impl(again);
+    }
+    return;
+  }
 
   k = pending_.back();  // without S- when shift translation applied
   const size_t length = pending_.size();
@@ -160,7 +203,10 @@ void Editor::handle_key(const Key& key) {
     dispatch(binding, false);
     return;
   }
-  if (r.result == Keymap::Result::kUndefined && length == 1 && is_self_insert_key(k)) {
+  // query-replace types no characters into the buffer (M5): an unbound
+  // character key is undefined there (not in a minibuffer opened during it).
+  if (r.result == Keymap::Result::kUndefined && length == 1 && is_self_insert_key(k) &&
+      !(query_replace_active() && !minibuffer_active())) {
     key_display_ = std::move(display);
     dispatch(command_binding("self-insert-command"), true);
     return;
@@ -178,8 +224,13 @@ bool Editor::key_is_bound(const Key& key) const {
   if (meta_pending_) k.mods |= kModMeta;
   KeySequence keys = pending_;
   keys.push_back(k);
-  const Keymap::Result r =
-      lookup_shift_translated(keys, [this](const KeySequence& s) { return lookup(s); }).result;
+  Keymap::Result r = lookup_shift_translated(keys, [this](const KeySequence& s) { return lookup(s); }).result;
+  if (isearch_active() && r == Keymap::Result::kUndefined && keys.size() == 1) {
+    // isearch takes every key: a character extends the search, another key
+    // ends isearch and runs as outside it.
+    if (is_self_insert_key(Key{k.code, 0}) && (k.mods & ~kModShift) == 0) return true;
+    r = lookup_shift_translated(keys, [this](const KeySequence& s) { return global_in_modes_.lookup(s); }).result;
+  }
   return r == Keymap::Result::kPrefix || r == Keymap::Result::kCommand;
 }
 
@@ -188,7 +239,9 @@ void Editor::execute_command(std::string_view name) {
   message_is_settings_ = false;
   cancel_pending_input();
   key_display_.clear();
+  end_search_modes();
   dispatch(command_binding(std::string(name)), false);
+  after_input();
 }
 
 bool Editor::execute_menu_item(const MenuItem& item) {
@@ -205,12 +258,14 @@ bool Editor::execute_menu_item(const MenuItem& item) {
   Binding binding;
   binding.calls.push_back(menu_item_call(item));
   dispatch(binding, false);
+  after_input();
   return true;
 }
 
 void Editor::cancel_pending_input() {
   pending_.clear();
   pending_display_.clear();
+  sequence_in_mode_ = false;
   meta_pending_ = false;
   prefix_ = PrefixArg();
   prefix_display_.clear();
@@ -284,14 +339,27 @@ bool Editor::run_binding(const Binding& binding, bool typing) {
   return ok;
 }
 
-bool Editor::run_call(const CommandCall& call, const PrefixArg& prefix, bool typing, bool own_group) {
-  const CommandInfo* info = find_command(call.name);
+bool Editor::run_call(const CommandCall& call_in, const PrefixArg& prefix, bool typing, bool own_group) {
+  const CommandInfo* info = find_command(call_in.name);
   if (info == nullptr || info->fn == nullptr) {
-    message_ = info == nullptr ? L"Unknown command: " + widen(call.name)
-                               : widen(call.name) + L" is not implemented yet";
+    message_ = info == nullptr ? L"Unknown command: " + widen(call_in.name)
+                               : widen(call_in.name) + L" is not implemented yet";
     if (own_group) note_non_command();
     return false;
   }
+  // goto-line with a prefix argument takes the line from it (as Emacs:
+  // C-u 5 M-g g goes to line 5) instead of asking.
+  CommandCall filled;
+  const CommandCall* use = &call_in;
+  if (call_in.name == "goto-line" && call_in.args.empty() && prefix.active) {
+    filled = call_in;
+    CommandArg line;
+    line.type = CommandArg::Type::kInteger;
+    line.integer = prefix.count();
+    filled.args.push_back(std::move(line));
+    use = &filled;
+  }
+  const CommandCall& call = *use;
   if (!info->params.empty() && call.args.empty()) {
     // Run without its arguments: ask for them in the minibuffer.
     failed_ = false;
@@ -441,7 +509,14 @@ void Editor::finish_argument(const std::wstring& input) {
   if (reading_call_.args.size() < info->params.size()) {
     CommandCall call = std::move(reading_call_);
     const PrefixArg prefix = minibuffer_prefix_;
-    start_minibuffer(MinibufferPurpose::kCommandArgument, info->params[call.args.size()].prompt, L"");
+    std::wstring prompt = info->params[call.args.size()].prompt;
+    // query-replace names the string being replaced, as in Emacs:
+    // "Query replace foo with: ".
+    if (call.name == "query-replace" || call.name == "query-replace-regexp") {
+      prompt = std::wstring(call.name == "query-replace" ? L"Query replace " : L"Query replace regexp ") +
+               call.args.front().text + L" with: ";
+    }
+    start_minibuffer(MinibufferPurpose::kCommandArgument, std::move(prompt), L"");
     reading_call_ = std::move(call);
     minibuffer_prefix_ = prefix;
     return;
@@ -468,6 +543,10 @@ void Editor::rebuild_keymaps(const Config& config, std::vector<Diagnostic>* erro
     maps_[i] = build_keymap(emacs_layer(kind), compat_layer(kind), config.keys[static_cast<size_t>(i)],
                             errors);
   }
+  // The same global keymap without the Windows compatible keys (its errors
+  // are those of the global keymap, already reported).
+  global_in_modes_ = build_keymap(emacs_layer(KeymapKind::kGlobal), {},
+                                  config.keys[static_cast<size_t>(KeymapKind::kGlobal)], nullptr);
 }
 
 bool Editor::apply_settings_text(std::string_view utf8) {
@@ -628,6 +707,21 @@ void Editor::insert_text(std::wstring_view text) {
   cancel_pending_input();
   quoted_insert_pending_ = false;
   if (text.empty()) return;
+  if (isearch_active()) {
+    // IME text extends the search string (one input for DEL).
+    this_command_ = "isearch-printing-char";
+    isearch_add_text(normalize_line_ends(text));
+    finish_command(main_);
+    after_input();
+    return;
+  }
+  if (query_replace_active() && !minibuffer_active()) {
+    // query-replace types nothing into the buffer (a minibuffer opened
+    // during it, such as M-x, takes text as usual).
+    message_ = L"Text cannot be typed during query-replace";
+    after_input();
+    return;
+  }
   this_command_ = "insert-text";
   Buffer& b = current();
   main_.edited_in_command = false;
@@ -949,7 +1043,10 @@ size_t Editor::offset_at_click(long long row, int column) {
 }
 
 bool Editor::mouse_press(size_t offset, bool shift) {
-  if (minibuffer_active()) return false;
+  // M5: a click ends isearch at its match (as Emacs); query-replace ignores
+  // clicks, like the minibuffer.
+  if (minibuffer_active() || query_replace_active()) return false;
+  if (isearch_active()) isearch_end(false);
   begin_mouse_command();
   offset = clamp_main_offset(offset);
   if (shift) {
@@ -988,7 +1085,8 @@ bool Editor::mouse_drag(size_t offset) {
 }
 
 bool Editor::mouse_double_click(size_t offset) {
-  if (minibuffer_active()) return false;
+  if (minibuffer_active() || query_replace_active()) return false;
+  if (isearch_active()) isearch_end(false);
   begin_mouse_command();
   offset = clamp_main_offset(offset);
   size_t from = offset;
@@ -1265,6 +1363,470 @@ void Editor::minibuffer_history_next() {
     return;
   }
   set_minibuffer_text(text);
+}
+
+// ---- Search and replace (M5) ----
+
+namespace {
+
+std::wstring occurrences(size_t n) {
+  return L"Replaced " + std::to_wstring(n) + (n == 1 ? L" occurrence" : L" occurrences");
+}
+
+}  // namespace
+
+void Editor::after_input() {
+  if (query_replace_active() && !minibuffer_active() &&
+      (main_.text.revision() != replace_.revision || main_.point != replace_.point)) {
+    // Another command (through the global keymap) edited the text or moved
+    // point: the current match is the next one from point.
+    query_replace_next(main_.point, false);
+  }
+  if (!(isearch_active() || query_replace_active()) || minibuffer_active() || message_is_settings_) return;
+  const std::wstring prompt = isearch_active() ? isearch_prompt() : query_replace_prompt();
+  if (message_ == prompt) return;
+  if (message_.empty()) {
+    message_ = prompt;
+  } else {
+    message_ = prompt + (prompt.ends_with(L' ') ? L"[" : L" [") + message_ + L"]";
+  }
+}
+
+std::wstring Editor::isearch_prompt() const {
+  const IsearchStep& s = isearch_.now;
+  // Emacs words: "Failing wrapped regexp I-search backward: ".
+  std::wstring p;
+  if (s.failing) p += L"failing ";
+  if (s.wrapped) p += L"wrapped ";
+  if (s.case_override == 1) p += L"case-sensitive ";
+  if (s.case_override == 0) p += L"case-insensitive ";
+  if (s.regexp) p += L"regexp ";
+  p += L"I-search";
+  if (!s.forward) p += L" backward";
+  p += L": ";
+  if (p[0] >= L'a' && p[0] <= L'z') p[0] = static_cast<wchar_t>(p[0] - L'a' + L'A');
+  return p + s.pattern;
+}
+
+std::wstring Editor::query_replace_prompt() const {
+  return std::wstring(replace_.regexp ? L"Query replacing regexp " : L"Query replacing ") + replace_.from +
+         L" with " + replace_.to + L": ";
+}
+
+SearchMatch Editor::snap_match(const SearchMatch& m) const {
+  const PieceTree& t = main_.text;
+  const size_t start = cluster_start(t, std::min(m.start, t.length()));
+  size_t end = std::min(m.end, t.length());
+  const size_t end_start = cluster_start(t, end);
+  if (end_start != end) end = next_cluster_offset(t, end_start);
+  return SearchMatch{start, std::max(start, end)};
+}
+
+Editor::SearchHighlights Editor::search_highlights(int rows) const {
+  SearchHighlights h;
+  SearchMatch current;
+  if (isearch_active()) {
+    const IsearchStep& s = isearch_.now;
+    if (s.pattern.empty() || s.invalid) return h;
+    h.has_current = s.has_match && !s.failing;
+    current = s.match;
+  } else if (query_replace_active()) {
+    h.has_current = true;
+    current = replace_.match;
+  } else {
+    return h;
+  }
+  if (!matcher_.valid()) return SearchHighlights();
+  const WrapLayout& l = layout();
+  const PieceTree& t = main_.text;
+  RowPos top = top_;
+  if (top.line >= t.line_count() || !l.has_row(t, top.line, top.row)) top = RowPos{};
+  const size_t from = l.row_start(t, top.line, top.row);
+  size_t to = t.length();
+  RowPos end = top;
+  const size_t wanted = static_cast<size_t>(std::max(1, rows));
+  if (l.forward_rows(t, &end, wanted) == wanted) to = l.row_start(t, end.line, end.row);
+  matcher_.find_all(t, from, to, kMaxHighlights, &h.matches);
+  for (SearchMatch& m : h.matches) m = snap_match(m);
+  if (h.has_current) h.current = snap_match(current);
+  return h;
+}
+
+void Editor::isearch_start(bool forward, bool regexp) {
+  if (input_mode_active()) {
+    fail(kRecursiveMinibufferMessage);
+    return;
+  }
+  isearch_ = IsearchState();
+  isearch_.active = true;
+  isearch_.start_point = main_.point;
+  isearch_.start_top = top_;
+  IsearchStep& s = isearch_.now;
+  s.forward = forward;
+  s.regexp = regexp;
+  s.origin = main_.point;
+  s.point = main_.point;
+}
+
+void Editor::isearch_push() {
+  isearch_.history.push_back(isearch_.now);
+}
+
+bool Editor::isearch_prepare() {
+  IsearchStep& s = isearch_.now;
+  const bool sensitive =
+      s.case_override >= 0 ? s.case_override == 1 : search_case_sensitive(config_.case_fold, s.pattern, s.regexp);
+  s.invalid = !matcher_.set(s.pattern, s.regexp, sensitive);
+  if (s.invalid) message_ = matcher_.error();
+  return !s.invalid;
+}
+
+void Editor::isearch_search(bool repeat) {
+  IsearchStep& s = isearch_.now;
+  if (s.pattern.empty()) {
+    s.invalid = false;
+    return;
+  }
+  if (!isearch_prepare()) return;  // point stays at the last match
+  const PieceTree& t = main_.text;
+  if (repeat && s.failing) {
+    // A failing search wraps around (Emacs: "Wrapped I-search").
+    s.wrapped = true;
+    s.origin = s.forward ? 0 : t.length();
+    s.has_match = false;
+    repeat = false;
+  }
+  SearchMatch m;
+  SearchResult r = SearchResult::kNotFound;
+  if (s.forward) {
+    if (repeat && s.has_match) {
+      r = matcher_.find_forward(t, s.match.end, true, &m);
+    } else {
+      r = matcher_.find_forward(t, s.has_match ? s.match.start : s.origin, false, &m);
+    }
+  } else if (repeat && s.has_match) {
+    r = matcher_.find_backward(t, s.match.start, s.match.start, &m);
+    if (r == SearchResult::kFound && m == s.match) {
+      // The same empty match: one further back.
+      r = s.match.start > 0 ? matcher_.find_backward(t, s.match.start - 1, s.match.start, &m)
+                            : SearchResult::kNotFound;
+    }
+  } else {
+    // From the origin, a match must end there; a longer pattern keeps the
+    // current match's start (or one before it) and may end anywhere on its
+    // line, as the forward search does (M5 retry R2: a bound at the origin
+    // made "C-s fo C-s C-r o" fail after a turn-around).
+    r = s.has_match ? matcher_.find_backward(t, s.match.start, t.length(), &m)
+                    : matcher_.find_backward(t, s.origin, s.origin, &m);
+  }
+  if (r == SearchResult::kFound) {
+    s.has_match = true;
+    s.match = m;
+    s.failing = false;
+    const SearchMatch snapped = snap_match(m);
+    main_.point = s.forward ? snapped.end : snapped.start;
+  } else {
+    s.failing = true;
+    if (r == SearchResult::kError) message_ = matcher_.error();
+  }
+  s.point = main_.point;
+}
+
+void Editor::isearch_add_text(std::wstring_view text) {
+  isearch_push();
+  isearch_.now.pattern += text;
+  isearch_search(false);
+}
+
+void Editor::isearch_repeat(bool forward) {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  isearch_push();
+  IsearchStep& s = isearch_.now;
+  if (s.pattern.empty()) {
+    // C-s C-s: the last search string.
+    s.forward = forward;
+    const std::wstring& last = last_search_[s.regexp ? 1 : 0];
+    if (last.empty()) {
+      message_ = L"No previous search string";
+      return;
+    }
+    s.pattern = last;
+    isearch_search(false);
+    return;
+  }
+  if (s.forward != forward) {
+    // Turning around: first to the other end of the current match.
+    s.forward = forward;
+    if (s.has_match && !s.failing && !s.invalid) {
+      const SearchMatch snapped = snap_match(s.match);
+      main_.point = forward ? snapped.end : snapped.start;
+      s.point = main_.point;
+      // The search now runs from here in the new direction (R2).
+      s.origin = main_.point;
+      return;
+    }
+    s.has_match = false;
+    s.failing = false;
+    s.origin = main_.point;
+    isearch_search(false);
+    return;
+  }
+  isearch_search(true);
+}
+
+void Editor::isearch_delete_char() {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  if (isearch_.history.empty()) return;
+  isearch_.now = std::move(isearch_.history.back());
+  isearch_.history.pop_back();
+  main_.point = std::min(isearch_.now.point, main_.text.length());
+  if (!isearch_.now.pattern.empty()) isearch_prepare();
+}
+
+void Editor::isearch_toggle_regexp() {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  isearch_push();
+  isearch_.now.regexp = !isearch_.now.regexp;
+  isearch_search(false);
+}
+
+void Editor::isearch_toggle_case_fold() {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  isearch_push();
+  IsearchStep& s = isearch_.now;
+  const bool sensitive =
+      s.case_override >= 0 ? s.case_override == 1 : search_case_sensitive(config_.case_fold, s.pattern, s.regexp);
+  s.case_override = sensitive ? 0 : 1;
+  isearch_search(false);
+}
+
+void Editor::isearch_end(bool abort) {
+  const IsearchStep s = isearch_.now;
+  if (!s.pattern.empty()) last_search_[s.regexp ? 1 : 0] = s.pattern;
+  const size_t start = isearch_.start_point;
+  const RowPos top = isearch_.start_top;
+  isearch_ = IsearchState();
+  if (abort) {
+    main_.point = std::min(start, main_.text.length());
+    top_ = top;
+    ensure_point_visible();
+    return;
+  }
+  // Emacs: the mark goes where the search started (unless a region is
+  // active), so that C-x C-x returns there.
+  if (main_.point != start && !(main_.mark_active && main_.has_mark)) {
+    main_.has_mark = true;
+    main_.mark = std::min(start, main_.text.length());
+    message_ = L"Mark saved where search started";
+  }
+}
+
+void Editor::isearch_exit() {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  isearch_end(false);
+}
+
+void Editor::isearch_abort() {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  isearch_end(true);
+  fail(L"Quit");
+}
+
+void Editor::isearch_query_replace() {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  const IsearchStep s = isearch_.now;
+  // query-replace starts at the current match (Emacs: its beginning).
+  const size_t at = s.has_match && !s.failing ? snap_match(s.match).start : main_.point;
+  if (!s.pattern.empty()) last_search_[s.regexp ? 1 : 0] = s.pattern;
+  isearch_ = IsearchState();
+  main_.point = at;
+  const char* name = s.regexp ? "query-replace-regexp" : "query-replace";
+  if (s.pattern.empty()) {
+    start_reading_arguments(*find_command(name), PrefixArg());
+    return;
+  }
+  CommandArg from;
+  from.text = s.pattern;
+  CommandCall call{name, {std::move(from)}};
+  start_minibuffer(MinibufferPurpose::kCommandArgument,
+                   std::wstring(s.regexp ? L"Query replace regexp " : L"Query replace ") + s.pattern + L" with: ",
+                   L"");
+  reading_call_ = std::move(call);
+  minibuffer_prefix_ = PrefixArg();
+}
+
+void Editor::query_replace(bool regexp, std::wstring_view from, std::wstring_view to) {
+  if (input_mode_active()) {
+    fail(kRecursiveMinibufferMessage);
+    return;
+  }
+  if (!check_writable(main_)) return;
+  if (from.empty()) {
+    fail(L"The string to replace is empty");
+    return;
+  }
+  const bool sensitive = search_case_sensitive(config_.case_fold, from, regexp);
+  if (!matcher_.set(from, regexp, sensitive)) {
+    fail(L"Invalid regexp: " + matcher_.error());
+    return;
+  }
+  replace_ = ReplaceState();
+  replace_.active = true;
+  replace_.regexp = regexp;
+  replace_.from = from;
+  replace_.to = to;
+  replace_.start_point = main_.point;
+  replace_.undo_groups = main_.undo.undo_count();
+  query_replace_next(main_.point, false);
+}
+
+void Editor::query_replace_next(size_t from, bool not_empty_at_from, bool show) {
+  SearchMatch m;
+  const SearchResult r =
+      matcher_.find_forward(main_.text, std::min(from, main_.text.length()), not_empty_at_from, &m, true);
+  if (r != SearchResult::kFound) {
+    query_replace_finish(r == SearchResult::kError ? L"Search stopped (" + matcher_.error() + L"); " +
+                                                         occurrences(replace_.count)
+                                                   : occurrences(replace_.count));
+    return;
+  }
+  replace_.match = m;
+  main_.point = snap_match(m).end;
+  replace_.revision = main_.text.revision();
+  replace_.point = main_.point;
+  if (show) ensure_point_visible();
+}
+
+void Editor::query_replace_finish(std::wstring message) {
+  if (!replace_.active) return;
+  replace_.active = false;
+  // Every replacement of this run is one undo unit; undo puts point where
+  // query-replace started.
+  main_.undo.merge_groups_since(replace_.undo_groups, replace_.start_point);
+  message_ = std::move(message);
+}
+
+bool Editor::query_replace_replace_current() {
+  const SearchMatch m = replace_.match;
+  std::wstring text;
+  if (!matcher_.expand(replace_.to, &text)) {
+    query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " + occurrences(replace_.count));
+    failed_ = true;
+    return false;
+  }
+  if (main_.read_only) {
+    // read-only-mode was turned on during query-replace (C-x C-q through
+    // the global keymap): it ends, keeping what it replaced.
+    query_replace_finish(L"Buffer is read-only");
+    failed_ = true;
+    return false;
+  }
+  replace(main_, m.start, m.end, text);
+  ++replace_.count;
+  main_.point = m.start + text.size();
+  return true;
+}
+
+void Editor::query_replace_act(bool and_exit) {
+  if (!query_replace_active()) {
+    fail(L"Not in query-replace");
+    return;
+  }
+  const SearchMatch m = replace_.match;
+  if (!query_replace_replace_current()) return;
+  if (and_exit) {
+    query_replace_finish(occurrences(replace_.count));
+    return;
+  }
+  query_replace_next(main_.point, m.start == m.end);
+}
+
+void Editor::query_replace_skip() {
+  if (!query_replace_active()) {
+    fail(L"Not in query-replace");
+    return;
+  }
+  const SearchMatch m = replace_.match;
+  query_replace_next(m.end, m.start == m.end);
+}
+
+void Editor::query_replace_all() {
+  if (!query_replace_active()) {
+    fail(L"Not in query-replace");
+    return;
+  }
+  // M5 retry R3 (profiled): searching again after each replacement gathered
+  // the whole edited line (O(line) per match) and kept point on screen per
+  // match (a walk of the wrapped line). Now every remaining match of a line
+  // is found on one copy of the line and replaced in one edit, and the view
+  // follows point once, when the command ends (finish_command).
+  while (query_replace_active()) {
+    if (main_.read_only) {
+      query_replace_finish(L"Buffer is read-only");
+      failed_ = true;
+      return;
+    }
+    LineReplacement line;
+    const bool ok = matcher_.expand_rest_of_line(replace_.to, &line);
+    if (line.count > 0) {
+      replace(main_, line.from, line.to, line.text);
+      replace_.count += line.count;
+      main_.point = line.from + line.point;
+    }
+    if (!ok) {
+      query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " + occurrences(replace_.count));
+      failed_ = true;
+      return;
+    }
+    query_replace_next(main_.point, line.last_empty, false);
+  }
+}
+
+void Editor::query_replace_exit() {
+  if (!query_replace_active()) {
+    fail(L"Not in query-replace");
+    return;
+  }
+  query_replace_finish(occurrences(replace_.count));
+}
+
+void Editor::goto_line(int64_t line) {
+  Buffer& b = current();
+  const size_t lines = b.text.line_count();
+  const size_t index = line <= 1 ? 0 : static_cast<size_t>(std::min<uint64_t>(static_cast<uint64_t>(line) - 1, lines - 1));
+  // Emacs pushes the mark at the old position unless a region is active.
+  if (!b.mark_active) {
+    b.has_mark = true;
+    b.mark = b.point;
+    message_ = L"Mark set";
+  }
+  b.point = b.text.line_start(index);
+}
+
+void Editor::end_search_modes() {
+  if (isearch_active()) isearch_end(false);
+  if (query_replace_active()) query_replace_finish(occurrences(replace_.count));
 }
 
 }  // namespace geditor
