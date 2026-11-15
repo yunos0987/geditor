@@ -64,6 +64,11 @@ class GraphemeBreaker {
   // such a code point, with the state of a fresh breaker that was fed `c`
   // alone.
   static bool context_free(char32_t c);
+  // For walks over lone clusters (lone_cluster_width): true when one fed now
+  // starts a cluster (the code point before is no Prepend character), and
+  // the state after one (that of any lone cluster).
+  bool lone_cluster_breaks() const { return ascii_breaks(); }
+  static constexpr GraphemeBreaker after_lone_cluster() { return after_other(); }
 
   friend bool operator==(const GraphemeBreaker&, const GraphemeBreaker&) = default;
 
@@ -130,6 +135,17 @@ class ClusterWidth {
   bool first_ri_ = false;
   int count_ = 0;
 };
+
+// The unit `u` alone is a cluster when the unit after it is such a unit
+// too and the state before it is lone_cluster_breaks(): printable ASCII and
+// the BMP characters without a Grapheme_Cluster_Break value and without the
+// properties of the table's flags (most letters, kana and kanji), as
+// ClusterBuilder takes them. Returns its cell width (the cluster's width),
+// or -1 for any other unit (surrogates, controls, TAB, marks, emoji...).
+int lone_cluster_width(wchar_t u);
+// lone_cluster_width of every UTF-16 unit, indexed by the unit (64K
+// entries, made on the first call).
+const int8_t* lone_cluster_widths();
 
 // One cluster of a text: [offset, offset + length) in UTF-16 units.
 struct Cluster {

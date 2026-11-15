@@ -82,6 +82,10 @@ struct RowInfo {
 // segmentation runs only from the recorded state to the rows needed. Edits
 // reported through note_edit keep the states before the edit; any other
 // change of the text (seen through PieceTree::revision) drops them all.
+// Runs of lone clusters (grapheme.h lone_cluster_width: most text) that a
+// walk only passes over are placed unit by unit without building clusters,
+// with the same rows, columns and recorded states as the general walk
+// (tests/test_layout_lone.cpp compares the two).
 class WrapLayout {
  public:
   static constexpr size_t kCheckpointInterval = 65536;
@@ -137,6 +141,11 @@ class WrapLayout {
   void reset_scanned() const { scanned_ = 0; }
   size_t checkpoint_count(size_t line) const;
 
+  // Tests only: walks every cluster through the general cluster walk
+  // (for_each_cluster), without the run of lone clusters (walk), so that
+  // both can be compared.
+  void use_general_walk_for_testing(bool general) { general_walk_ = general; }
+
   // Offset where the trailing whitespace (spaces, TABs, U+3000) of `line`
   // starts, on a cluster boundary; the line end when there is none. Kept per
   // line (up to 8 lines)
@@ -154,7 +163,11 @@ class WrapLayout {
     int column = 0;
     int64_t logical = 0;       // column from the start of the logical line
     GraphemeBreaker breaker;   // segmentation state before `offset`
+
+    friend bool operator==(const State&, const State&) = default;
   };
+  // Tests only: the recorded states of `line` (nullptr when it has none).
+  const std::vector<State>* checkpoints_for_testing(size_t line) const;
 
  private:
   struct LineCache {
@@ -177,12 +190,24 @@ class WrapLayout {
   void note_wrap_edit(size_t offset);
   // The cache of a long line (nullptr for short lines).
   LineCache* cache_for(const PieceTree& tree, size_t line) const;
+  // The clusters a walk's f returns true for without doing anything: those
+  // that end at or before `end` and are placed on a row before `row`.
+  struct Skip {
+    size_t end = ~size_t{0};
+    size_t row = ~size_t{0};
+  };
   // Walks from `from` to the line end (or until f returns false), calling
   // f(cluster, row, column, width, logical) for each cluster after its row
   // break has been decided; records states into `cache`. Returns the state
-  // after the walk.
+  // after the walk. Runs of lone clusters (lone_cluster_width) that `skip`
+  // covers are placed by skip_lone_clusters without calling f; everything
+  // else goes through for_each_cluster.
   template <typename F>
-  State walk(const PieceTree& tree, LineCache* cache, State from, size_t line_end, F&& f) const;
+  State walk(const PieceTree& tree, LineCache* cache, State from, size_t line_end, Skip skip, F&& f) const;
+  // Places the lone clusters from s->offset on, while `skip` covers them and
+  // the unit after each one is lone too (within one chunk of the tree), as
+  // walk's step would place them; records states into `cache`.
+  void skip_lone_clusters(const PieceTree& tree, LineCache* cache, State* s, size_t line_end, Skip skip) const;
   // The latest recorded state of `line` that is not after (row, column).
   State seek(const PieceTree& tree, size_t line, LineCache* cache, size_t row, int column) const;
   State line_start_state(const PieceTree& tree, size_t line) const;
@@ -204,6 +229,7 @@ class WrapLayout {
   mutable std::vector<TrailingCache> trailing_;
   mutable uint64_t clock_ = 0;
   mutable size_t scanned_ = 0;
+  bool general_walk_ = false;
 };
 
 }  // namespace geditor

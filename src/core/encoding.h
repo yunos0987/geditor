@@ -97,6 +97,14 @@ DecodedText decode_as(std::string_view bytes, const FileFormat& encoding);
 // reads every byte; else UTF-8 with U+FFFD (detection_failed).
 DecodedText decode_detected(std::string_view bytes);
 
+// Reading Shift_JIS, EUC-JP and ISO-2022-JP that do not give their bytes
+// back as a whole goes over stretches of 64 KiB, each read in one call when
+// it reads and gives its bytes back, and line by line or character by
+// character otherwise (the same result as lines and characters alone; see
+// encoding.cpp). Tests only: sets the stretch size (0: 64 KiB), so that
+// small inputs cross many stretch boundaries.
+void set_code_page_stretch_for_testing(size_t bytes);
+
 // The encoding names of docs/PLAN.md 2 ("utf-8", "utf-8-bom", "utf-16le",
 // "utf-16le-bom", "utf-16be", "utf-16be-bom", "shift_jis", "euc-jp",
 // "iso-2022-jp"): sets codec and bom; false for any other name.

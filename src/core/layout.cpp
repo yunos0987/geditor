@@ -312,6 +312,13 @@ size_t WrapLayout::checkpoint_count(size_t line) const {
   return 0;
 }
 
+const std::vector<WrapLayout::State>* WrapLayout::checkpoints_for_testing(size_t line) const {
+  for (const LineCache& c : caches_) {
+    if (c.line == line) return &c.states;
+  }
+  return nullptr;
+}
+
 WrapLayout::State WrapLayout::line_start_state(const PieceTree& tree, size_t line) const {
   return State{tree.line_start(line), 0, 0, 0, GraphemeBreaker()};
 }
@@ -333,8 +340,66 @@ WrapLayout::State WrapLayout::seek(const PieceTree& tree, size_t line, LineCache
   return found;
 }
 
+void WrapLayout::skip_lone_clusters(const PieceTree& tree, LineCache* cache, State* s, size_t line_end,
+                                    Skip skip) const {
+  if (s->offset >= line_end || !s->breaker.lone_cluster_breaks()) return;
+  const size_t begin = s->offset;
+  size_t next_checkpoint = cache != nullptr ? cache->states.back().offset + kCheckpointInterval : ~size_t{0};
+  constexpr GraphemeBreaker kAfter = GraphemeBreaker::after_lone_cluster();
+  const int8_t* const widths = lone_cluster_widths();
+  auto width_of = [widths](wchar_t u) { return static_cast<int>(widths[static_cast<uint16_t>(u)]); };
+  // The state in locals (written back below); `breaker` is s->breaker
+  // until the first cluster is placed.
+  size_t offset = s->offset;
+  size_t row = s->row;
+  int column = s->column;
+  int64_t logical = s->logical;
+  GraphemeBreaker breaker = s->breaker;
+  const int width = width_;
+  // The first chunk only: the unit after the last one of a chunk is not at
+  // hand, and the general walk takes that one.
+  std::wstring_view chunk;
+  tree.for_each_chunk(offset, line_end - offset, [&chunk](std::wstring_view c) {
+    chunk = c;
+    return false;
+  });
+  const wchar_t* const units = chunk.data();
+  const size_t n = chunk.size();
+  int next_w = n == 0 ? -1 : width_of(units[0]);
+  for (size_t i = 0; i + 1 < n; ++i) {
+    const int w = next_w;
+    next_w = width_of(units[i + 1]);
+    if (w < 0 || next_w < 0) break;
+    // As walk's step: the state is recorded before the row break.
+    const bool row_break = width > 0 && w > 0 && column > 0 && column + w > width;
+    if (offset + 1 > skip.end || row + (row_break ? 1 : 0) >= skip.row) break;
+    if (offset >= next_checkpoint) [[unlikely]] {
+      cache->states.push_back(State{offset, row, column, logical, breaker});
+      next_checkpoint = offset + kCheckpointInterval;
+    }
+    if (row_break) [[unlikely]] {
+      if (cache != nullptr) {
+        cache->last_break = State{offset, row, column, logical, breaker};
+        cache->has_break = true;
+      }
+      ++row;
+      column = 0;
+    }
+    column += w;
+    logical += w;
+    ++offset;
+    breaker = kAfter;
+  }
+  s->offset = offset;
+  s->row = row;
+  s->column = column;
+  s->logical = logical;
+  s->breaker = breaker;
+  scanned_ += offset - begin;
+}
+
 template <typename F>
-WrapLayout::State WrapLayout::walk(const PieceTree& tree, LineCache* cache, State s, size_t line_end,
+WrapLayout::State WrapLayout::walk(const PieceTree& tree, LineCache* cache, State s, size_t line_end, Skip skip,
                                    F&& f) const {
   auto step = [&](const Cluster& cl) {
     if (cache != nullptr && cl.offset >= cache->states.back().offset + kCheckpointInterval) {
@@ -370,7 +435,37 @@ WrapLayout::State WrapLayout::walk(const PieceTree& tree, LineCache* cache, Stat
     s.offset = cl.offset + cl.length;
     return go_on;
   };
-  const bool stopped = s.offset < line_end && !for_each_cluster(tree, s.offset, line_end, s.breaker, &scanned_, step);
+  bool stopped = false;
+  if (general_walk_) {
+    stopped = s.offset < line_end && !for_each_cluster(tree, s.offset, line_end, s.breaker, &scanned_, step);
+  } else {
+    // Lone clusters that f would only pass over are placed directly; the
+    // general walk takes the rest, and hands back to them at a lone cluster
+    // after kGeneralRun clusters (not at every one: each restart looks the
+    // offset up in the tree).
+    constexpr size_t kGeneralRun = 64;
+    while (s.offset < line_end) {
+      skip_lone_clusters(tree, cache, &s, line_end, skip);
+      if (s.offset >= line_end) break;
+      size_t run = 0;
+      bool resume = false;
+      const bool done = for_each_cluster(tree, s.offset, line_end, s.breaker, &scanned_, [&](const Cluster& cl) {
+        if (++run > kGeneralRun && cl.length == 1 && cl.offset + 1 <= skip.end && s.row < skip.row &&
+            cl.before.lone_cluster_breaks() && lone_cluster_width(static_cast<wchar_t>(cl.first)) >= 0) {
+          resume = true;
+          s.offset = cl.offset;
+          s.breaker = cl.before;
+          return false;
+        }
+        return step(cl);
+      });
+      if (done) break;
+      if (!resume) {
+        stopped = true;
+        break;
+      }
+    }
+  }
   if (!stopped && cache != nullptr) {
     cache->complete = true;
     cache->end_state = s;
@@ -383,7 +478,7 @@ size_t WrapLayout::row_count(const PieceTree& tree, size_t line) const {
   LineCache* cache = cache_for(tree, line);
   if (cache != nullptr && cache->complete) return cache->end_state.row + 1;
   const State from = cache != nullptr ? cache->states.back() : line_start_state(tree, line);
-  const State end = walk(tree, cache, from, tree.line_end(line),
+  const State end = walk(tree, cache, from, tree.line_end(line), Skip{},
                          [](const Cluster&, size_t, int, int, int64_t) { return true; });
   return end.row + 1;
 }
@@ -401,7 +496,7 @@ bool WrapLayout::has_row(const PieceTree& tree, size_t line, size_t row) const {
   }
   const State from = cache != nullptr ? cache->states.back() : line_start_state(tree, line);
   bool found = false;
-  walk(tree, cache, from, tree.line_end(line), [&](const Cluster&, size_t r, int, int, int64_t) {
+  walk(tree, cache, from, tree.line_end(line), Skip{~size_t{0}, row}, [&](const Cluster&, size_t r, int, int, int64_t) {
     if (r < row) return true;
     found = true;
     return false;
@@ -428,7 +523,7 @@ RowPos WrapLayout::row_of(const PieceTree& tree, size_t offset, int* column, int
   RowPos pos{line, 0};
   int col = 0;
   int64_t logical = 0;
-  const State end = walk(tree, cache, from, tree.line_end(line),
+  const State end = walk(tree, cache, from, tree.line_end(line), Skip{offset, ~size_t{0}},
                          [&](const Cluster& cl, size_t r, int c, int, int64_t lg) {
                            // An offset inside a cluster maps to its start.
                            if (cl.offset + cl.length <= offset) return true;
@@ -454,7 +549,7 @@ size_t WrapLayout::row_start(const PieceTree& tree, size_t line, size_t row) con
   LineCache* cache = cache_for(tree, line);
   const State from = seek(tree, line, cache, row - 1, std::numeric_limits<int>::max());
   size_t result = kNone;
-  const State end = walk(tree, cache, from, tree.line_end(line),
+  const State end = walk(tree, cache, from, tree.line_end(line), Skip{~size_t{0}, row},
                          [&](const Cluster& cl, size_t r, int, int, int64_t) {
                            if (r < row) return true;
                            result = cl.offset;
@@ -473,7 +568,7 @@ size_t WrapLayout::offset_at(const PieceTree& tree, size_t line, size_t row, int
   size_t result = kNone;
   size_t last_base = kNone;
   bool next_row_reached = false;
-  walk(tree, cache, from, line_end, [&](const Cluster& cl, size_t r, int c, int w, int64_t) {
+  walk(tree, cache, from, line_end, Skip{~size_t{0}, row}, [&](const Cluster& cl, size_t r, int c, int w, int64_t) {
     if (r < row) return true;
     if (r > row) {
       next_row_reached = true;
@@ -502,7 +597,7 @@ RowInfo WrapLayout::row_chars(const PieceTree& tree, size_t line, size_t row, in
   RowInfo info;
   int column_end = from.row == row ? from.column : 0;
   bool stopped_at_to = false;
-  const State end = walk(tree, cache, from, tree.line_end(line),
+  const State end = walk(tree, cache, from, tree.line_end(line), Skip{~size_t{0}, row},
                          [&](const Cluster& cl, size_t r, int c, int w, int64_t) {
                            if (r < row) return true;
                            if (r > row) {

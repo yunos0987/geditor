@@ -8,6 +8,7 @@ add_executable(geditor_tests
   test_commands_move.cpp
   test_display.cpp
   test_encoding.cpp
+  test_encoding_stretches.cpp
   test_files.cpp
   test_grapheme.cpp
   test_grapheme_commands.cpp
@@ -23,6 +24,7 @@ add_executable(geditor_tests
   test_m4b_commands.cpp
   test_m4b_encoding.cpp
   test_m5_search.cpp
+  test_layout_lone.cpp
   test_layout_wrap.cpp
   test_menu.cpp
   test_minibuffer.cpp
@@ -33,6 +35,7 @@ add_executable(geditor_tests
   test_quit_keys.cpp
   test_retry1.cpp
   test_review_fixes.cpp
+  test_search_backward.cpp
   test_session_clipboard.cpp
   test_settings.cpp
   test_shift_translation.cpp

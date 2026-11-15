@@ -150,6 +150,9 @@ bool SearchPattern::set(std::wstring_view pattern, bool regexp, bool case_sensit
   regexp_ = regexp;
   case_sensitive_ = case_sensitive;
   compiled_once_ = true;
+  start_dependent_ = regexp && (pattern_.find(L"\\G") != std::wstring::npos ||
+                                pattern_.find(L"\\K") != std::wstring::npos ||
+                                pattern_.find(L"(*") != std::wstring::npos);
   if (!ensure_context()) {
     error_ = L"Out of memory";
     return false;
@@ -255,25 +258,87 @@ SearchResult SearchPattern::find_backward(const PieceTree& text, size_t max_star
   for (size_t line = text.line_of(max_start);; --line) {
     const size_t line_start = text.line_start(line);
     const std::wstring_view subject = line_text(text, line_start, text.line_end(line));
+    const SearchResult r = start_dependent_ ? last_match_by_scan(subject, line_start, max_start, end_bound, match_out)
+                                            : last_match(subject, line_start, max_start, end_bound, match_out);
+    if (r != SearchResult::kNotFound) return r;
+    if (line == 0) return SearchResult::kNotFound;
+  }
+}
+
+SearchResult SearchPattern::last_match_by_scan(std::wstring_view subject, size_t line_start, size_t max_start,
+                                               size_t end_bound, SearchMatch* match_out) {
+  bool found = false;
+  SearchMatch best;
+  size_t start = 0;
+  while (start <= subject.size()) {
+    const int rc = match(subject, start, 0, data_);
+    if (rc == PCRE2_ERROR_NOMATCH) break;
+    if (rc < 0) {
+      set_match_error(rc);
+      return SearchResult::kError;
+    }
+    const PCRE2_SIZE* ov = pcre2_get_ovector_pointer_16(data_);
+    const size_t s = line_start + ov[0];
+    const size_t e = line_start + ov[1];
+    if (s > max_start) break;
+    if (e <= end_bound) {
+      best = SearchMatch{s, e};
+      found = true;
+    }
+    // The next match that starts after this one (matches may overlap).
+    if (ov[0] >= subject.size()) break;
+    start = next_code_point(subject, ov[0]);
+  }
+  if (!found) return SearchResult::kNotFound;
+  *match_out = best;
+  return SearchResult::kFound;
+}
+
+// The matches of the forward scan (last_match_by_scan) are the positions
+// where a match attempt succeeds, each with the match of that attempt, and
+// an attempt does not depend on where the scan started (without \G, \K and
+// the verbs; the subject is always the whole line, so look-behind and ^ see
+// the same text). So a forward scan from any code point boundary `lo` finds
+// exactly the scan's matches that start at or after `lo`: windows [lo, hi)
+// back from max_start are scanned until one has a match that qualifies.
+SearchResult SearchPattern::last_match(std::wstring_view subject, size_t line_start, size_t max_start,
+                                       size_t end_bound, SearchMatch* match_out) {
+  // The first match of the line: none, or none at or before max_start, is
+  // no match on the line (as for the scan).
+  int rc = match(subject, 0, 0, data_);
+  if (rc == PCRE2_ERROR_NOMATCH) return SearchResult::kNotFound;
+  if (rc < 0) {
+    set_match_error(rc);
+    return SearchResult::kError;
+  }
+  const size_t first = pcre2_get_ovector_pointer_16(data_)[0];
+  if (line_start + first > max_start) return SearchResult::kNotFound;
+  // Starts in [lo, hi) of the line are looked at; hi is one past max_start.
+  size_t hi = std::min(max_start - line_start, subject.size()) + 1;
+  size_t window = kBackwardWindow;
+  for (;;) {
+    size_t lo = first;
+    if (hi - first > window) {
+      lo = hi - window;
+      // Not inside a surrogate pair (a code point boundary of the scan).
+      if (is_low_surrogate(subject[lo]) && is_high_surrogate(subject[lo - 1])) --lo;
+    }
     bool found = false;
     SearchMatch best;
-    size_t start = 0;
+    size_t start = lo;
     while (start <= subject.size()) {
-      const int rc = match(subject, start, 0, data_);
+      rc = match(subject, start, 0, data_);
       if (rc == PCRE2_ERROR_NOMATCH) break;
       if (rc < 0) {
         set_match_error(rc);
         return SearchResult::kError;
       }
       const PCRE2_SIZE* ov = pcre2_get_ovector_pointer_16(data_);
-      const size_t s = line_start + ov[0];
-      const size_t e = line_start + ov[1];
-      if (s > max_start) break;
-      if (e <= end_bound) {
-        best = SearchMatch{s, e};
+      if (ov[0] >= hi) break;
+      if (line_start + ov[1] <= end_bound) {
+        best = SearchMatch{line_start + ov[0], line_start + ov[1]};
         found = true;
       }
-      // The next match that starts after this one (matches may overlap).
       if (ov[0] >= subject.size()) break;
       start = next_code_point(subject, ov[0]);
     }
@@ -281,7 +346,9 @@ SearchResult SearchPattern::find_backward(const PieceTree& text, size_t max_star
       *match_out = best;
       return SearchResult::kFound;
     }
-    if (line == 0) return SearchResult::kNotFound;
+    if (lo == first) return SearchResult::kNotFound;
+    hi = lo;
+    window *= 2;
   }
 }
 

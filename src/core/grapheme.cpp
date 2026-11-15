@@ -1,5 +1,7 @@
 #include "grapheme.h"
 
+#include <array>
+
 #include "char_width.h"
 #include "unicode.h"
 
@@ -92,6 +94,26 @@ bool is_emoji(char32_t c) {
 
 int grapheme_table_width(char32_t c) {
   return width_of_value(table_value(c));
+}
+
+int lone_cluster_width(wchar_t u) {
+  if (u >= 0x20 && u < 0x7F) return 1;  // ClusterBuilder::push
+  if (u >= 0xD800 && u <= 0xDFFF) return -1;
+  // ClusterBuilder::push_general: "simple" (no property bits), whose width is
+  // ClusterWidth::start_simple's.
+  const uint16_t v = table_value(static_cast<char32_t>(u));
+  return (v & 0xFF) == 0 ? width_of_value(v) : -1;
+}
+
+const int8_t* lone_cluster_widths() {
+  // Filled on the first call (the first layout walk of any line, which may
+  // come with the first frame), not by a static initializer.
+  static const std::array<int8_t, 0x10000> widths = [] {
+    std::array<int8_t, 0x10000> w{};
+    for (size_t u = 0; u < w.size(); ++u) w[u] = static_cast<int8_t>(lone_cluster_width(static_cast<wchar_t>(u)));
+    return w;
+  }();
+  return widths.data();
 }
 
 const char* grapheme_unicode_version() {

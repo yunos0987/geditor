@@ -73,8 +73,16 @@ class SearchPattern {
   SearchResult find_forward(const PieceTree& text, size_t from, bool not_empty_at_from, SearchMatch* match,
                             bool for_expand = false);
   // The match with the greatest start <= `max_start` that ends at or before
-  // `end_bound`.
+  // `end_bound`: of the matches that a forward scan of the line finds (the
+  // first one, then the first one that starts after the start of the one
+  // before), the last one that qualifies. Long lines are scanned in windows
+  // back from `max_start` (each window as the forward scan would see it),
+  // so that the answer near `max_start` does not cost a scan of the whole
+  // line; patterns whose matches depend on where a scan starts (\G, \K and
+  // the (*...) verbs) scan the line from its start.
   SearchResult find_backward(const PieceTree& text, size_t max_start, size_t end_bound, SearchMatch* match);
+  // The first window of find_backward, in UTF-16 units (it doubles).
+  static constexpr size_t kBackwardWindow = 256;
   // The non-empty matches that overlap [from, to), at most `max` of them, in
   // order (for highlighting). Lines longer than kLongLine are matched only
   // in a window of kLongLineMargin units around [from, to).
@@ -113,6 +121,13 @@ class SearchPattern {
   int match(std::wstring_view subject, size_t start, unsigned options, pcre2_real_match_data_16* data);
   bool ensure_context();
   void set_match_error(int rc);
+  // find_backward on one line (`subject` at `line_start`): kFound with
+  // *match, kNotFound, or kError. last_match_by_scan scans the whole line
+  // forward; last_match scans windows back from max_start.
+  SearchResult last_match_by_scan(std::wstring_view subject, size_t line_start, size_t max_start, size_t end_bound,
+                                  SearchMatch* match);
+  SearchResult last_match(std::wstring_view subject, size_t line_start, size_t max_start, size_t end_bound,
+                          SearchMatch* match);
   // [from, to) of `text` (within one line) as one view: in place when it
   // lies in one chunk, else copied into buf_.
   std::wstring_view line_text(const PieceTree& text, size_t from, size_t to);
@@ -126,6 +141,9 @@ class SearchPattern {
   bool regexp_ = false;
   bool case_sensitive_ = false;
   bool compiled_once_ = false;  // pattern_ / regexp_ / case_sensitive_ describe code_ (or its failure)
+  // A regexp with "\G", "\K" or "(*" (also when escaped: then only slower):
+  // where a match is found depends on where the scan starts.
+  bool start_dependent_ = false;
   std::wstring error_;
   std::wstring buf_;
   // The line of the last find_forward with `for_expand`, matched again in

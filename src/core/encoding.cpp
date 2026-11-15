@@ -43,11 +43,23 @@ struct RawText {
 
 // ---- UTF-8 ----
 
+// Where the decoding of UTF-8 stopped at its first invalid byte (detection):
+// that byte and the units written before it.
+struct Utf8Stop {
+  size_t byte = 0;
+  size_t units = 0;
+};
+
+bool raw_utf8_from(std::string_view bytes, size_t from, size_t units, RawText* raw, Utf8Stop* stop);
+
 // Invalid bytes become U+FFFD, one for each maximal subpart of a sequence
-// (Unicode 3.9, "U+FFFD substitution of maximal subparts").
-void raw_utf8(std::string_view bytes, size_t skip, RawText* raw) {
+// (Unicode 3.9, "U+FFFD substitution of maximal subparts"). With `stop`
+// (detection) the decoding stops at the first invalid byte instead and
+// returns false; raw_utf8_from(bytes, stop->byte, stop->units, raw, nullptr)
+// then goes on as if it had not stopped.
+bool raw_utf8(std::string_view bytes, size_t skip, RawText* raw, Utf8Stop* stop = nullptr) {
   const unsigned char* const begin = reinterpret_cast<const unsigned char*>(bytes.data());
-  const unsigned char* p = begin + skip;
+  const unsigned char* const p = begin + skip;
   const unsigned char* const end = begin + bytes.size();
   // UTF-16 units of valid input: one per lead byte, two for 4-byte
   // sequences. Eight bytes at a time: continuation bytes are 10xxxxxx,
@@ -68,11 +80,20 @@ void raw_utf8(std::string_view bytes, size_t skip, RawText* raw) {
   }
   if (units >= kMaxUnits) {
     raw->too_large = true;
-    return;
+    return true;
   }
+  raw->text.resize(units);
+  return raw_utf8_from(bytes, skip, 0, raw, stop);
+}
+
+// raw_utf8 from byte `from`, with `units` units already in raw->text (whose
+// size is the count of raw_utf8).
+bool raw_utf8_from(std::string_view bytes, size_t from, size_t units, RawText* raw, Utf8Stop* stop) {
+  const unsigned char* const begin = reinterpret_cast<const unsigned char*>(bytes.data());
+  const unsigned char* p = begin + from;
+  const unsigned char* const end = begin + bytes.size();
   std::wstring& text = raw->text;
-  text.resize(units);
-  wchar_t* out = text.data();
+  wchar_t* out = text.data() + units;
   while (p < end) {
     const unsigned char b = *p;
     if (b < 0x80) {
@@ -122,6 +143,11 @@ void raw_utf8(std::string_view bytes, size_t skip, RawText* raw) {
       }
     }
     if (!ok) {
+      if (stop != nullptr) {
+        stop->byte = static_cast<size_t>(p - begin);
+        stop->units = static_cast<size_t>(out - text.data());
+        return false;
+      }
       // The maximal subpart: the lead and the continuation bytes that can
       // still follow it.
       size_t sub = 1;
@@ -150,6 +176,7 @@ void raw_utf8(std::string_view bytes, size_t skip, RawText* raw) {
     p += n;
   }
   text.resize(static_cast<size_t>(out - text.data()));
+  return true;
 }
 
 // ---- UTF-16 ----
@@ -209,12 +236,27 @@ const CodePage& code_page(Codec codec) {
 
 // MultiByteToWideChar. `strict` adds MB_ERR_INVALID_CHARS where the code page
 // accepts it; false when the bytes are invalid then, or the call fails.
-bool mb_to_wide(const CodePage& cp, bool strict, std::string_view bytes, std::wstring* out) {
+// One call into a buffer of `expected` units (when not 0: the caller's count,
+// so that a large text keeps no spare capacity; retry R2) or else one unit
+// per byte, without a size query (it costs as much as the conversion: about
+// 250 ms for 100 MB of Shift_JIS); the size is asked only when that is not
+// enough.
+bool mb_to_wide(const CodePage& cp, bool strict, std::string_view bytes, std::wstring* out, size_t expected = 0) {
   out->clear();
   if (bytes.empty()) return true;
   if (bytes.size() > static_cast<size_t>(INT_MAX)) return false;
   const DWORD flags = strict && cp.read_flag ? MB_ERR_INVALID_CHARS : 0;
   const int size = static_cast<int>(bytes.size());
+  const size_t room = expected != 0 ? std::min(expected, static_cast<size_t>(INT_MAX)) : bytes.size();
+  out->resize(room);
+  const int written = MultiByteToWideChar(cp.id, flags, bytes.data(), size, out->data(), static_cast<int>(room));
+  if (written > 0) {
+    out->resize(static_cast<size_t>(written));
+    return true;
+  }
+  const bool more_room = GetLastError() == ERROR_INSUFFICIENT_BUFFER;
+  out->clear();
+  if (!more_room) return false;
   const int n = MultiByteToWideChar(cp.id, flags, bytes.data(), size, nullptr, 0);
   if (n <= 0) return false;
   out->resize(static_cast<size_t>(n));
@@ -223,13 +265,18 @@ bool mb_to_wide(const CodePage& cp, bool strict, std::string_view bytes, std::ws
 
 // WideCharToMultiByte with WC_NO_BEST_FIT_CHARS and lpUsedDefaultChar where
 // the code page accepts them (`used_default`: a character had no bytes).
-// The size query alone is not enough (encoding.h: on 932, when the text ends
-// in one of 12 characters, converting into a buffer of exactly the queried
-// size fails with ERROR_INSUFFICIENT_BUFFER): the conversion gets room to spare
-// and grows it on that error. Not enough alone (50220 accepts no flags):
+// A buffer of exactly the size a query returns is not enough (encoding.h: on
+// 932, when the text ends in one of 12 characters, that conversion fails
+// with ERROR_INSUFFICIENT_BUFFER): the conversion gets room to spare and
+// grows it on that error. Not enough alone (50220 accepts no flags):
 // every caller reads the bytes back and compares them (encode_text: with
 // the text; raw_codepage: with the file). False when the call still fails.
-bool wide_to_mb(const CodePage& cp, std::wstring_view text, std::string* out, bool* used_default) {
+// `expected` (when not 0, reading a file: the bytes of the file) sizes the
+// first buffer without a size query (it costs as much as the conversion);
+// without it the size is asked first, so that the bytes keep no spare
+// capacity (encode_text: saving keeps the memory of HEAD 368313b, retry R2).
+bool wide_to_mb(const CodePage& cp, std::wstring_view text, std::string* out, bool* used_default,
+                size_t expected = 0) {
   out->clear();
   *used_default = false;
   if (text.empty()) return true;
@@ -238,9 +285,12 @@ bool wide_to_mb(const CodePage& cp, std::wstring_view text, std::string* out, bo
   BOOL used = FALSE;
   BOOL* const used_out = cp.write_flags ? &used : nullptr;
   const int size = static_cast<int>(text.size());
-  const int n = WideCharToMultiByte(cp.id, flags, text.data(), size, nullptr, 0, nullptr, used_out);
-  if (n <= 0) return false;
-  size_t capacity = static_cast<size_t>(n) + 16;
+  if (expected == 0) {
+    const int n = WideCharToMultiByte(cp.id, flags, text.data(), size, nullptr, 0, nullptr, used_out);
+    if (n <= 0) return false;
+    expected = static_cast<size_t>(n);
+  }
+  size_t capacity = expected + 16;
   for (;;) {
     capacity = std::min(capacity, static_cast<size_t>(INT_MAX));
     out->resize(capacity);
@@ -270,19 +320,27 @@ size_t dbcs_unit_length(Codec codec, unsigned char b) {
   return (b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xFC) ? 2 : 1;
 }
 
-// Shift_JIS and EUC-JP after the whole file failed: line by line (0x0A is
-// never part of a double-byte character), and character by character in a
-// line that fails. A character that cannot be read becomes U+FFFD (one per
-// byte); one that reads but is written back differently is kept and noted.
-void raw_dbcs(std::string_view bytes, Codec codec, RawText* raw) {
+// The bytes that the fallbacks below convert in one call before they look
+// at lines or characters: a stretch that reads and gives the same bytes back
+// as a whole is taken as it is (about 1600 calls for 100 MB instead of one
+// per line or per character).
+constexpr size_t kStretchBytes = 64 * 1024;
+size_t g_stretch_bytes = kStretchBytes;  // set_code_page_stretch_for_testing
+
+// Lines [from, to) of `bytes` (from a line start to a line end or the end of
+// the file) after their stretch failed: line by line (0x0A is never part of
+// a double-byte character), and character by character in a line that
+// fails. A character that cannot be read becomes U+FFFD (one per byte); one
+// that reads but is written back differently is kept and noted.
+void raw_dbcs_lines(std::string_view bytes, size_t from, size_t to, Codec codec, RawText* raw) {
   const CodePage& cp = code_page(codec);
   std::wstring w;
   std::string back;
   bool used = false;
-  size_t pos = 0;
-  while (pos < bytes.size()) {
+  size_t pos = from;
+  while (pos < to) {
     const size_t lf = bytes.find('\n', pos);
-    const size_t seg_end = lf == std::string_view::npos ? bytes.size() : lf + 1;
+    const size_t seg_end = lf == std::string_view::npos || lf >= to ? to : lf + 1;
     const std::string_view seg = bytes.substr(pos, seg_end - pos);
     if (mb_to_wide(cp, true, seg, &w) && wide_to_mb(cp, w, &back, &used) && back == seg) {
       raw->text += w;
@@ -307,80 +365,239 @@ void raw_dbcs(std::string_view bytes, Codec codec, RawText* raw) {
   }
 }
 
-// ISO-2022-JP after the whole file failed: the escape sequences of code
-// page 50220 change the state; in a double-byte state two bytes of
-// 0x21..0x7E make a character. Bytes of 0x80 and above, unknown escape
-// sequences and a half pair become U+FFFD; a character that reads but is
-// not written back as the same bytes (followed by ESC ( B) is kept and noted.
-void raw_iso2022jp(std::string_view bytes, RawText* raw) {
-  static constexpr std::string_view kEscapes[] = {"\x1b(B", "\x1b(J", "\x1b(I", "\x1b$@", "\x1b$B", "\x1b$(D"};
+// Shift_JIS and EUC-JP after the whole file failed: stretches of about
+// kStretchBytes that end at a line end. A stretch that reads and gives the
+// same bytes back is the text of its lines (these code pages keep no state
+// between characters, and 0x0A is never part of a double-byte character, so
+// each of its lines reads and gives its bytes back alone); the lines of any
+// other stretch go through raw_dbcs_lines.
+void raw_dbcs(std::string_view bytes, Codec codec, RawText* raw) {
+  const CodePage& cp = code_page(codec);
+  std::wstring w;
+  std::string back;
+  bool used = false;
+  size_t pos = 0;
+  while (pos < bytes.size()) {
+    size_t end = bytes.size();
+    if (end - pos > g_stretch_bytes) {
+      const size_t lf = bytes.find('\n', pos + g_stretch_bytes);
+      if (lf != std::string_view::npos) end = lf + 1;
+    }
+    const std::string_view stretch = bytes.substr(pos, end - pos);
+    if (mb_to_wide(cp, true, stretch, &w) && wide_to_mb(cp, w, &back, &used, stretch.size()) && back == stretch) {
+      raw->text += w;
+    } else {
+      raw_dbcs_lines(bytes, pos, end, codec, raw);
+    }
+    pos = end;
+  }
+}
+
+// ---- ISO-2022-JP ----
+
+// The escape sequences of code page 50220; kIsoEscapes[0] (ESC ( B) is the
+// ASCII state, kept as an empty state.
+constexpr std::string_view kIsoEscapes[] = {"\x1b(B", "\x1b(J", "\x1b(I", "\x1b$@", "\x1b$B", "\x1b$(D"};
+
+enum class IsoUnit : uint8_t {
+  kEscape,  // an escape sequence: changes the state
+  kBad,     // a byte of 0x80 and above, an unknown escape or a half pair: U+FFFD
+  kByte,    // a byte kept as it is (the ASCII state, or a control byte)
+  kChar,    // a character of the state: the state's escape and these bytes are read
+};
+
+// The unit of ISO-2022-JP at bytes[i] in `*state` (an escape sets *state):
+// its kind, and its length in *len.
+IsoUnit iso_unit(std::string_view bytes, size_t i, std::string_view* state, size_t* len) {
+  const unsigned char b = static_cast<unsigned char>(bytes[i]);
+  *len = 1;
+  if (b == 0x1B) {
+    const auto it = std::find_if(std::begin(kIsoEscapes), std::end(kIsoEscapes),
+                                 [&](std::string_view e) { return bytes.substr(i, e.size()) == e; });
+    if (it != std::end(kIsoEscapes)) {
+      *state = *it == kIsoEscapes[0] ? std::string_view() : *it;
+      *len = it->size();
+      return IsoUnit::kEscape;
+    }
+  }
+  if (b >= 0x80 || b == 0x1B) return IsoUnit::kBad;
+  if (state->empty() || b < 0x21 || b == 0x7F) return IsoUnit::kByte;
+  const bool pair = (*state)[1] == '$';
+  if (pair && (i + 1 >= bytes.size() || bytes[i + 1] < 0x21 || bytes[i + 1] > 0x7E)) return IsoUnit::kBad;
+  *len = pair ? 2 : 1;
+  return IsoUnit::kChar;
+}
+
+// Units [from, to) of ISO-2022-JP one by one, from `*state` (to: a unit
+// boundary). A character is read as the state's escape and its bytes; one
+// that cannot be read becomes U+FFFD, one that is not written back as the
+// same bytes (followed by ESC ( B) is kept and noted.
+void raw_iso2022jp_units(std::string_view bytes, size_t from, size_t to, std::string_view* state, RawText* raw) {
   const CodePage& cp = kIso2022JpPage;
-  std::string_view state;  // empty: ASCII
   std::wstring w;
   std::string back;
   std::string unit;
   bool used = false;
-  size_t i = 0;
-  while (i < bytes.size()) {
-    const unsigned char b = static_cast<unsigned char>(bytes[i]);
-    if (b == 0x1B) {
-      const auto it = std::find_if(std::begin(kEscapes), std::end(kEscapes),
-                                   [&](std::string_view e) { return bytes.substr(i, e.size()) == e; });
-      if (it != std::end(kEscapes)) {
-        state = *it == kEscapes[0] ? std::string_view() : *it;
-        i += it->size();
-        continue;
-      }
-    }
-    if (b >= 0x80 || b == 0x1B) {
-      raw->note(i, raw->text.size(), true);
-      raw->text += kReplacement;
-      ++i;
-      continue;
-    }
-    if (state.empty() || b < 0x21 || b == 0x7F) {
-      raw->text += static_cast<wchar_t>(b);
-      ++i;
-      continue;
-    }
-    const bool pair = state[1] == '$';
-    const size_t len = pair ? 2 : 1;
-    if (pair && (i + 1 >= bytes.size() || bytes[i + 1] < 0x21 || bytes[i + 1] > 0x7E)) {
-      raw->note(i, raw->text.size(), true);
-      raw->text += kReplacement;
-      ++i;
-      continue;
-    }
-    unit.assign(state);
-    unit.append(bytes.substr(i, len));
-    if (mb_to_wide(cp, false, unit, &w) && !w.empty()) {
-      unit.append("\x1b(B");
-      if (!(wide_to_mb(cp, w, &back, &used) && back == unit)) raw->note(i, raw->text.size(), false);
-      raw->text += w;
-    } else {
-      raw->note(i, raw->text.size(), true);
-      raw->text += kReplacement;
+  size_t i = from;
+  while (i < to) {
+    size_t len = 1;
+    const std::string_view before = *state;
+    switch (iso_unit(bytes, i, state, &len)) {
+      case IsoUnit::kEscape:
+        break;
+      case IsoUnit::kBad:
+        raw->note(i, raw->text.size(), true);
+        raw->text += kReplacement;
+        break;
+      case IsoUnit::kByte:
+        raw->text += static_cast<wchar_t>(static_cast<unsigned char>(bytes[i]));
+        break;
+      case IsoUnit::kChar:
+        unit.assign(before);
+        unit.append(bytes.substr(i, len));
+        if (mb_to_wide(cp, false, unit, &w) && !w.empty()) {
+          unit.append("\x1b(B");
+          if (!(wide_to_mb(cp, w, &back, &used) && back == unit)) raw->note(i, raw->text.size(), false);
+          raw->text += w;
+        } else {
+          raw->note(i, raw->text.size(), true);
+          raw->text += kReplacement;
+        }
+        break;
     }
     i += len;
   }
 }
 
-void raw_codepage(std::string_view bytes, Codec codec, RawText* raw) {
-  if (bytes.size() > static_cast<size_t>(INT_MAX)) {
-    raw->too_large = true;
-    return;
+// ISO-2022-JP after the whole file failed: the escape sequences of code
+// page 50220 change the state; in a double-byte state two bytes of
+// 0x21..0x7E make a character. Bytes of 0x80 and above, unknown escape
+// sequences and a half pair become U+FFFD; a character that reads but is
+// not written back as the same bytes (followed by ESC ( B) is kept and noted
+// (raw_iso2022jp_units).
+//
+// Stretches of about kStretchBytes without a U+FFFD unit are read in one
+// call (the state's escape first). The stretch is taken when that gives one
+// unit for each character and each kept byte, the kept bytes as they are,
+// and (with `notes`) the text is written back as the same bytes (followed by
+// ESC ( B in a double-byte state): then every character reads, and is
+// written back alone, as raw_iso2022jp_units does it (50220 keeps no state
+// but the escapes; tests compare the two). Any other stretch goes unit by
+// unit. Without `notes` a stretch is not written back: its text is the same,
+// but a character that is not written back as its bytes may go unnoted
+// (raw_codepage then asks again with `notes` when some byte became U+FFFD,
+// the only case in which the notes are kept).
+void raw_iso2022jp(std::string_view bytes, bool notes, RawText* raw) {
+  const CodePage& cp = kIso2022JpPage;
+  std::string_view state;  // empty: ASCII
+  std::string stretch;
+  std::string expected_back;
+  // The kept bytes, and kAnyUnit (no kept byte is U+FFFF) for each character.
+  constexpr wchar_t kAnyUnit = 0xFFFF;
+  std::wstring expected;
+  std::wstring w;
+  std::string back;
+  bool used = false;
+  size_t i = 0;
+  while (i < bytes.size()) {
+    // Escapes at the start of a stretch only set its state (the escape read
+    // first), as unit by unit.
+    {
+      std::string_view next_state = state;
+      size_t len = 1;
+      if (iso_unit(bytes, i, &next_state, &len) == IsoUnit::kEscape) {
+        state = next_state;
+        i += len;
+        continue;
+      }
+    }
+    const std::string_view start_state = state;
+    size_t j = i;
+    bool chars = false;
+    expected.clear();
+    while (j < bytes.size() && j - i < g_stretch_bytes) {
+      std::string_view next_state = state;
+      size_t len = 1;
+      const IsoUnit kind = iso_unit(bytes, j, &next_state, &len);
+      if (kind == IsoUnit::kBad) break;
+      // A stretch holds only units whose reading depends on nothing but the
+      // state's escape: a kept byte in a state other than ASCII is a stretch
+      // of its own (50220 goes back to ASCII at a NUL in the ESC ( I state,
+      // retry R1), and an escape to a state other than ASCII and ESC $ B
+      // ends the stretch (the next one starts with it).
+      if (kind == IsoUnit::kByte && !state.empty()) {
+        if (j == i) {
+          expected += static_cast<wchar_t>(static_cast<unsigned char>(bytes[j]));
+          ++j;
+        }
+        break;
+      }
+      if (kind == IsoUnit::kEscape && !next_state.empty() && next_state != kIsoEscapes[4]) break;
+      if (kind == IsoUnit::kByte) expected += static_cast<wchar_t>(static_cast<unsigned char>(bytes[j]));
+      if (kind == IsoUnit::kChar) {
+        expected += kAnyUnit;
+        chars = true;
+      }
+      state = next_state;
+      j += len;
+    }
+    if (j == i) {
+      // A U+FFFD unit.
+      raw_iso2022jp_units(bytes, i, i + 1, &state, raw);
+      ++i;
+      continue;
+    }
+    bool taken = false;
+    if (!chars) {
+      // Kept bytes and escapes only: nothing is read.
+      raw->text += expected;
+      taken = true;
+    } else {
+      stretch.assign(start_state);
+      stretch.append(bytes.substr(i, j - i));
+      expected_back = stretch;
+      if (!state.empty()) expected_back.append("\x1b(B");
+      if (mb_to_wide(cp, false, stretch, &w) && w.size() == expected.size()) {
+        bool same = true;
+        for (size_t k = 0; k < w.size() && same; ++k) same = expected[k] == kAnyUnit || w[k] == expected[k];
+        if (same && (!notes || (wide_to_mb(cp, w, &back, &used, expected_back.size()) && back == expected_back))) {
+          raw->text += w;
+          taken = true;
+        }
+      }
+    }
+    if (!taken) {
+      std::string_view unit_state = start_state;
+      raw_iso2022jp_units(bytes, i, j, &unit_state, raw);
+    }
+    i = j;
   }
+}
+
+// raw_codepage; `units`: the units of the text when it reads (0: unknown).
+void raw_codepage_text(std::string_view bytes, Codec codec, size_t units, RawText* raw, bool read) {
   const CodePage& cp = code_page(codec);
   std::string back;
   bool used = false;
   // The whole file at once: it reads and gives the same bytes back.
-  if (mb_to_wide(cp, true, bytes, &raw->text) && wide_to_mb(cp, raw->text, &back, &used) && back == bytes) {
-    return;
-  }
+  const bool whole_back = (read || mb_to_wide(cp, true, bytes, &raw->text, units)) &&
+                          wide_to_mb(cp, raw->text, &back, &used, bytes.size());
+  if (whole_back && back == bytes) return;
+  // The whole text and its bytes (in `back`) when it read: the text below is
+  // usually the same, and then so are its bytes.
+  std::wstring whole;
+  if (whole_back) whole = std::move(raw->text);
   raw->text.clear();
   if (codec == Codec::kIso2022Jp) {
-    raw_iso2022jp(bytes, raw);
+    // The whole read's size when there is one (the same text, usually).
+    raw->text.reserve(whole_back ? whole.size() : bytes.size());
+    raw_iso2022jp(bytes, false, raw);
+    if (raw->replaced) {
+      *raw = RawText();
+      raw_iso2022jp(bytes, true, raw);
+    }
   } else {
+    raw->text.reserve(units);
     raw_dbcs(bytes, codec, raw);
   }
   if (raw->replaced) return;
@@ -388,13 +605,59 @@ void raw_codepage(std::string_view bytes, Codec codec, RawText* raw) {
   // does not give back (for ISO-2022-JP it may lie in an escape sequence or
   // between characters).
   raw->bad = false;
-  wide_to_mb(cp, raw->text, &back, &used);
+  const bool same_text = whole_back && raw->text == whole;
+  whole = std::wstring();  // no longer needed: freed before the conversions below
+  if (!same_text) wide_to_mb(cp, raw->text, &back, &used, bytes.size());
   size_t at = 0;
   while (at < back.size() && at < bytes.size() && back[at] == bytes[at]) ++at;
   if (at == bytes.size() && back.size() == bytes.size()) return;  // the same bytes after all
   std::wstring prefix;
-  mb_to_wide(cp, false, bytes.substr(0, std::min(at, bytes.size())), &prefix);
+  mb_to_wide(cp, false, bytes.substr(0, std::min(at, bytes.size())), &prefix, raw->text.size() + 16);
   raw->note(std::min(at, bytes.size()), std::min(prefix.size(), raw->text.size()), false);
+}
+
+// The UTF-16 units of Shift_JIS or EUC-JP text that reads (one per
+// character, characters split as dbcs_unit_length splits them): sizes the
+// text without a size query.
+size_t dbcs_units(std::string_view bytes, Codec codec) {
+  size_t units = 0;
+  for (size_t i = 0; i < bytes.size(); ++units) i += dbcs_unit_length(codec, static_cast<unsigned char>(bytes[i]));
+  return units;
+}
+
+// dbcs_units for Shift_JIS, or 0 with *broken set at the first lead byte
+// that is not followed by a trail byte (0x40-0x7E, 0x80-0xFC): code page
+// 932 reads no such bytes with MB_ERR_INVALID_CHARS (tests check every lead
+// byte with every other byte, and at the end), so detection skips the read.
+size_t shift_jis_units(std::string_view bytes, bool* broken) {
+  *broken = false;
+  size_t units = 0;
+  for (size_t i = 0; i < bytes.size(); ++units) {
+    const size_t len = dbcs_unit_length(Codec::kShiftJis, static_cast<unsigned char>(bytes[i]));
+    if (len == 2) {
+      const unsigned char t = i + 1 < bytes.size() ? static_cast<unsigned char>(bytes[i + 1]) : 0;
+      if (t < 0x40 || t == 0x7F || t > 0xFC) {
+        *broken = true;
+        return 0;
+      }
+    }
+    i += len;
+  }
+  return units;
+}
+
+// Reads `bytes` in a code page into raw->text. `read`: raw->text already
+// holds the whole file read with MB_ERR_INVALID_CHARS (decode_detected).
+// The text keeps no more capacity than its size (retry R2: about 100 MB more
+// stayed in use while a 100 MB Shift_JIS file was open).
+void raw_codepage(std::string_view bytes, Codec codec, RawText* raw, bool read = false) {
+  if (bytes.size() > static_cast<size_t>(INT_MAX)) {
+    raw->too_large = true;
+    return;
+  }
+  const size_t units = codec == Codec::kIso2022Jp ? 0 : dbcs_units(bytes, codec);
+  raw_codepage_text(bytes, codec, units, raw, read);
+  if (raw->text.capacity() > raw->text.size() + 16) raw->text.shrink_to_fit();
 }
 
 // ---- Line ends ----
@@ -549,6 +812,10 @@ bool is_unicode(Codec codec) {
   return codec == Codec::kUtf8 || codec == Codec::kUtf16Le || codec == Codec::kUtf16Be;
 }
 
+void set_code_page_stretch_for_testing(size_t bytes) {
+  g_stretch_bytes = bytes == 0 ? kStretchBytes : bytes;
+}
+
 bool parse_encoding(std::wstring_view name, FileFormat* format) {
   const std::span<const wchar_t* const> names = encoding_names();
   for (size_t i = 0; i < names.size() && i < std::size(kEncodings); ++i) {
@@ -621,17 +888,29 @@ DecodedText decode_detected(std::string_view bytes) {
     encoding.codec = big_endian ? Codec::kUtf16Be : Codec::kUtf16Le;
     return decode_as(bytes, encoding);
   }
-  DecodedText utf8 = decode_as(bytes, encoding);
-  if (!utf8.format.undecodable || utf8.status != DecodeStatus::kOk) return utf8;
-  // Shift_JIS when code page 932 reads every byte (a size query only).
-  if (bytes.size() <= static_cast<size_t>(INT_MAX) &&
-      MultiByteToWideChar(kShiftJisPage.id, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()),
-                          nullptr, 0) > 0) {
-    encoding.codec = Codec::kShiftJis;
-    return decode_as(bytes, encoding);
+  // Valid UTF-8 (or too large): UTF-8, decoded once. The decoding stops at
+  // the first invalid byte, so Shift_JIS is not first decoded in full as
+  // UTF-8; it goes on from there when neither fits.
+  RawText utf8;
+  Utf8Stop stop;
+  if (raw_utf8(bytes, 0, &utf8, &stop)) return finish_decoding(std::move(utf8), encoding);
+  // Shift_JIS when code page 932 reads every byte; that read is the text.
+  {
+    RawText raw;
+    bool broken = false;
+    const size_t units = bytes.size() <= static_cast<size_t>(INT_MAX) ? shift_jis_units(bytes, &broken) : 0;
+    if (!broken && mb_to_wide(kShiftJisPage, true, bytes, &raw.text, units)) {
+      utf8 = RawText();
+      encoding.codec = Codec::kShiftJis;
+      raw_codepage_text(bytes, Codec::kShiftJis, units, &raw, true);
+      if (raw.text.capacity() > raw.text.size() + 16) raw.text.shrink_to_fit();
+      return finish_decoding(std::move(raw), encoding);
+    }
   }
-  utf8.detection_failed = true;
-  return utf8;
+  raw_utf8_from(bytes, stop.byte, stop.units, &utf8, nullptr);
+  DecodedText result = finish_decoding(std::move(utf8), encoding);
+  result.detection_failed = true;
+  return result;
 }
 
 Eol default_eol_of(const size_t counts[3], Eol none) {
@@ -841,7 +1120,8 @@ EncodedText encode_text(const PieceTree& tree, const FileFormat& format) {
   // fit) does not come back the same.
   bool used = false;
   std::wstring back;
-  const bool converted = wide_to_mb(cp, text, &result.bytes, &used) && mb_to_wide(cp, false, result.bytes, &back);
+  const bool converted =
+      wide_to_mb(cp, text, &result.bytes, &used) && mb_to_wide(cp, false, result.bytes, &back, text.size());
   if (converted && !used && back == text) return result;
   result.ok = false;
   result.bytes.clear();
