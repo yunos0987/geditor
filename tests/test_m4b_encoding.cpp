@@ -504,18 +504,28 @@ TEST(m4b_round_trip_mismatch_on_read_marks_the_buffer) {
     CHECK_EQ(s.ed.encoding_text(), name + L"!");
     const std::wstring where = L"(first at byte offset " + std::to_wstring(c.offset);
     CHECK(s.message().find(name + L" does not give the same bytes back " + where) != std::wstring::npos);
-    // Saved in its code page: refused, the file unchanged.
+    // Saved in its code page (M6, B4): a question naming the encoding it
+    // was read with; No writes nothing, Yes writes the bytes the code page
+    // gives and ends the "!".
     s.keys(L"M->");
     s.type(L"z");
+    s.host.yes_no_answers.push_back(false);
     s.keys(L"C-x C-s");
-    CHECK(s.message().find(L"Cannot save as " + name + L": the file was read with bytes that " + name +
-                           L" cannot give back " + where) == 0);
+    CHECK_EQ(s.host.yes_no_dialogs, 1);
+    CHECK(s.host.yes_no_questions.back().find(L" was read as " + name + L" with bytes that " + name +
+                                              L" does not give back the same " + where) != std::wstring::npos);
+    CHECK_EQ(s.message(), std::wstring(L"Not saved"));
     CHECK_EQ(s.host.file(kPath), c.bytes);
     CHECK(s.modified());
+    s.host.yes_no_answers.push_back(true);
+    s.keys(L"C-x C-s");
+    CHECK(!s.modified());
+    CHECK(s.host.file(kPath) != c.bytes);
+    CHECK_EQ(s.ed.encoding_text(), name);
   }
 }
 
-TEST(m4b_saving_an_undecodable_buffer_asks_in_unicode_and_refuses_in_code_pages) {
+TEST(m4b_saving_an_undecodable_buffer_asks_in_every_encoding) {
   // UTF-8 and UTF-16: a question; No keeps the file, Yes writes U+FFFD.
   for (const wchar_t* name : {L"utf-8", L"utf-16le"}) {
     Session s;
@@ -527,8 +537,9 @@ TEST(m4b_saving_an_undecodable_buffer_asks_in_unicode_and_refuses_in_code_pages)
     s.host.yes_no_answers.push_back(false);
     s.keys(L"C-x C-s");
     CHECK_EQ(s.host.yes_no_dialogs, 1);
-    CHECK(s.host.yes_no_questions.back().find(L"their original bytes will be lost. Save anyway?") !=
-          std::wstring::npos);
+    const std::wstring display = geditor::encoding_name(s.ed.buffer().format);
+    CHECK(s.host.yes_no_questions.back().find(L"their original bytes will be lost. Save as " + display +
+                                              L" anyway?") != std::wstring::npos);
     CHECK_EQ(s.message(), std::wstring(L"Not saved"));
     CHECK_EQ(s.host.file(kPath), bytes);
     s.host.yes_no_answers.push_back(true);
@@ -541,16 +552,20 @@ TEST(m4b_saving_an_undecodable_buffer_asks_in_unicode_and_refuses_in_code_pages)
     s.keys(L"C-x C-s");
     CHECK_EQ(s.host.yes_no_dialogs, 2);
   }
-  // Code pages: refused without a question, the file unchanged.
+  // Code pages (M6, B4: was refused without a question): the same question;
+  // after Yes the U+FFFD left in the text cannot be written, so the save
+  // stops there and the file stays unchanged (test_m6.cpp has the rest).
   for (const wchar_t* name : {L"shift_jis", L"euc-jp", L"iso-2022-jp"}) {
     Session s;
     const std::string bytes = std::string("a\n\xFF\xFF");
     open_as(s, bytes, name);
     CHECK(s.ed.buffer().format.undecodable);
     s.type(L"q");
+    s.host.yes_no_answers.push_back(true);
     s.keys(L"C-x C-s");
-    CHECK_EQ(s.host.yes_no_dialogs, 0);
+    CHECK_EQ(s.host.yes_no_dialogs, 1);
     CHECK(s.message().find(L"Cannot save as ") == 0);
+    CHECK(s.message().find(L"U+FFFD") != std::wstring::npos);
     CHECK_EQ(s.host.file(kPath), bytes);
     CHECK(s.modified());
   }

@@ -86,6 +86,10 @@ class Host {
   virtual int visible_columns() = 0;
   // Dots per inch of the window (96 = 100 %), for text-scale limits.
   virtual int dpi() = 0;
+  // True when the user typed C-g while a keyboard macro runs (M6 retry R2):
+  // the key is taken, other input is left for later. A run asks about every
+  // 50 ms. The default: never.
+  virtual bool quit_requested() { return false; }
 };
 
 }  // namespace geditor

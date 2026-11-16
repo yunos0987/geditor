@@ -3,10 +3,11 @@
 // including isearch for a word near the end ([M5-5]), and the deferred
 // items done before M6: loading Shift_JIS / EUC-JP / ISO-2022-JP
 // ("decode"), a backward regexp isearch on a long single line
-// ("backsearch") and <end> on long single lines ("endkey").
+// ("backsearch") and <end> on long single lines ("endkey"), and a keyboard
+// macro of 1000 self-inserts run 100 times ("macro", M6).
 // Not registered in ctest; run the Release build by hand:
 //
-//   build/release/tests/geditor_perf.exe [core] [decode] [backsearch] [endkey]
+//   build/release/tests/geditor_perf.exe [core] [decode] [backsearch] [endkey] [memory] [macro]
 //
 // Without arguments every section runs. Exits with 1 when a limit is
 // exceeded.
@@ -485,6 +486,125 @@ bool endkey_section() {
   return ok;
 }
 
+// M6 [C5]: a keyboard macro of 1000 self-inserts replayed 100 times
+// (C-u 100 C-x e) on an empty buffer, through the same key entry point as
+// typing. The 100000 characters make one logical line, where each key costs
+// what typing on a long line costs (about 0.2 ms at 100K characters, a
+// known deferred item), so the replay is judged against the same 100000
+// keys typed directly in the same run: three alternating pairs, judged by
+// the median of the pairs' ratios (limit 1.25). The macro with a RET after
+// the 1000 characters (lines of 1000) is printed for reference, not judged.
+bool macro_section() {
+  constexpr double kMacroRatioLimit = 1.25;
+  const std::string empty;
+  std::wstring letters;
+  for (int i = 0; i < 1000; ++i) letters += static_cast<wchar_t>(L'a' + i % 26);
+  // Records the 1000 letters (and RET when `newline`), then times C-u 100 C-x e.
+  auto run_macro = [&](bool newline, size_t* length, size_t* events) {
+    PerfHost host(&empty);
+    geditor::Editor ed(host);
+    type_keys(ed, {L"C-x", L"("}, letters);
+    if (newline) type_keys(ed, {L"RET"}, L"");
+    type_keys(ed, {L"C-x", L")"}, L"");
+    const auto t0 = Clock::now();
+    type_keys(ed, {L"C-u", L"1", L"0", L"0", L"C-x", L"e"}, L"");
+    const double ms = ms_since(t0);
+    *length = ed.buffer().text.length();
+    *events = ed.macro_size();
+    return ms;
+  };
+  // The same keys typed one by one, without a macro.
+  auto run_typed = [&](bool newline) {
+    PerfHost host(&empty);
+    geditor::Editor ed(host);
+    const auto t0 = Clock::now();
+    for (int i = 0; i < 100; ++i) {
+      type_keys(ed, {}, letters);
+      if (newline) type_keys(ed, {L"RET"}, L"");
+    }
+    return ms_since(t0);
+  };
+  std::vector<double> macro_runs;
+  std::vector<double> typed_runs;
+  std::vector<double> ratios;
+  size_t length = 0;
+  size_t events = 0;
+  for (int pair = 0; pair < 3; ++pair) {
+    // Alternating order: macro first, then typed first, then macro first.
+    double macro_ms = 0;
+    double typed_ms = 0;
+    if (pair % 2 == 0) {
+      macro_ms = run_macro(false, &length, &events);
+      typed_ms = run_typed(false);
+    } else {
+      typed_ms = run_typed(false);
+      macro_ms = run_macro(false, &length, &events);
+    }
+    macro_runs.push_back(macro_ms);
+    typed_runs.push_back(typed_ms);
+    ratios.push_back(macro_ms / typed_ms);
+    std::printf("  pair %d: macro %.1f ms (%zu characters, macro of %zu events), typed %.1f ms, ratio %.3f\n",
+                pair + 1, macro_ms, length, events, typed_ms, ratios.back());
+  }
+  size_t lines_length = 0;
+  size_t lines_events = 0;
+  const double lines_ms = run_macro(true, &lines_length, &lines_events);
+  std::printf("  reference (no limit): macro of 1000 characters and RET x 100 (lines of 1000): %.1f ms, %zu "
+              "characters, %zu events; typed without a macro: %.1f ms\n",
+              lines_ms, lines_length, lines_events, run_typed(true));
+  bool ok = length == 101000;
+  if (!ok) std::printf("  macro: expected 101000 characters, got %zu\n", length);
+  std::printf("%-40s %10.4f ms\n", "macro: 1000 self-inserts x 100 (median)", median(macro_runs));
+  std::printf("%-40s %10.4f ms\n", "macro: the same keys typed (median)", median(typed_runs));
+  const double ratio = median(ratios);
+  const bool ratio_ok = ratio <= kMacroRatioLimit;
+  std::printf("%-40s %10.4f x (limit <= %.2f x) %s\n", "macro: replay / typed (median ratio)", ratio,
+              kMacroRatioLimit, ratio_ok ? "OK" : "FAIL");
+  ok &= ratio_ok;
+  return ok;
+}
+
+// M6 retry R1: 40000 kills in a row by a keyboard macro (C-k C-k run 20000
+// times on a file of 100000 short lines): the clipboard text of a run of
+// kills must cost about linear time. Limit 1 s; the clipboard must hold the
+// joined text afterwards.
+bool kill_section() {
+  constexpr double kKillLimitMs = 1000.0;
+  std::string text;
+  for (int i = 0; i < 100000; ++i) text += "line " + std::to_string(i) + "\n";
+  std::string expected_utf8;
+  // Recording kills line 0; the run (a new sequence after C-x e) kills
+  // lines 1 to 20000 with their line ends (40000 kills).
+  for (int i = 1; i <= 20000; ++i) expected_utf8 += "line " + std::to_string(i) + "\n";
+  const std::wstring expected(expected_utf8.begin(), expected_utf8.end());
+  // A host whose clipboard keeps the last text written (and counts writes).
+  class KillHost : public PerfHost {
+   public:
+    using PerfHost::PerfHost;
+    bool set_clipboard(const std::wstring& t) override {
+      clip = t;
+      ++writes;
+      return true;
+    }
+    std::wstring clip;
+    size_t writes = 0;
+  };
+  KillHost host(&text);
+  geditor::Editor ed(host);
+  ed.request_open(kPath);
+  type_keys(ed, {L"C-x", L"(", L"C-k", L"C-k", L"C-x", L")"}, L"");
+  host.writes = 0;
+  const auto t0 = Clock::now();
+  type_keys(ed, {L"C-u", L"2", L"0", L"0", L"0", L"0", L"C-x", L"e"}, L"");
+  const double ms = ms_since(t0);
+  const bool joined = host.clip == expected;
+  std::printf("  kill: %zu characters left, clipboard %zu characters (joined text of lines 1-20000: %s), %zu clipboard "
+              "writes during the run, \"%ls\"\n",
+              ed.buffer().text.length(), host.clip.size(), joined ? "yes" : "NO", host.writes,
+              ed.message().c_str());
+  return report("kill: 40000 kills in a row by macro", ms, kKillLimitMs, "ms") && joined;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -494,6 +614,8 @@ int main(int argc, char** argv) {
   bool backsearch = all;
   bool endkey = all;
   bool memory = all;
+  bool macro = all;
+  bool kill = all;
   size_t max_line = 0;
   for (int i = 1; i < argc; ++i) {
     const std::string_view a = argv[i];
@@ -507,10 +629,15 @@ int main(int argc, char** argv) {
       endkey = true;
     } else if (a == "memory") {
       memory = true;
+    } else if (a == "macro") {
+      macro = true;
+    } else if (a == "kill") {
+      kill = true;
     } else if (a.starts_with("max-line=")) {
       max_line = std::strtoull(argv[i] + 9, nullptr, 10);
     } else {
-      std::printf("unknown argument: %s (core, decode, backsearch, endkey, memory, max-line=N)\n", argv[i]);
+      std::printf("unknown argument: %s (core, decode, backsearch, endkey, memory, macro, kill, max-line=N)\n",
+                  argv[i]);
       return 2;
     }
   }
@@ -519,6 +646,8 @@ int main(int argc, char** argv) {
   if (decode) ok &= decode_section();
   if (backsearch) ok &= backsearch_section(max_line);
   if (endkey) ok &= endkey_section();
+  if (macro) ok &= macro_section();
+  if (kill) ok &= kill_section();
   if (!core) {
     std::printf("%s\n", ok ? "all limits met" : "LIMIT EXCEEDED");
     return ok ? 0 : 1;

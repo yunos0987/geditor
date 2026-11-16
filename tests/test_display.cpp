@@ -511,7 +511,11 @@ TEST(scroll_bar_rows_of_wrapped_lines) {
   s.load(std::wstring(50, L'x') + L"\ny");  // 5 + 1 rows
   s.ed.scroll_by_rows(2);
   CHECK(s.ed.top() == (RowPos{0, 2}));
-  CHECK_EQ(s.ed.scroll_bar().pos, size_t{0});  // approximated by the logical line
+  // B6: 2 logical lines in a 3-row window that do not fit: by character
+  // offset (the start of the top row); with more logical lines than rows the
+  // bar stays by logical line (scroll_bar_thumb_track_scrolls_to_a_line).
+  CHECK(s.ed.scroll_bar().by_offset);
+  CHECK_EQ(s.ed.scroll_bar().pos, size_t{20});
   s.ed.scroll_by_rows(10);
   CHECK(s.ed.top() == (RowPos{0, 3}));  // rows 3, 4 and line 1 fill the window
 }

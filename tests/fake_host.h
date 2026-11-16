@@ -51,6 +51,7 @@ class FakeHost : public geditor::Host {
   bool fail_writes = false;
   bool fail_launch = false;
   bool fail_clipboard = false;
+  int clipboard_writes = 0;  // set_clipboard calls (failed ones too)
   bool fail_clipboard_read = false;  // get_clipboard reports kFailed
   // Paths (any case) for which file_kind reports FileKind::kError.
   std::set<std::wstring> error_paths;
@@ -104,6 +105,11 @@ class FakeHost : public geditor::Host {
   int visible_lines() override;
   int visible_columns() override { return columns; }
   int dpi() override { return display_dpi; }
+  // C-g during a macro run (retry R2): quit_requested answers true on its
+  // `quit_at_poll`th call (1-based; 0: never) and counts the calls.
+  bool quit_requested() override { return ++quit_polls == quit_at_poll; }
+  int quit_at_poll = 0;
+  int quit_polls = 0;
 };
 
 // The settings file of Session::settings.

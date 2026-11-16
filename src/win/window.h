@@ -59,6 +59,7 @@ class MainWindow final : public Host {
   int visible_lines() override;
   int visible_columns() override;
   int dpi() override;
+  bool quit_requested() override;
 
  private:
   static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -165,6 +166,9 @@ class MainWindow final : public Host {
   // The scroll bar as last set.
   SCROLLINFO scroll_shown_{};
   bool scroll_set_ = false;
+  // An input changed the view: the scroll bar is set after the next frame
+  // (paint), so that redrawing the bar does not delay the text (B6).
+  bool scroll_bar_after_frame_ = false;
   // Which missing font names were already reported (decision E1).
   MissingFontReport missing_fonts_;
   // ---- --headless ----

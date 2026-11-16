@@ -49,7 +49,8 @@ TEST(cmd_kill_line_kills_rest_then_newline) {
   CHECK_EQ(s.host.clipboard, std::wstring(L"bc"));
   s.keys(L"C-k");
   CHECK_EQ(s.text(), std::wstring(L"adef"));
-  CHECK_EQ(s.host.clipboard, std::wstring(L"\n"));
+  // M6: the second kill in a row adds to the clipboard.
+  CHECK_EQ(s.host.clipboard, std::wstring(L"bc\n"));
   s.keys(L"C-e C-k");
   CHECK_EQ(s.message(), std::wstring(L"End of buffer"));
 }

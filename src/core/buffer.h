@@ -17,6 +17,9 @@ struct Buffer {
   bool has_mark = false;
   size_t mark = 0;
   bool mark_active = false;  // transient mark: the region is highlighted
+  // The active mark was set by a Shift + movement key (shift selection,
+  // PLAN 4.4): the next movement without Shift deactivates it.
+  bool shift_mark = false;
   bool read_only = false;
   std::wstring path;         // empty for an untitled buffer
   FileFormat format;         // new buffers: UTF-8 without BOM, LF
@@ -37,6 +40,7 @@ struct Buffer {
     has_mark = false;
     mark = 0;
     mark_active = false;
+    shift_mark = false;
     read_only = false;
     path.clear();
     format = FileFormat();

@@ -216,6 +216,9 @@ void MainWindow::apply_command_line(const CommandLine& command_line) {
     editor_.request_open(command_line.file, command_line.encoding);
     QueryPerformanceCounter(&end);
     open_ms_ = ms_between(start, end);
+  } else if (!command_line.encoding.empty()) {
+    // B2: --encoding without a file names the encoding of the new buffer.
+    editor_.set_new_buffer_encoding(command_line.encoding);
   }
   if (command_line.line > 0) {
     const PieceTree& text = editor_.buffer().text;
@@ -446,6 +449,37 @@ int MainWindow::visible_columns() {
 
 int MainWindow::dpi() {
   return static_cast<int>(std::lround(renderer_.dpi()));
+}
+
+bool MainWindow::quit_requested() {
+  // M6 retry R2: a keyboard macro run asks this about every 50 ms. Only the
+  // first waiting key message is looked at (nothing is dispatched); when it
+  // is C-g (Ctrl+G without Alt), it is taken and the run stops. Other keys
+  // stay in the queue for after the run; key downs of Ctrl / Shift / Alt
+  // themselves (they type nothing) are taken to see the key after them.
+  // Headless: the modifiers come from the message's lParam bits only, never
+  // from the keyboard state.
+  MSG msg{};
+  for (int i = 0;; ++i) {
+    if (!PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_NOREMOVE | PM_NOYIELD)) return false;
+    const bool modifier = msg.wParam == VK_CONTROL || msg.wParam == VK_SHIFT || msg.wParam == VK_MENU;
+    if (!modifier || i >= 16) break;
+    PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE | PM_NOYIELD);
+  }
+  if (msg.wParam != 'G') return false;
+  bool ctrl = false;
+  bool alt = false;
+  if (headless_) {
+    const ModifierState mods = headless_key_modifiers(msg.lParam);
+    ctrl = mods.ctrl;
+    alt = mods.alt;
+  } else {
+    ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+  }
+  if (!ctrl || alt) return false;
+  PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE | PM_NOYIELD);
+  return true;
 }
 
 // ---- Messages ----
@@ -771,6 +805,10 @@ void MainWindow::paint() {
     std::snprintf(line, sizeof(line), "input_ms=%.3f\n", ms_between(input_start_, now));
     write_stderr(line);
   }
+  if (scroll_bar_after_frame_) {
+    scroll_bar_after_frame_ = false;
+    update_scroll_bar();
+  }
 }
 
 bool MainWindow::capture_to_bmp(const std::wstring& path) {
@@ -1026,6 +1064,21 @@ bool MainWindow::write_state(const std::wstring& path) {
   text += state_line(L"top_line", std::to_wstring(editor_.top().line));
   text += state_line(L"top_row", std::to_wstring(editor_.top().row));
   text += state_line(L"minibuffer", editor_.minibuffer_active() ? L"1" : L"0");
+  // Keyboard macros (M6): recording, and the events of the last macro.
+  text += state_line(L"macro_recording", editor_.macro_recording() ? L"1" : L"0");
+  text += state_line(L"macro_events", std::to_wstring(editor_.macro_size()));
+  // The vertical scroll bar as the window has it ("min,max,page,pos";
+  // "none" before it is set) and its unit (B6: "line" or "offset").
+  {
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    text += state_line(L"scroll_bar", scroll_set_ && GetScrollInfo(hwnd_, SB_VERT, &si)
+                                          ? std::to_wstring(si.nMin) + L',' + std::to_wstring(si.nMax) + L',' +
+                                                std::to_wstring(si.nPage) + L',' + std::to_wstring(si.nPos)
+                                          : std::wstring(L"none"));
+    text += state_line(L"scroll_bar_unit", editor_.scroll_bar().by_offset ? L"offset" : L"line");
+  }
   // Search (M5): the modes, the isearch pattern, the highlighted matches of
   // the rows on screen ("start-end" offsets, comma-separated; the current
   // one apart, "none" without one) and the patterns compiled so far (0 until
@@ -1211,7 +1264,9 @@ void MainWindow::handle_drop(HDROP drop) {
 
 void MainWindow::after_input() {
   apply_font(false);
-  update_scroll_bar();
+  // After the frame that the InvalidateRect below brings (paint): setting a
+  // changed bar redraws it, which would delay the text of this input.
+  scroll_bar_after_frame_ = true;
   if (editor_.pending_keys_text().empty()) {
     KillTimer(hwnd_, kPendingKeysTimer);
     view_.show_pending_keys = false;
@@ -1282,8 +1337,10 @@ void MainWindow::handle_vscroll(int code, unsigned position) {
     case SB_LINEDOWN: editor_.scroll_by_rows(1); break;
     case SB_PAGEUP: editor_.scroll_by_rows(-page); break;
     case SB_PAGEDOWN: editor_.scroll_by_rows(page); break;
-    case SB_TOP: editor_.scroll_to_line(0); break;
-    case SB_BOTTOM: editor_.scroll_to_line(editor_.buffer().text.line_count() - 1); break;
+    // Positions are logical lines, or character offsets for few long lines
+    // (B6); the editor knows which (Editor::scroll_bar).
+    case SB_TOP: editor_.scroll_to_bar_position(0); break;
+    case SB_BOTTOM: editor_.scroll_to_bar_position(editor_.scroll_bar().max); break;
     case SB_THUMBTRACK:
     case SB_THUMBPOSITION: {
       // The message carries 16 bits of the position: beyond that range the
@@ -1293,7 +1350,7 @@ void MainWindow::handle_vscroll(int code, unsigned position) {
       si.fMask = SIF_TRACKPOS | SIF_RANGE;
       if (!GetScrollInfo(hwnd_, SB_VERT, &si)) return;
       const int pos = si.nMax <= 0xFFFF ? static_cast<int>(position) : si.nTrackPos;
-      editor_.scroll_to_line(static_cast<size_t>(std::max(0, pos)));
+      editor_.scroll_to_bar_position(static_cast<size_t>(std::max(0, pos)));
       break;
     }
     default: return;

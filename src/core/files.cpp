@@ -52,6 +52,7 @@ void Editor::request_open(std::wstring_view raw_path, std::wstring_view raw_enco
   if (minibuffer_active()) abort_minibuffer();
   cancel_pending_input();
   quoted_insert_pending_ = false;
+  end_macro_repeat();  // a dropped file is input too (retry R4)
 
   const std::wstring encoding(raw_encoding);
   FileFormat named;
@@ -96,6 +97,7 @@ void Editor::request_open(std::wstring_view raw_path, std::wstring_view raw_enco
       return;
     }
     case OpenChoice::kCancel:
+      declined();  // stops a keyboard macro run (retry R3)
       return;
   }
 }
@@ -116,6 +118,7 @@ void Editor::open_after_choice(const std::wstring& path, const std::wstring& enc
       case SaveChoice::kDontSave:
         break;
       case SaveChoice::kCancel:
+        declined();
         return;
     }
   }
@@ -181,6 +184,8 @@ bool Editor::load_file(const std::wstring& path, std::wstring_view encoding) {
   encoding_named_ = false;
   undecodable_byte_ = decoded.error_offset;
   undecodable_line_ = decoded.error_line;
+  read_encoding_ = encoding_name(decoded.format);
+  undecodable_replaced_ = decoded.replaced || decoded.detection_failed;
   top_ = RowPos();
   goal_column_ = 0;
   message_.clear();
@@ -239,6 +244,19 @@ void Editor::set_buffer_file_coding_system(std::wstring_view name) {
   message_ = L"Encoding for saving: " + display;
 }
 
+void Editor::set_new_buffer_encoding(std::wstring_view name) {
+  FileFormat named;
+  if (!parse_encoding(name, &named)) {
+    message_ = unknown_encoding_message(name);
+    return;
+  }
+  // As a named new file (load_file): the buffer stays unmodified, and
+  // new_file.encoding does not replace the encoding (encoding_named_).
+  main_.format.codec = named.codec;
+  main_.format.bom = named.bom;
+  encoding_named_ = true;
+}
+
 void Editor::revert_buffer_with_coding_system(std::wstring_view name) {
   FileFormat named;
   if (!parse_encoding(name, &named)) {
@@ -263,11 +281,16 @@ void Editor::revert_buffer_with_coding_system(std::wstring_view name) {
   if (modified() &&
       !host_.ask_yes_no(L"Discard the changes to " + buffer_name() + L" and read it again as " + display + L"?")) {
     message_ = L"Cancelled";
+    declined();
     return;
   }
   const size_t line = point_line();
   const size_t top = top_.line;
+  const bool was_read_only = main_.read_only;
   if (!load_file(path, name)) return;
+  // B3: read-only-mode turned on with C-x C-q stays on (load_file turns it
+  // on for a file with the read-only attribute).
+  if (was_read_only) main_.read_only = true;
   // Undo history is gone (load_file); point keeps its line number.
   const PieceTree& text = main_.text;
   main_.point = text.line_start(std::min(line, text.line_count() - 1));
@@ -302,20 +325,24 @@ bool Editor::save_to(const std::wstring& path) {
     fail(L"Cannot write " + path + L": reading the file time: " + error);
     return false;
   }
-  // M4b, PLAN 2 "bytes that cannot be read": a buffer read with bytes that
-  // could not be read (or not given back) is never saved in a code page;
-  // in UTF-8 / UTF-16 the loss is asked about first.
+  // PLAN 2 "bytes that cannot be read" (M4b, revised in M6 as B4 / B5): a
+  // buffer read with bytes that could not be read (or not given back) asks
+  // before it is saved in any encoding, naming the encoding the file was
+  // read with. Yes goes on as any save: a U+FFFD (or another character)
+  // that the encoding cannot write still stops it below.
   const std::wstring encoding = encoding_name(main_.format);
   if (main_.format.undecodable) {
     const std::wstring where = L"first at byte offset " + std::to_wstring(undecodable_byte_) + L", line " +
                                std::to_wstring(undecodable_line_ + 1);
-    if (!is_unicode(main_.format.codec)) {
-      fail(L"Cannot save as " + encoding + L": the file was read with bytes that " + encoding +
-           L" cannot give back (" + where + L"); choose another encoding with set-buffer-file-coding-system");
-      return false;
-    }
-    if (!host_.ask_yes_no(file_name_of(path) + L" was read with bytes that could not be read (" + where +
-                          L", shown as U+FFFD); their original bytes will be lost. Save anyway?")) {
+    const std::wstring read_as = read_encoding_.empty() ? encoding : read_encoding_;
+    const std::wstring what = undecodable_replaced_
+                                  ? L"bytes that are not valid " + read_as + L" (" + where + L"; read as U+FFFD)"
+                                  : L"bytes that " + read_as + L" does not give back the same (" + where + L")";
+    // The file that was read (the buffer's), also when saving under another
+    // name (write-file; retry R6).
+    const std::wstring read_file = main_.path.empty() ? path : main_.path;
+    if (!host_.ask_yes_no(file_name_of(read_file) + L" was read as " + read_as + L" with " + what +
+                          L"; their original bytes will be lost. Save as " + encoding + L" anyway?")) {
       fail(L"Not saved");
       return false;
     }
@@ -450,6 +477,7 @@ void Editor::finish_write_file(const std::wstring& input) {
     if (!host_.ask_yes_no(L"File " + path + L" exists; overwrite?")) {
       message_ = L"Cancelled";
       after_save_ = AfterSave::kNone;
+      declined();
       return;
     }
   }
@@ -486,6 +514,7 @@ bool Editor::confirm_session_end() {
     case SaveChoice::kDontSave:
       return true;
     case SaveChoice::kCancel:
+      declined();
       return false;
   }
   return false;
@@ -510,6 +539,7 @@ void Editor::quit() {
       host_.quit();
       return;
     case SaveChoice::kCancel:
+      declined();
       return;
   }
 }

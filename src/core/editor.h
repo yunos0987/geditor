@@ -170,6 +170,31 @@ class Editor {
   // dropped file or ends the session, and before execute_command.
   void end_search_modes();
 
+  // ---- Keyboard macros (M6, PLAN 4.4 "macro") ----
+  // A macro is the key events (keys and IME strings) typed between
+  // kmacro-start-macro and kmacro-end-macro, replayed through handle_key and
+  // insert_text. Mouse actions and menu commands are not recorded. It lives
+  // until the process ends.
+  bool macro_recording() const { return macro_recording_; }
+  bool macro_executing() const { return macro_executing_; }
+  // Events of the last macro (0: none).
+  size_t macro_size() const { return macro_.size(); }
+  void kmacro_start_macro();
+  void kmacro_end_macro();
+  // Ends a recording (and runs nothing), else runs the last macro the
+  // prefix argument's number of times as one undo unit, after this key's
+  // command; then `e` runs it again. A run asks Host::quit_requested every
+  // macro poll interval and stops with "Quit" when it says so (retry R2).
+  void kmacro_end_and_call_macro();
+  // Tests only: how often a macro run asks Host::quit_requested (0: before
+  // every event; default 50 ms).
+  void set_macro_poll_ms_for_testing(int ms) { macro_poll_ms_ = ms; }
+
+  // ---- Encoding of a new buffer (B2) ----
+  // --encoding=NAME without a file: the untitled buffer is saved in `name`
+  // (one of encoding_names(); another name shows "Unknown encoding").
+  void set_new_buffer_encoding(std::wstring_view name);
+
   // ---- State for drawing ----
   const Buffer& buffer() const { return main_; }
   // The main buffer differs from its file: edited (buffer().modified()), or
@@ -250,13 +275,20 @@ class Editor {
   bool next_row(RowPos* pos) const;
   // Scrolls the window so that point is on screen (by screen rows).
   void ensure_point_visible();
-  // Vertical scroll bar (logical-line approximation).
+  // Vertical scroll bar (PLAN 4.7): logical lines when the text has more
+  // logical lines than the window has rows (or everything fits); otherwise
+  // (few long lines that do not fit, B6) character offsets.
   ScrollBarState scroll_bar();
   // Scroll bar actions: by `rows` screen rows (negative: up), or to put
   // logical line `line` at the top. The view stops where the last row is on
   // the bottom row; point moves onto the screen when it would leave it.
   void scroll_by_rows(long long rows);
   void scroll_to_line(size_t line);
+  // The thumb dragged to (or SB_TOP / SB_BOTTOM at) `pos` in the units of
+  // scroll_bar() now: a logical line, or a character offset (in its units)
+  // whose screen row goes to the top (the thumb at the bottom, pos + page
+  // past max: the last screen).
+  void scroll_to_bar_position(size_t pos);
   // text-scale steps of this window (decision E5) and the resulting font
   // pixel height at `dpi`.
   int text_scale() const { return text_scale_; }
@@ -279,11 +311,28 @@ class Editor {
   // The buffer that keys edit: the minibuffer while it is active.
   Buffer& current() { return minibuffer_active() ? mini_ : main_; }
   void set_message(std::wstring text) { message_ = std::move(text); }
-  // The running command failed: shows `text`; a command sequence stops here.
+  // The running command failed: shows `text`; a command sequence stops here
+  // (and a keyboard macro run).
   void fail(std::wstring text) {
     message_ = std::move(text);
     failed_ = true;
+    ++errors_;
   }
+  // The user answered a question No or Cancel: like a failure, this stops a
+  // keyboard macro run and its repeats (M6 retry R3); the message stays.
+  void declined() { ++errors_; }
+  // Kills (M6, PLAN 2 "kill and the clipboard"): `text` was killed; right
+  // after another kill it joins the text of the kills in a row (before it
+  // when `prepend`). At the top level the joined text is written to the
+  // clipboard now, and false (with "Cannot write to the clipboard") means
+  // the text must not be deleted. Inside a keyboard macro run or a command
+  // sequence the write waits (retry R1: one write per run of kills, not one
+  // per kill): it happens before the next command that is no kill and at the
+  // end of the run or sequence (flush_kills). Then this returns true.
+  bool kill_add(std::wstring_view text, bool prepend);
+  // Writes the waiting kill text to the clipboard; false (with the message)
+  // when that fails. True when nothing waits.
+  bool flush_kills();
   // The prefix argument of the running command (1 without one) and whether
   // one was given.
   int prefix_count() const { return command_prefix_.count(); }
@@ -479,6 +528,32 @@ class Editor {
   // Starts a mouse action as a command of its own: clears the message and
   // pending input and ends the typing undo group.
   void begin_mouse_command();
+  // Shift selection (PLAN 4.4) before a movement command in `b`: a Shift key
+  // (`shifted`) activates a temporary mark at point unless a region is
+  // active; a key without Shift removes a temporary mark.
+  void shift_select(Buffer& b, bool shifted);
+
+  // Keyboard macros (M6).
+  struct MacroEvent {
+    bool is_text = false;  // an IME string (`text`), else `key`
+    Key key;
+    std::wstring text;
+  };
+  // A key or IME string typed while recording: added to the recording; C-g
+  // ends the recording (the last macro stays).
+  void record_macro_key(const Key& key);
+  void record_macro_text(std::wstring_view text);
+  // Input other than a key (a click, the wheel, the scroll bar, a menu
+  // command, a dropped file) ends the `e` repeat (retry R4).
+  void end_macro_repeat() {
+    if (!macro_executing_) macro_repeat_ = false;
+  }
+  // True when the next key starts a key sequence typed outside the
+  // minibuffer: the recording drops the keys from there that end it.
+  bool macro_sequence_starts() const;
+  // Runs the macro that kmacro-end-and-call-macro asked for (after the
+  // command that asked, from the input entry points).
+  void run_pending_macro();
 
   std::wstring default_directory() const;
   // Reads `path` into the main buffer: in `encoding` (a name of
@@ -535,6 +610,36 @@ class Editor {
   std::wstring key_display_;  // the keys of the running command
   std::vector<CommandArg> command_args_;
   bool failed_ = false;
+  // Failures so far (fail(), undefined keys, failing isearch): a keyboard
+  // macro run stops when it grows.
+  uint64_t errors_ = 0;
+  // The key that runs the next command was shift-translated (S-<left> runs
+  // backward-char): shift selection.
+  bool shift_select_ = false;
+  // The kills in a row: kill_front_rev_ holds the text added before (in
+  // reverse order of units), kill_back_ the text from the first kill on, so
+  // that adding either way costs the added text only (retry R1).
+  std::wstring kill_back_;
+  std::wstring kill_front_rev_;
+  bool kill_pending_ = false;  // the joined text is not on the clipboard yet
+  int kill_defer_ = 0;         // > 0: inside a macro run or command sequence
+  // The joined text of the kills in a row.
+  std::wstring kill_joined() const;
+  void clear_kills();
+
+  // Keyboard macros (M6).
+  bool macro_recording_ = false;
+  bool macro_executing_ = false;
+  bool macro_repeat_ = false;   // `e` runs the macro again
+  int macro_runs_ = 0;          // runs asked for by kmacro-end-and-call-macro
+  int macro_poll_ms_ = 50;      // how often a run asks Host::quit_requested
+  size_t macro_sequence_start_ = 0;
+  std::vector<MacroEvent> macro_recorded_;
+  std::vector<MacroEvent> macro_;
+  // B4 / B5: the encoding the file was read with, and whether the bytes that
+  // did not read became U+FFFD (else they read but are not given back).
+  std::wstring read_encoding_;
+  bool undecodable_replaced_ = false;
 
   // M-x and arguments read in the minibuffer.
   PrefixArg minibuffer_prefix_;  // prefix argument for the command being read

@@ -152,11 +152,16 @@ void build_display_row(const PieceTree& tree, const WrapLayout& layout, Eol eol,
 
 // Vertical scroll bar (PLAN 4.7): positions are logical lines, an
 // approximation when lines wrap. Range 0..max with a page of `page`; the
-// thumb is at `pos` (the top line).
+// thumb is at `pos` (the top line). `by_offset` (B6: few logical lines that
+// do not fit): positions are character offsets in units of `unit`
+// characters instead (at most 0xFFFF positions), `pos` the start of the top
+// row and `page` the characters of the rows on screen.
 struct ScrollBarState {
   size_t max = 0;
   size_t page = 1;
   size_t pos = 0;
+  bool by_offset = false;
+  size_t unit = 1;
 };
 
 }  // namespace geditor

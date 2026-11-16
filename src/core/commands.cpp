@@ -1,6 +1,7 @@
 #include "commands.h"
 
 #include <algorithm>
+#include <initializer_list>
 #include <string>
 
 #include "editor.h"
@@ -118,10 +119,15 @@ std::wstring repeated(std::wstring_view s, int count) {
 }
 
 // Copies [from, to) to the clipboard and deletes it unless read-only or the
-// clipboard cannot be written.
-void kill_range(Editor& ed, Buffer& b, size_t from, size_t to) {
+// clipboard cannot be written. Right after another kill (PLAN 2 "kill and
+// the clipboard", M6) the clipboard gets the text of the kills in a row: the
+// new text after it, or before it for a kill backward from point
+// (`prepend`), as Emacs kill-append (Editor::kill_add; inside a macro run
+// the write waits until the kills end). The clipboard is not read: a change
+// another program made in between is not noticed.
+void kill_range(Editor& ed, Buffer& b, size_t from, size_t to, bool prepend = false) {
   if (from >= to) return;
-  if (!copy_range(ed, b, from, to)) return;
+  if (!ed.kill_add(b.text.substr(from, to - from), prepend)) return;
   if (!ed.check_writable(b)) return;
   ed.erase(b, from, to);
 }
@@ -511,7 +517,7 @@ void kill_line(Editor& ed) {
   }
   const size_t back = static_cast<size_t>(-static_cast<int64_t>(n));
   const size_t start = t.line_start(line > back ? line - back : 0);
-  kill_range(ed, b, start, b.point);
+  kill_range(ed, b, start, b.point, true);
 }
 
 // End of the |n|th word from p (start of a word for a negative n).
@@ -533,7 +539,7 @@ void kill_words(Editor& ed, int n) {
     return;
   }
   const size_t other = words_away(b.text, b.point, n);
-  kill_range(ed, b, std::min(b.point, other), std::max(b.point, other));
+  kill_range(ed, b, std::min(b.point, other), std::max(b.point, other), n < 0);
 }
 
 void kill_word(Editor& ed) {
@@ -972,6 +978,20 @@ void goto_line(Editor& ed) {
   ed.goto_line(args.front().integer);
 }
 
+// ---- Keyboard macros (M6) ----
+
+void kmacro_start_macro(Editor& ed) {
+  ed.kmacro_start_macro();
+}
+
+void kmacro_end_macro(Editor& ed) {
+  ed.kmacro_end_macro();
+}
+
+void kmacro_end_and_call_macro(Editor& ed) {
+  ed.kmacro_end_and_call_macro();
+}
+
 // ---- Prefix argument and M-x ----
 
 void universal_argument(Editor& ed) {
@@ -1039,9 +1059,10 @@ constexpr Param kQueryReplaceParams[] = {{L"Query replace: ", ParamType::kText, 
 constexpr Param kQueryReplaceRegexpParams[] = {{L"Query replace regexp: ", ParamType::kText, {}},
                                                {L"Query replace regexp with: ", ParamType::kText, {}}};
 
-// Commands with a null function are registered for later milestones
-// (decision D9): they can be bound, completed in M-x and run, which shows
-// "<command> is not implemented yet".
+// A command with a null function would be registered for a later milestone
+// (decision D9): it can be bound, completed in M-x and run, which shows
+// "<command> is not implemented yet". Since M6 every command has one
+// (tests/test_mx.cpp checks).
 constexpr CommandInfo kCommands[] = {
     {"backward-char", &backward_char},
     {"backward-kill-word", &backward_kill_word},
@@ -1084,9 +1105,9 @@ constexpr CommandInfo kCommands[] = {
     {"kill-region", &kill_region},
     {"kill-ring-save", &kill_ring_save},
     {"kill-word", &kill_word},
-    {"kmacro-end-and-call-macro", nullptr},
-    {"kmacro-end-macro", nullptr},
-    {"kmacro-start-macro", nullptr},
+    {"kmacro-end-and-call-macro", &kmacro_end_and_call_macro},
+    {"kmacro-end-macro", &kmacro_end_macro},
+    {"kmacro-start-macro", &kmacro_start_macro},
     {"mark-whole-buffer", &mark_whole_buffer},
     {"menu-bar-open", &menu_bar_open},
     {"minibuffer-complete", &minibuffer_complete},
@@ -1149,6 +1170,25 @@ const CommandInfo* find_command(std::string_view name) {
     if (name == c.name) return &c;
   }
   return nullptr;
+}
+
+bool is_kill_command(std::string_view name) {
+  return name == "kill-line" || name == "kill-word" || name == "backward-kill-word" || name == "kill-region" ||
+         name == "cut";
+}
+
+bool is_shift_select_command(std::string_view name) {
+  for (const char* c : {"backward-char", "forward-char", "previous-line", "next-line", "beginning-of-line",
+                        "end-of-line", "scroll-down-command", "scroll-up-command", "backward-word", "forward-word",
+                        "beginning-of-buffer", "end-of-buffer"}) {
+    if (name == c) return true;
+  }
+  return false;
+}
+
+bool is_mark_command(std::string_view name) {
+  return name == "set-mark-command" || name == "exchange-point-and-mark" || name == "mark-whole-buffer" ||
+         name == "select-all";
 }
 
 void word_bounds_at(const PieceTree& text, size_t offset, size_t* from, size_t* to) {

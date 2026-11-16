@@ -219,6 +219,7 @@ geditor::ClipboardRead FakeHost::get_clipboard(std::wstring& text) {
 }
 
 bool FakeHost::set_clipboard(const std::wstring& text) {
+  ++clipboard_writes;
   if (fail_clipboard) return false;
   clipboard = text;
   clipboard_has_text = true;

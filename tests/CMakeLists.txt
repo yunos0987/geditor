@@ -24,6 +24,8 @@ add_executable(geditor_tests
   test_m4b_commands.cpp
   test_m4b_encoding.cpp
   test_m5_search.cpp
+  test_m6.cpp
+  test_readme.cpp
   test_layout_lone.cpp
   test_layout_wrap.cpp
   test_menu.cpp
@@ -51,6 +53,8 @@ add_executable(geditor_tests
   test_win_settings.cpp)
 target_link_libraries(geditor_tests PRIVATE
   geditor_options geditor_core geditor_win_logic geditor_text pcre2_16 user32)
+# test_readme.cpp reads README.md of the source tree ([M6-3]).
+target_compile_definitions(geditor_tests PRIVATE GEDITOR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 add_test(NAME geditor_tests COMMAND geditor_tests)
 

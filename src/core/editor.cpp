@@ -1,6 +1,7 @@
 #include "editor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 
 #include "commands.h"
@@ -43,6 +44,8 @@ constexpr int kMaxPrefixMultiplier = 1 << 28;
 constexpr size_t kEchoLines = 10;  // PLAN 2 "settings errors": up to 10 lines
 // Most repeats of a command sequence (C-u N on a sequence).
 constexpr size_t kMaxSequenceRepeat = 1'000'000;
+// The scroll bar by character offset (B6) has at most this many positions.
+constexpr size_t kScrollBarOffsetRange = 0xFFFF;
 
 // Command names are ASCII; false for anything else.
 bool narrow_name(std::wstring_view s, std::string* out) {
@@ -103,8 +106,20 @@ Keymap::Lookup Editor::lookup(const KeySequence& keys) const {
 void Editor::handle_key(const Key& key) {
   message_.clear();
   message_is_settings_ = false;
-  handle_key_impl(key);
+  if (macro_recording_ && !macro_executing_) record_macro_key(key);
+  // After kmacro-end-and-call-macro, `e` runs the macro again (as Emacs).
+  const bool repeat = macro_repeat_ && !macro_executing_ && key == Key{U'e', 0} && pending_.empty() &&
+                      !meta_pending_ && !prefix_.active && !quoted_insert_pending_;
+  if (!macro_executing_) macro_repeat_ = false;
+  if (repeat) {
+    last_key_ = key;
+    key_display_ = L"e";
+    dispatch(command_binding("kmacro-end-and-call-macro"), false);
+  } else {
+    handle_key_impl(key);
+  }
   after_input();
+  run_pending_macro();
 }
 
 void Editor::handle_key_impl(const Key& key) {
@@ -154,6 +169,7 @@ void Editor::handle_key_impl(const Key& key) {
   if (!pending_display_.empty()) pending_display_ += L' ';
   pending_display_ += key_to_string(key);
   pending_.push_back(k);
+  const Key typed = k;
 
   const Keymap::Lookup r =
       lookup_shift_translated(pending_, [this](const KeySequence& s) { return lookup(s); });
@@ -191,6 +207,7 @@ void Editor::handle_key_impl(const Key& key) {
   }
 
   k = pending_.back();  // without S- when shift translation applied
+  const bool shift_translated = (typed.mods & kModShift) != 0 && (k.mods & kModShift) == 0;
   const size_t length = pending_.size();
   std::wstring display = std::move(pending_display_);
   pending_.clear();
@@ -200,7 +217,9 @@ void Editor::handle_key_impl(const Key& key) {
     // A copy: the keymaps may be rebuilt (settings reload) while it runs.
     const Binding binding = *r.binding;
     key_display_ = std::move(display);
+    shift_select_ = shift_translated;
     dispatch(binding, false);
+    shift_select_ = false;
     return;
   }
   // query-replace types no characters into the buffer (M5): an unbound
@@ -215,6 +234,7 @@ void Editor::handle_key_impl(const Key& key) {
   prefix_display_.clear();
   message_ = key == kCtrlG && r.result == Keymap::Result::kUndefined ? std::wstring(L"Quit")
                                                                      : display + L" is undefined";
+  ++errors_;  // stops a keyboard macro run
   note_non_command();
 }
 
@@ -240,8 +260,10 @@ void Editor::execute_command(std::string_view name) {
   cancel_pending_input();
   key_display_.clear();
   end_search_modes();
+  macro_repeat_ = false;
   dispatch(command_binding(std::string(name)), false);
   after_input();
+  run_pending_macro();
 }
 
 bool Editor::execute_menu_item(const MenuItem& item) {
@@ -255,10 +277,12 @@ bool Editor::execute_menu_item(const MenuItem& item) {
   meta_pending_ = false;
   quoted_insert_pending_ = false;
   key_display_.clear();
+  macro_repeat_ = false;
   Binding binding;
   binding.calls.push_back(menu_item_call(item));
   dispatch(binding, false);
   after_input();
+  run_pending_macro();
   return true;
 }
 
@@ -302,6 +326,7 @@ bool Editor::run_binding(const Binding& binding, bool typing) {
   const int count = prefix.count();
   if (count <= 0) {
     message_ = L"Repeat count must be positive";
+    ++errors_;
     note_non_command();
     return false;
   }
@@ -320,12 +345,14 @@ bool Editor::run_binding(const Binding& binding, bool typing) {
   if (static_cast<size_t>(count) > kMaxSequenceRepeat ||
       (inserted_per_run > 0 && static_cast<size_t>(count) > kMaxRepeatedInsert / inserted_per_run)) {
     message_ = L"Repeat count too large";
+    ++errors_;
     note_non_command();
     return false;
   }
   main_.undo.begin_command(main_.point, false);
   mini_.undo.begin_command(mini_.point, false);
   bool ok = true;
+  ++kill_defer_;  // kills in the sequence write the clipboard once (R1)
   for (int i = 0; ok && i < count; ++i) {
     for (const CommandCall& call : binding.calls) {
       if (!run_call(call, PrefixArg(), false, false)) {
@@ -334,6 +361,7 @@ bool Editor::run_binding(const Binding& binding, bool typing) {
       }
     }
   }
+  if (--kill_defer_ == 0 && !flush_kills()) ok = false;
   main_.undo.end_command(main_.point);
   mini_.undo.end_command(mini_.point);
   return ok;
@@ -344,6 +372,7 @@ bool Editor::run_call(const CommandCall& call_in, const PrefixArg& prefix, bool 
   if (info == nullptr || info->fn == nullptr) {
     message_ = info == nullptr ? L"Unknown command: " + widen(call_in.name)
                                : widen(call_in.name) + L" is not implemented yet";
+    ++errors_;
     if (own_group) note_non_command();
     return false;
   }
@@ -377,10 +406,30 @@ bool Editor::run_call(const CommandCall& call_in, const PrefixArg& prefix, bool 
   Buffer& b = current();
   main_.edited_in_command = false;
   mini_.edited_in_command = false;
+  // Shift selection (PLAN 4.4): only for a movement command run by a key of
+  // its own (not inside a command sequence).
+  const bool movement = is_shift_select_command(info->name);
+  // A command that is no kill ends the kills in a row: their waiting
+  // clipboard write is made first, so that the clipboard holds them before
+  // anything (yank, copy, quit, ...) reads or replaces it (retry R1).
+  if (kill_pending_ && !info->prefix_argument && !is_kill_command(info->name)) flush_kills();
+  if (own_group && movement) shift_select(b, shift_select_);
+  shift_select_ = false;
   if (own_group) b.undo.begin_command(b.point, typing);
   info->fn(*this);
   if (own_group) b.undo.end_command(b.point);
   finish_command(b);
+  // A region made otherwise (C-SPC, C-x C-x, C-x h, select-all, a kill or
+  // an edit that ended it) is no shift selection any more.
+  if (!movement && !info->prefix_argument) {
+    for (Buffer* x : {&main_, &mini_}) {
+      if (!x->mark_active || is_mark_command(info->name)) x->shift_mark = false;
+    }
+  }
+  // The text of a kill sequence is kept only while kills follow each other
+  // (the prefix argument commands do not end a sequence). A waiting
+  // clipboard write was made before this command ran (above).
+  if (!info->prefix_argument && !is_kill_command(info->name) && !kill_pending_) clear_kills();
   // The prefix argument commands are transparent for last-command checks
   // (C-n C-u 3 C-n keeps the goal column).
   if (info->prefix_argument) last_command_ = previous_command;
@@ -704,6 +753,10 @@ void Editor::handle_quoted_insert(const Key& key) {
 void Editor::insert_text(std::wstring_view text) {
   message_.clear();
   message_is_settings_ = false;
+  if (!macro_executing_) {
+    macro_repeat_ = false;
+    if (macro_recording_ && !text.empty()) record_macro_text(text);
+  }
   cancel_pending_input();
   quoted_insert_pending_ = false;
   if (text.empty()) return;
@@ -789,9 +842,10 @@ std::wstring Editor::buffer_name() const {
 std::wstring Editor::mode_line() const {
   const bool is_modified = modified();
   const wchar_t* flag = main_.read_only ? (is_modified ? L"%*" : L"%%") : (is_modified ? L"**" : L"--");
+  // "Def" while a keyboard macro is being recorded (PLAN 4.6).
   return std::wstring(L"-") + flag + L" " + buffer_name() + L"  " + encoding_text() + L" " + eol_text() +
          L"  L" + std::to_wstring(point_line() + 1) + L" C" + std::to_wstring(point_column()) + L"  wrap:" +
-         wrap_mode_name(wrap_mode());
+         wrap_mode_name(wrap_mode()) + (macro_recording_ ? L"  Def" : L"");
 }
 
 std::wstring Editor::encoding_text() const {
@@ -930,15 +984,70 @@ void Editor::keep_point_on_screen() {
 
 ScrollBarState Editor::scroll_bar() {
   ScrollBarState s;
-  const size_t lines = main_.text.line_count();
+  const PieceTree& t = main_.text;
+  const size_t lines = t.line_count();
   s.max = lines - 1;
   s.page = static_cast<size_t>(visible_lines());
   s.pos = std::min(top_.line, s.max);
+  if (lines > s.page) return s;  // the logical lines do not fit: by lines
+  // Few logical lines (B6): when their rows do not fit either, the bar
+  // works by character offset. Only the rows on screen are laid out (from
+  // top_, or from the start to see whether everything fits), never a whole
+  // long line.
+  const WrapLayout& l = layout();
+  RowPos top = top_;
+  if (top.line >= lines || !l.has_row(t, top.line, top.row)) top = RowPos{};
+  RowPos end = top;
+  const size_t moved = l.forward_rows(t, &end, s.page);
+  if (top == RowPos{} && moved < s.page) return s;  // everything fits: disabled
+  const size_t from = l.row_start(t, top.line, top.row);
+  const size_t to = moved == s.page ? l.row_start(t, end.line, end.row) : t.length();
+  // Positions count `unit` characters each, so that the range fits the 16
+  // bits of a WM_VSCROLL message (a posted SB_THUMBTRACK works as a drag).
+  s.by_offset = true;
+  s.unit = t.length() / kScrollBarOffsetRange + 1;
+  s.max = t.length() / s.unit;
+  s.page = std::max<size_t>(1, (to - from) / s.unit);
+  s.pos = from / s.unit;
   return s;
+}
+
+void Editor::scroll_to_bar_position(size_t pos) {
+  const ScrollBarState s = scroll_bar();
+  if (!s.by_offset) {
+    scroll_to_line(pos);
+    return;
+  }
+  end_macro_repeat();
+  main_.undo.begin_command(main_.point, false);
+  const WrapLayout& l = layout();
+  const PieceTree& t = main_.text;
+  const size_t visible = static_cast<size_t>(visible_lines());
+  // The thumb at the bottom (pos + page past the range, as SB_BOTTOM): the
+  // last screen. Otherwise the row of the offset goes to the top; when the
+  // rows from there do not fill the window, the last screen too (from where
+  // that walk ended).
+  RowPos top;
+  if (pos + s.page > s.max) {
+    top = l.last_row(t);
+    l.backward_rows(t, &top, visible - 1);
+  } else {
+    top = l.row_of(t, clamp_main_offset(pos * s.unit), nullptr);
+    RowPos bottom = top;
+    if (l.forward_rows(t, &bottom, visible - 1) < visible - 1) {
+      top = bottom;
+      l.backward_rows(t, &top, visible - 1);
+    }
+  }
+  top_ = top;
+  keep_point_on_screen();
+  main_.undo.end_command(main_.point);
+  last_command_ = "scroll-bar";
 }
 
 void Editor::scroll_by_rows(long long rows) {
   // A scroll bar action is a command of its own, like a click (set_point).
+  end_macro_repeat();
   main_.undo.begin_command(main_.point, false);
   const WrapLayout& l = layout();
   if (rows > 0) {
@@ -956,6 +1065,7 @@ void Editor::scroll_by_rows(long long rows) {
 }
 
 void Editor::scroll_to_line(size_t line) {
+  end_macro_repeat();
   main_.undo.begin_command(main_.point, false);
   const RowPos limit = max_top();
   top_ = RowPos{std::min(line, main_.text.line_count() - 1), 0};
@@ -1021,6 +1131,9 @@ void Editor::begin_mouse_command() {
   message_is_settings_ = false;
   cancel_pending_input();
   quoted_insert_pending_ = false;
+  // A click is no shift selection, and `e` after C-x e is no longer a repeat.
+  main_.shift_mark = false;
+  end_macro_repeat();
   // As set_point: the typing undo group and the goal column end here.
   main_.undo.begin_command(main_.point, false);
   main_.undo.end_command(main_.point);
@@ -1103,6 +1216,7 @@ bool Editor::mouse_double_click(size_t offset) {
 }
 
 void Editor::set_point(size_t offset) {
+  end_macro_repeat();
   offset = clamp_main_offset(offset);
   // A click is a command of its own: it ends a typing group and the goal
   // column of consecutive vertical motion.
@@ -1527,6 +1641,7 @@ void Editor::isearch_search(bool repeat) {
     main_.point = s.forward ? snapped.end : snapped.start;
   } else {
     s.failing = true;
+    ++errors_;  // a failing search stops a keyboard macro run (as Emacs)
     if (r == SearchResult::kError) message_ = matcher_.error();
   }
   s.point = main_.point;
@@ -1733,6 +1848,7 @@ bool Editor::query_replace_replace_current() {
   if (!matcher_.expand(replace_.to, &text)) {
     query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " + occurrences(replace_.count));
     failed_ = true;
+    ++errors_;
     return false;
   }
   if (main_.read_only) {
@@ -1740,6 +1856,7 @@ bool Editor::query_replace_replace_current() {
     // the global keymap): it ends, keeping what it replaced.
     query_replace_finish(L"Buffer is read-only");
     failed_ = true;
+    ++errors_;
     return false;
   }
   replace(main_, m.start, m.end, text);
@@ -1785,6 +1902,7 @@ void Editor::query_replace_all() {
     if (main_.read_only) {
       query_replace_finish(L"Buffer is read-only");
       failed_ = true;
+      ++errors_;
       return;
     }
     LineReplacement line;
@@ -1797,6 +1915,7 @@ void Editor::query_replace_all() {
     if (!ok) {
       query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " + occurrences(replace_.count));
       failed_ = true;
+      ++errors_;
       return;
     }
     query_replace_next(main_.point, line.last_empty, false);
@@ -1827,6 +1946,247 @@ void Editor::goto_line(int64_t line) {
 void Editor::end_search_modes() {
   if (isearch_active()) isearch_end(false);
   if (query_replace_active()) query_replace_finish(occurrences(replace_.count));
+}
+
+// ---- Shift selection (M6, PLAN 4.4) ----
+
+void Editor::shift_select(Buffer& b, bool shifted) {
+  if (shifted) {
+    // Emacs shift-select: a region already active (shifted or not) is kept
+    // and extended; otherwise a temporary mark goes where point is now.
+    if (!(b.mark_active && b.has_mark)) {
+      b.has_mark = true;
+      b.mark = b.point;
+      b.mark_active = true;
+      b.shift_mark = true;
+    }
+    return;
+  }
+  if (b.shift_mark) {
+    b.mark_active = false;
+    b.shift_mark = false;
+  }
+}
+
+// ---- Keyboard macros (M6) ----
+
+bool Editor::macro_sequence_starts() const {
+  return pending_.empty() && !meta_pending_ && !prefix_.active && !quoted_insert_pending_ && !minibuffer_active();
+}
+
+void Editor::record_macro_key(const Key& key) {
+  if (key == kCtrlG && !quoted_insert_pending_) {
+    // C-g ends the recording (Emacs: quitting ends the definition); the
+    // last macro stays. The key then quits as usual.
+    macro_recording_ = false;
+    macro_recorded_.clear();
+    return;
+  }
+  if (macro_sequence_starts()) macro_sequence_start_ = macro_recorded_.size();
+  MacroEvent e;
+  e.key = key;
+  macro_recorded_.push_back(std::move(e));
+}
+
+void Editor::record_macro_text(std::wstring_view text) {
+  if (macro_sequence_starts()) macro_sequence_start_ = macro_recorded_.size();
+  MacroEvent e;
+  e.is_text = true;
+  e.text = text;
+  macro_recorded_.push_back(std::move(e));
+}
+
+void Editor::kmacro_start_macro() {
+  if (macro_executing_) {
+    fail(L"Cannot define a keyboard macro while one runs");
+    return;
+  }
+  if (macro_recording_) {
+    // The keys of this command are not part of the macro.
+    macro_recorded_.resize(std::min(macro_sequence_start_, macro_recorded_.size()));
+    fail(L"Already defining keyboard macro");
+    return;
+  }
+  macro_recording_ = true;
+  macro_recorded_.clear();
+  macro_sequence_start_ = 0;
+  message_ = L"Defining kbd macro...";
+}
+
+void Editor::kmacro_end_macro() {
+  if (!macro_recording_) {
+    fail(L"Not defining kbd macro");
+    return;
+  }
+  // The keys typed for this command (from the start of their key sequence
+  // outside the minibuffer: C-x ), <f4>, or M-x kmacro-end-macro RET) are
+  // not part of the macro.
+  macro_recorded_.resize(std::min(macro_sequence_start_, macro_recorded_.size()));
+  macro_recording_ = false;
+  if (macro_recorded_.empty()) {
+    message_ = L"Ignore empty macro";  // the last macro stays (Emacs)
+    return;
+  }
+  macro_ = std::move(macro_recorded_);
+  macro_recorded_.clear();
+  message_ = L"Keyboard macro defined";
+}
+
+void Editor::kmacro_end_and_call_macro() {
+  if (macro_recording_) {
+    // While recording, C-x e and <f4> end the recording (PLAN 4.4: <f4>
+    // ends it); the macro runs with the next C-x e.
+    kmacro_end_macro();
+    return;
+  }
+  if (macro_executing_) {
+    fail(L"A keyboard macro cannot run itself");
+    return;
+  }
+  if (macro_.empty()) {
+    fail(L"No kbd macro has been defined");
+    return;
+  }
+  const int count = prefix_count();
+  if (count <= 0) {
+    fail(L"Repeat count must be positive");
+    return;
+  }
+  if (static_cast<size_t>(count) > 1'000'000) {
+    fail(L"Repeat count too large");
+    return;
+  }
+  macro_runs_ = count;  // run_pending_macro runs it after this command
+}
+
+void Editor::run_pending_macro() {
+  if (macro_runs_ == 0 || macro_executing_) return;
+  const int runs = macro_runs_;
+  macro_runs_ = 0;
+  const std::vector<MacroEvent> events = macro_;
+  macro_executing_ = true;
+  // One undo unit for the whole run (PLAN 2 "undo unit"): the groups the
+  // run makes are merged, and undo puts point back where it started. The
+  // typing group before the run is closed first, so that the run's first
+  // characters do not join it.
+  main_.undo.begin_command(main_.point, false);
+  main_.undo.end_command(main_.point);
+  const size_t first = main_.undo.undo_count();
+  const size_t start = main_.point;
+  const uint64_t errors = errors_;
+  bool ok = true;
+  bool quit = false;
+  ++kill_defer_;  // the kills of the run write the clipboard once (R1)
+  // C-g typed meanwhile stops the run (retry R2): the host is asked every
+  // macro_poll_ms_ of the run, not after every event.
+  using Clock = std::chrono::steady_clock;
+  auto next_poll = Clock::now() + std::chrono::milliseconds(macro_poll_ms_);
+  for (int i = 0; ok && i < runs; ++i) {
+    for (const MacroEvent& e : events) {
+      if (Clock::now() >= next_poll) {
+        if (host_.quit_requested()) {
+          quit = true;
+          ok = false;
+          break;
+        }
+        next_poll = Clock::now() + std::chrono::milliseconds(macro_poll_ms_);
+      }
+      if (e.is_text) {
+        insert_text(e.text);
+      } else {
+        handle_key(e.key);
+      }
+      // A failure (a command that fails, an undefined key, a failing
+      // search, a question answered No or Cancel) stops the run and the
+      // repeats after it.
+      if (errors_ != errors) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  macro_executing_ = false;
+  --kill_defer_;
+  if (quit) message_ = L"Quit";
+  if (!flush_kills()) ok = false;
+  if (!ok) {
+    // A run stopped inside isearch (a failing search) ends it as C-g does,
+    // and one stopped inside query-replace ends it as q; the message of the
+    // failure stays.
+    const std::wstring message = message_;
+    if (isearch_active()) isearch_end(true);
+    if (query_replace_active()) query_replace_finish(message);
+    message_ = message;
+  }
+  main_.undo.merge_groups_since(first, start);
+  // `e` repeats only when the run left no mode open (retry R5): after a
+  // run that ends inside isearch, the minibuffer or query-replace, `e` is
+  // input for that mode.
+  macro_repeat_ = ok && !input_mode_active();
+  if (macro_repeat_ && message_.empty()) message_ = L"(Type e to repeat macro)";
+}
+
+// ---- Kills in a row (M6, retry R1) ----
+
+std::wstring Editor::kill_joined() const {
+  std::wstring joined(kill_front_rev_.rbegin(), kill_front_rev_.rend());
+  joined += kill_back_;
+  return joined;
+}
+
+void Editor::clear_kills() {
+  if (!kill_back_.empty()) std::wstring().swap(kill_back_);
+  if (!kill_front_rev_.empty()) std::wstring().swap(kill_front_rev_);
+  kill_pending_ = false;
+}
+
+bool Editor::kill_add(std::wstring_view text, bool prepend) {
+  const bool continuing = is_kill_command(last_command_);
+  if (kill_defer_ > 0) {
+    // Inside a macro run or a command sequence: joined in memory only (the
+    // cost of the added text); written by flush_kills.
+    if (!continuing) clear_kills();
+    if (prepend) {
+      kill_front_rev_.append(text.rbegin(), text.rend());
+    } else {
+      kill_back_.append(text);
+    }
+    kill_pending_ = true;
+    return true;
+  }
+  // At the top level: written now, as before; a failed write keeps the text
+  // in the buffer.
+  std::wstring joined;
+  if (continuing) {
+    joined.reserve(kill_front_rev_.size() + kill_back_.size() + text.size());
+    if (prepend) joined.append(text);
+    joined.append(kill_front_rev_.rbegin(), kill_front_rev_.rend());
+    joined.append(kill_back_);
+    if (!prepend) joined.append(text);
+  } else {
+    joined = text;
+  }
+  if (!host_.set_clipboard(joined)) {
+    fail(L"Cannot write to the clipboard");
+    return false;
+  }
+  if (!continuing) clear_kills();
+  if (prepend) {
+    kill_front_rev_.append(text.rbegin(), text.rend());
+  } else {
+    kill_back_.append(text);
+  }
+  kill_pending_ = false;
+  return true;
+}
+
+bool Editor::flush_kills() {
+  if (!kill_pending_) return true;
+  kill_pending_ = false;
+  if (host_.set_clipboard(kill_joined())) return true;
+  // The text was killed already: say so; undo (C-/) brings it back.
+  fail(L"Cannot write to the clipboard; the killed text is not on it (C-/ brings it back)");
+  return false;
 }
 
 }  // namespace geditor

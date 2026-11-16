@@ -1267,11 +1267,7 @@ TEST(m5_registry_has_every_m5_command_implemented) {
     const geditor::CommandInfo* info = geditor::find_command(name);
     CHECK(info != nullptr && info->fn != nullptr);
   }
-  // The keyboard macros (M6) are still "not implemented yet".
-  for (const char* name : {"kmacro-start-macro", "kmacro-end-macro", "kmacro-end-and-call-macro"}) {
-    const geditor::CommandInfo* info = geditor::find_command(name);
-    CHECK(info != nullptr && info->fn == nullptr);
-  }
+  // The keyboard macros are implemented in M6 (test_m6.cpp).
 }
 
 TEST(m5_mode_commands_outside_their_mode_fail) {

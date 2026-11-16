@@ -369,6 +369,9 @@ constexpr const char* kNonEditingCommands[] = {
     "isearch-query-replace", "isearch-repeat-backward", "isearch-repeat-forward", "isearch-toggle-case-fold",
     "isearch-toggle-regexp", "query-replace-exit", "query-replace-skip",
     "keyboard-escape-quit", "keyboard-quit",
+    // M6: the macro commands edit nothing themselves; the keys a macro runs
+    // are refused one by one (test_m6.cpp).
+    "kmacro-end-and-call-macro", "kmacro-end-macro", "kmacro-start-macro",
     "kill-ring-save", "mark-whole-buffer", "menu-bar-open", "minibuffer-complete", "negative-argument",
     "next-history-element", "next-line", "previous-history-element", "previous-line", "quit",
     "read-only-mode", "recenter-top-bottom", "revert-buffer-with-coding-system", "save-buffer",

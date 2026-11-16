@@ -1,6 +1,6 @@
 // M-x (decision D8) and the command registry (decision D9): every command
-// name of docs/PLAN.md 4.4 and 4.9 is registered, and the default keys of
-// commands of later milestones show "<command> is not implemented yet".
+// name of docs/PLAN.md 4.4 and 4.9 is registered, and since M6 every
+// registered command is implemented (none shows "is not implemented yet").
 
 #include <cstdio>
 #include <string>
@@ -80,14 +80,17 @@ TEST(mx_unknown_name_shows_no_match_and_keeps_the_minibuffer) {
   CHECK_EQ(s.ed.echo_area_text(), std::wstring(L"M-x no-such-command [No match]"));
 }
 
-TEST(mx_not_implemented_command) {
+// M6: kmacro-start-macro, the last command that was "not implemented yet"
+// (decision D9; every command has an implementation now), runs from M-x.
+TEST(mx_runs_kmacro_start_macro) {
   test::Session s;
   s.load(L"abc");
   s.keys(L"M-x");
-  s.type(L"kmacro-start-macro");  // M6 (goto-line, used here before, is M5)
+  s.type(L"kmacro-start-macro");
   s.keys(L"RET");
   CHECK(!s.ed.minibuffer_active());
-  CHECK_EQ(s.message(), std::wstring(L"kmacro-start-macro is not implemented yet"));
+  CHECK_EQ(s.message(), std::wstring(L"Defining kbd macro..."));
+  CHECK(s.ed.macro_recording());
 }
 
 TEST(mx_asks_for_the_arguments_of_insert_text) {
@@ -198,19 +201,18 @@ constexpr const char* kReplacedEmacsOperations[] = {
     "isearch-backward-regexp", "text-scale-adjust",
 };
 
-// Commands of later milestones (D9), with their default keys.
-struct LaterKey {
+// The keys of the commands that were "not implemented yet" until M6 (D9):
+// C-s / C-r / M-% / C-M-% / M-g g / M-g M-g and C-S-f / C-S-h / C-S-r /
+// C-S-g in M5 (test_m5_*.cpp), C-x RET f / r / c in M4b
+// (test_m4b_encoding.cpp), C-x RET e in M4a (test_m4a_eol.cpp), <f10> in
+// M3b (test_menu.cpp), and the keyboard macro keys below in M6
+// (test_m6.cpp).
+struct MacroKey {
   const wchar_t* key;
   const char* command;
 };
 
-constexpr LaterKey kLaterKeys[] = {
-    // C-s / C-r / M-% / C-M-% / M-g g / M-g M-g and C-S-f / C-S-h / C-S-r /
-    // C-S-g (search, replace, goto-line): implemented in M5 (test_m5_*.cpp).
-    // C-x RET f / r / c (the encoding commands): implemented in M4b
-    // (test_m4b_encoding.cpp).
-    // C-x RET e set-eol: implemented in M4a (test_m4a_eol.cpp).
-    // <f10> menu-bar-open: implemented in M3b (test_menu.cpp).
+constexpr MacroKey kMacroKeys[] = {
     {L"C-x (", "kmacro-start-macro"},
     {L"<f3>", "kmacro-start-macro"},
     {L"C-x )", "kmacro-end-macro"},
@@ -251,10 +253,16 @@ TEST(registry_names_are_unique_and_params_are_well_formed) {
   CHECK_EQ(geditor::encoding_names().size(), size_t{9});
 }
 
-TEST(registry_later_commands_are_not_implemented) {
-  for (const LaterKey& k : kLaterKeys) {
+// [C5] of M6: no registered command is "not implemented yet" (PLAN names
+// none that is never implemented).
+TEST(registry_every_command_is_implemented) {
+  for (const geditor::CommandInfo& info : geditor::all_commands()) {
+    if (info.fn == nullptr) std::printf("  not implemented: %s\n", info.name);
+    CHECK(info.fn != nullptr);
+  }
+  for (const MacroKey& k : kMacroKeys) {
     const geditor::CommandInfo* info = geditor::find_command(k.command);
-    CHECK(info != nullptr && info->fn == nullptr);
+    CHECK(info != nullptr && info->fn != nullptr);
   }
 }
 
@@ -265,16 +273,21 @@ TEST(registry_view_commands_are_implemented) {
   }
 }
 
-TEST(registry_later_commands_keys_show_not_implemented) {
-  test::Session s;
-  s.load(L"abc");
-  for (const LaterKey& k : kLaterKeys) {
+// The macro keys run their commands (each key in a fresh session: the
+// wrong-state messages of M6 when nothing is recorded or recording).
+TEST(registry_macro_keys_run_their_commands) {
+  const std::wstring expected[] = {L"Defining kbd macro...", L"Defining kbd macro...", L"Not defining kbd macro",
+                                   L"No kbd macro has been defined", L"No kbd macro has been defined"};
+  size_t i = 0;
+  for (const MacroKey& k : kMacroKeys) {
+    test::Session s;
+    s.load(L"abc");
     s.keys(k.key);
-    const std::wstring expected = geditor::widen(k.command) + L" is not implemented yet";
-    if (s.message() != expected) std::printf("  key %s\n", test::to_display(k.key).c_str());
-    CHECK_EQ(s.message(), expected);
+    if (s.message() != expected[i]) std::printf("  key %s\n", test::to_display(k.key).c_str());
+    CHECK_EQ(s.message(), expected[i]);
     CHECK(!s.ed.minibuffer_active());
     CHECK_EQ(s.text(), std::wstring(L"abc"));
+    ++i;
   }
 }
 

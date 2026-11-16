@@ -1,4 +1,4 @@
-"""Real-app checks of geditor M1, M2, M3a - M3d, M4a, M4b and M5 (run by hand; Windows only).
+"""Real-app checks of geditor M1, M2, M3a - M3d, M4a, M4b, M5 and M6 (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
@@ -44,7 +44,14 @@ pixels of isearch and query-replace (and that none are left after them),
 read the grey items of the real HMENU during both modes, run Edit > Find /
 Replace / Go to Line through WM_COMMAND, the C-S-f / C-S-g / C-S-h / C-S-r
 keys and C-S-s / C-S-z inside isearch, and time a search for a word near
-the end of a 100MB file (made once under build/m5_search/).
+the end of a 100MB file (made once under build/m5_search/). The M6 checks
+(--only-m6, headless only) run kills in a row (the private clipboard),
+shift selection, a keyboard macro (recorded, run, repeated with e, undone,
+with a click that is not recorded), --encoding without a file, a revert
+that keeps read-only-mode, the save question of a "!" buffer answered No
+and Yes through 'GANS', and the scroll bar of a 10MB single line
+(GetScrollInfo, <end>, a posted SB_THUMBTRACK; the file is made once under
+build/m6_scroll/).
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
@@ -342,11 +349,11 @@ def run_checks(exe: pathlib.Path, out: pathlib.Path):
         if clipboard_ok:
             clip = clipboard_read(app)
             check("C-k writes the clipboard", clip == "world", f"clipboard={clip!r}")
-            app.keys("C-k")  # the line end alone (M1 has no kill append)
+            app.keys("C-k")  # the line end, added to the kill before it (M6 kill append)
             time.sleep(0.2)
             clip_nl = clipboard_read(app)
-            check("killed newline is CRLF on the clipboard", clip_nl == "\r\n",
-                  f"clipboard={clip_nl!r}")
+            check("killed newline is CRLF on the clipboard", clip_nl == "world\r\n",
+                  f"clipboard={clip_nl!r} (M6: the second C-k in a row adds to the first)")
             clipboard_write(app, "world\r\nmore")
             app.keys("C-y")
             time.sleep(0.2)
@@ -4297,6 +4304,300 @@ def run_m5_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
 
+M6_BAD_SJIS = b"a\r\n\x85\x40b"  # 85: a lead byte without a trail byte -> U+FFFD
+M6_SCROLL_BYTES = 10 * 1024 * 1024
+
+
+def m6_single_line(folder: pathlib.Path) -> pathlib.Path:
+    """A 10MB single line of ASCII and Japanese words (made once)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "m6_single_line_10mb.txt"
+    if not path.exists() or path.stat().st_size < M6_SCROLL_BYTES:
+        unit = "editor piece tree 日本語 buffer テキスト line ".encode("utf-8")
+        path.write_bytes(unit * (M6_SCROLL_BYTES // len(unit) + 1))
+    return path
+
+
+def run_m6_checks(exe: pathlib.Path, out: pathlib.Path):
+    """[C1]-[C3], [C5] and [C6] (B2, B3, B4 / B5, B6) of the M6 packet on the
+    real app (headless)."""
+    work = out / "files_m6"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    settings.write_bytes(settings_json({"line_numbers": False}))
+    names = []
+
+    # [C1] kills in a row; [C2] shift selection; [C3] / [C5] a macro.
+    text = work / "m6_edit.txt"
+    text.write_bytes(b"ab\ncd\nef\n")
+    app = d.App(exe, [str(text)], cwd=work, settings=settings, height=400)
+    try:
+        wait_state(app, lambda s: s.get("text") == "ab\ncd\nef\n")
+        app.keys("C-k C-k C-k")
+        state = wait_state(app, lambda s: s.get("text") == "\nef\n")
+        clip = app.clipboard()
+        app.keys("C-n")
+        app.keys("C-k")
+        moved = wait_state(app, lambda s: s.get("text") == "\n\n")
+        clip2 = app.clipboard()
+        check("[M6 C1] C-k C-k C-k puts \"ab\", its line end and \"cd\" in the private clipboard as one text; "
+              "a kill after a move (C-n) replaces it",
+              state.get("text") == "\nef\n" and clip == "ab\r\ncd" and moved.get("text") == "\n\n" and clip2 == "ef",
+              f"text={state.get('text')!r} clipboard after 3 kills={clip!r}; after C-n C-k text="
+              f"{moved.get('text')!r} clipboard={clip2!r}")
+        app.keys("C-/ C-/ C-/ C-/")  # undo the four kills (one each)
+        wait_state(app, lambda s: s.get("text") == "ab\ncd\nef\n")
+        app.keys("M-<")
+        app.keys("S-<right> S-<right>")
+        selected = wait_state(app, lambda s: s.get("point") == "2")
+        time.sleep(0.3)
+        app.capture(shots / "m6_01_shift_select.png")
+        names.append("m6_01_shift_select.png")
+        app.keys("<right>")
+        unselected = wait_state(app, lambda s: s.get("point") == "3")
+        check("[M6 C2] S-<right> twice selects two characters from a temporary mark; <right> removes it",
+              selected.get("mark_active") == "1" and selected.get("mark") == "0" and
+              unselected.get("mark_active") == "0",
+              f"after S-<right> x2: point={selected.get('point')} mark={selected.get('mark')} "
+              f"active={selected.get('mark_active')}; after <right>: active={unselected.get('mark_active')} "
+              "(m6_01_shift_select.png: 'ab' on the selection colour)")
+
+        app.keys("M-<")
+        app.keys("C-x (")
+        recording = wait_state(app, lambda s: s.get("macro_recording") == "1")
+        app.type("x")
+        size = app.state()
+        click = app.cell_point(1, 0, size)
+        app.click(*click)
+        app.type("y")
+        time.sleep(0.3)
+        app.capture(shots / "m6_02_macro_recording.png")
+        names.append("m6_02_macro_recording.png")
+        app.keys("C-x )")
+        defined = wait_state(app, lambda s: s.get("macro_recording") == "0")
+        app.keys("M-<")
+        app.keys("C-x e")
+        ran = wait_state(app, lambda s: s.get("text", "").startswith("xy"))
+        app.type("e")
+        repeated = wait_state(app, lambda s: s.get("text", "").startswith("xyxy"))
+        time.sleep(0.3)
+        app.capture(shots / "m6_03_macro_run.png")
+        names.append("m6_03_macro_run.png")
+        app.keys("C-/")
+        undone = wait_state(app, lambda s: s.get("text") == repeated.get("text", "")[2:])
+        check("[M6 C3] C-x ( x <click> y C-x ): Def in the mode line while recording, 2 events (the click is not "
+              "recorded); C-x e at the start types xy, e again, one C-/ undoes one run",
+              recording.get("mode_line", "").endswith("  Def") and defined.get("macro_events") == "2" and
+              not defined.get("mode_line", "").endswith("  Def") and ran.get("text", "").startswith("xy") and
+              repeated.get("text", "").startswith("xyxy") and undone.get("text") == repeated.get("text", "")[2:],
+              f"mode line while recording={recording.get('mode_line')!r}; events={defined.get('macro_events')} "
+              f"message={defined.get('message')!r}; after C-x e text={ran.get('text')!r} message="
+              f"{ran.get('message')!r}; after e text={repeated.get('text')!r}; after C-/ text={undone.get('text')!r} "
+              "(m6_02_macro_recording.png: Def; m6_03_macro_run.png)")
+    finally:
+        app.kill()
+
+    # Retry R1: kills by a macro run reach the private clipboard as one text.
+    # Retry R2: C-g posted during a long run stops it.
+    lines = work / "m6_kill_lines.txt"
+    lines.write_bytes(b"".join(f"k{i}\n".encode() for i in range(20)))
+    app = d.App(exe, [str(lines)], cwd=work, settings=settings, height=400)
+    try:
+        wait_state(app, lambda s: s.get("text", "").startswith("k0\n"))
+        app.keys("C-x ( C-k C-k C-x )")
+        app.keys("C-u 4 C-x e")
+        state = wait_state(app, lambda s: s.get("text", "").startswith("k5\n"))
+        clip = app.clipboard()
+        check("[M6 R1] C-x ( C-k C-k C-x ), C-u 4 C-x e: the private clipboard holds the 8 kills of the run "
+              "as one text",
+              clip == "k1\r\nk2\r\nk3\r\nk4\r\n" and state.get("text", "").startswith("k5\n"),
+              f"clipboard={clip!r} text starts {state.get('text', '')[:6]!r}")
+    finally:
+        app.kill()
+    app = d.App(exe, [str(work / "m6_long_run.txt")], cwd=work, settings=settings, height=400)
+    try:
+        wait_state(app, lambda s: s.get("message") == "(New file)")
+        app.keys("C-x (")
+        app.type("abcdefghij")
+        app.keys("C-x )")
+        wait_state(app, lambda s: s.get("macro_events") == "10")
+        start = time.perf_counter()
+        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)  # 1,000,000 characters uninterrupted
+        time.sleep(1.0)
+        app.keys("C-g")
+        posted = time.perf_counter()
+        stopped = wait_state(app, lambda s: s.get("message") == "Quit", 20.0)
+        stop_s = time.perf_counter() - posted
+        length = int(stopped.get("length", "0"))
+        app.keys("C-/")
+        undone = wait_state(app, lambda s: s.get("length") == "10", 10.0)
+        check("[M6 R2] a posted C-g stops a long macro run (C-u 100000 of 10 characters) at once with Quit; "
+              "one C-/ takes the whole stopped run back",
+              stopped.get("message") == "Quit" and 10 < length < 1_000_010 and stop_s < 2.0 and
+              undone.get("length") == "10" and stopped.get("macro_recording") == "0",
+              f"stopped {stop_s:.2f} s after the C-g ({time.perf_counter() - start:.1f} s in all; the whole run "
+              f"would insert 1,000,000 characters), length when stopped={length}, message="
+              f"{stopped.get('message')!r}, length after C-/={undone.get('length')}")
+    finally:
+        app.kill()
+
+    # B2: --encoding without a file names the encoding of the new buffer.
+    app = d.App(exe, ["--encoding=shift_jis"], cwd=work, settings=settings, height=300)
+    try:
+        state = wait_state(app, lambda s: s.get("encoding") == "shift_jis")
+        time.sleep(0.3)
+        app.capture(shots / "m6_04_encoding_without_file.png")
+        names.append("m6_04_encoding_without_file.png")
+        app.type("日本")
+        app.keys("C-x C-w")
+        wait_state(app, lambda s: s.get("minibuffer") == "1")
+        app.type("m6_new.txt")
+        app.keys("RET")
+        saved = wait_state(app, lambda s: s.get("modified") == "0" and s.get("path", "").endswith("m6_new.txt"))
+        written = (work / "m6_new.txt").read_bytes() if (work / "m6_new.txt").exists() else None
+        check("[M6 C6 B2] --encoding=shift_jis without a file: the new buffer shows Shift_JIS and saves in it",
+              state.get("encoding") == "shift_jis" and "  Shift_JIS " in state.get("mode_line", "") and
+              state.get("modified") == "0" and written == "日本".encode("cp932"),
+              f"encoding={state.get('encoding')} mode_line={state.get('mode_line')!r} message="
+              f"{state.get('message')!r}; saved bytes={written!r} message={saved.get('message')!r} "
+              "(m6_04_encoding_without_file.png)")
+    finally:
+        app.kill()
+    app = d.App(exe, ["--encoding=big5"], cwd=work, settings=settings, height=300)
+    try:
+        state = wait_state(app, lambda s: "Unknown encoding" in s.get("message", ""))
+        check("[M6 C6 B2] --encoding=big5 without a file: Unknown encoding in the echo area, UTF-8 kept",
+              state.get("message", "").startswith("Unknown encoding: big5") and state.get("encoding") == "utf-8",
+              f"message={state.get('message')!r} encoding={state.get('encoding')}")
+    finally:
+        app.kill()
+
+    # B3: revert-buffer-with-coding-system keeps read-only-mode.
+    plain = work / "m6_plain.txt"
+    plain.write_bytes(b"plain\n")
+    app = d.App(exe, [str(plain)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("text") == "plain\n")
+        app.keys("C-x C-q")
+        wait_state(app, lambda s: s.get("read_only") == "1")
+        app.keys("C-x RET r")
+        wait_state(app, lambda s: s.get("minibuffer") == "1")
+        app.type("shift_jis")
+        app.keys("RET")
+        state = wait_state(app, lambda s: s.get("encoding") == "shift_jis")
+        check("[M6 C6 B3] C-x C-q, then C-x RET r shift_jis: read again in Shift_JIS and still read-only (%%)",
+              state.get("encoding") == "shift_jis" and state.get("read_only") == "1" and
+              state.get("mode_line", "").startswith("-%%"),
+              f"encoding={state.get('encoding')} read_only={state.get('read_only')} "
+              f"mode_line={state.get('mode_line')!r} message={state.get('message')!r}")
+    finally:
+        app.kill()
+
+    # B4 / B5: a "!" Shift_JIS buffer: No writes nothing; after the U+FFFD is
+    # deleted, Yes saves and ends the "!".
+    bad = work / "m6_bad_sjis.txt"
+    bad.write_bytes(M6_BAD_SJIS)
+    app = d.App(exe, ["--encoding=shift_jis", str(bad)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("encoding_text") == "Shift_JIS!")
+        mtime = bad.stat().st_mtime_ns
+        app.keys("M-< C-n C-d")
+        edited = wait_state(app, lambda s: s.get("text") == "a\n@b")
+        app.keys("C-x C-s")
+        question_no = answer(app, "No", timeout_s=3.0)
+        refused = wait_state(app, lambda s: s.get("message") == "Not saved")
+        unchanged = bad.read_bytes() == M6_BAD_SJIS and bad.stat().st_mtime_ns == mtime
+        app.keys("C-x C-s")
+        question = app.wait_question(3.0)
+        time.sleep(0.3)
+        app.capture(shots / "m6_05_save_question.png")
+        names.append("m6_05_save_question.png")
+        accepted = app.answer("Yes")
+        saved = wait_state(app, lambda s: s.get("modified") == "0")
+        check("[M6 C6 B4] a Shift_JIS! buffer without its U+FFFD: the save asks (naming Shift_JIS, the encoding it "
+              "was read with); No writes nothing; Yes (GANS) writes the Shift_JIS bytes and ends the '!'",
+              edited.get("text") == "a\n@b" and question_no is not None and refused.get("message") == "Not saved"
+              and unchanged and question is not None and question.get("question") == "yes_no" and
+              question.get("instruction", "").startswith("m6_bad_sjis.txt was read as Shift_JIS with bytes that "
+                                                         "are not valid Shift_JIS (first at byte offset 3, line 2;")
+              and accepted and bad.read_bytes() == b"a\r\n@b" and saved.get("encoding_text") == "Shift_JIS",
+              f"No: {describe(question_no)} message={refused.get('message')!r} file unchanged={unchanged}; "
+              f"Yes: {describe(question)} accepted={accepted} bytes={bad.read_bytes()!r} "
+              f"encoding_text={saved.get('encoding_text')!r} message={saved.get('message')!r} "
+              "(m6_05_save_question.png)")
+    finally:
+        app.kill()
+    bad_utf8 = work / "m6_bad_utf8.txt"
+    bad_utf8.write_bytes(b"a\xff\n")
+    app = d.App(exe, ["--encoding=utf-8", str(bad_utf8)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("encoding_text") == "UTF-8!")
+        app.keys("C-x RET f")
+        wait_state(app, lambda s: s.get("minibuffer") == "1")
+        app.type("shift_jis")
+        app.keys("RET")
+        wait_state(app, lambda s: s.get("encoding_text") == "Shift_JIS!")
+        app.keys("C-x C-s")
+        question = answer(app, "Yes", timeout_s=3.0)
+        stopped = wait_state(app, lambda s: s.get("message", "").startswith("Cannot save as"))
+        check("[M6 C6 B5] a UTF-8! buffer switched to Shift_JIS: the question names UTF-8 (read) and Shift_JIS "
+              "(save); after Yes the U+FFFD stops the save, the file unchanged",
+              question is not None and question.get("instruction", "").startswith(
+                  "m6_bad_utf8.txt was read as UTF-8 with bytes that are not valid UTF-8") and
+              question.get("instruction", "").endswith("Save as Shift_JIS anyway?") and
+              stopped.get("message", "").startswith("Cannot save as Shift_JIS: U+FFFD at line 1, column 1") and
+              bad_utf8.read_bytes() == b"a\xff\n",
+              f"{describe(question)} message={stopped.get('message')!r} bytes={bad_utf8.read_bytes()!r}")
+    finally:
+        app.kill()
+
+    # B6: the scroll bar of a 10MB single line (wrap window).
+    big = m6_single_line(out.parent.parent / "m6_scroll")
+    wrap_settings = work / "settings_wrap.json"
+    wrap_settings.write_bytes(settings_json({"line_numbers": False, "wrap": {"mode": "window"}}))
+    app = d.App(exe, [str(big)], cwd=work, settings=wrap_settings, height=400)
+    try:
+        start = wait_state(app, lambda s: s.get("scroll_bar", "none") != "none", 20.0)
+        si0 = d.scroll_info(app.hwnd)
+        app.keys("<end>")
+        ended = wait_state(app, lambda s: s.get("top_row", "0") != "0", 20.0)
+        time.sleep(0.3)
+        si1 = d.scroll_info(app.hwnd)
+        app.capture(shots / "m6_06_scroll_end.png")
+        names.append("m6_06_scroll_end.png")
+        target = si1.nMax // 2
+        d.user32.SendMessageW(app.hwnd, d.WM_VSCROLL, (target << 16) | 5, 0)  # SB_THUMBTRACK
+        tracked = wait_state(app, lambda s: s.get("top_row") != ended.get("top_row"), 5.0)
+        si2 = d.scroll_info(app.hwnd)
+        time.sleep(0.3)
+        app.capture(shots / "m6_07_scroll_thumb.png")
+        names.append("m6_07_scroll_thumb.png")
+        top_end, top_mid = int(ended.get("top_row", "0")), int(tracked.get("top_row", "0"))
+        check("[M6 C6 B6] 10MB single line, wrap window: the bar has a range (by offset), its thumb moves to the "
+              "end after <end>, and a posted SB_THUMBTRACK to the middle moves the top row there",
+              start.get("scroll_bar_unit") == "offset" and si0.nMax > 0 and si0.nPage > 0 and si0.nPos == 0 and
+              si1.nPos > si1.nMax // 2 and si1.nPos + si1.nPage >= si1.nMax - 1 and
+              0 < top_mid < top_end and abs(si2.nPos - target) <= max(2, si2.nPage),
+              f"start: nMax={si0.nMax} nPage={si0.nPage} nPos={si0.nPos} unit={start.get('scroll_bar_unit')}; "
+              f"after <end>: nPos={si1.nPos} top_row={top_end}; SB_THUMBTRACK {target}: nPos={si2.nPos} "
+              f"top_row={top_mid} (m6_06_scroll_end.png, m6_07_scroll_thumb.png)")
+    finally:
+        app.kill()
+    many = work / "m6_many_lines.txt"
+    many.write_bytes(b"line\n" * 300)
+    app = d.App(exe, [str(many)], cwd=work, settings=wrap_settings, height=400)
+    try:
+        state = wait_state(app, lambda s: s.get("scroll_bar", "none") != "none")
+        si = d.scroll_info(app.hwnd)
+        check("[M6 C6 B6] a file of many lines keeps the bar by logical line (negative)",
+              state.get("scroll_bar_unit") == "line" and si.nMax == 300,
+              f"unit={state.get('scroll_bar_unit')} nMax={si.nMax} nPage={si.nPage}")
+    finally:
+        app.kill()
+    record("INFO", "[M6] screenshots", ", ".join(names))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("exe", type=pathlib.Path)
@@ -4321,6 +4622,8 @@ def main() -> int:
                         help="run only the M4b encoding checks")
     parser.add_argument("--only-m5", action="store_true",
                         help="run only the M5 search, replace and goto-line checks")
+    parser.add_argument("--only-m6", action="store_true",
+                        help="run only the M6 checks (kills, shift selection, macros, B2-B6)")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -4343,10 +4646,12 @@ def main() -> int:
     saved = None if d.HEADLESS else clipboard_text()
     sequence0 = d.user32.GetClipboardSequenceNumber()
     only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_m3c or
-            args.only_m3d or args.only_m4a or args.only_m4b or args.only_m5 or args.only_headless or
-            args.only_visible)
+            args.only_m3d or args.only_m4a or args.only_m4b or args.only_m5 or args.only_m6 or
+            args.only_headless or args.only_visible)
     if args.only_m5 and args.visible:
         parser.error("--only-m5 runs headless only")
+    if args.only_m6 and args.visible:
+        parser.error("--only-m6 runs headless only")
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
@@ -4387,6 +4692,8 @@ def main() -> int:
             run_m4b_checks(exe, out)
         if d.HEADLESS and (not only or args.only_m5):
             run_m5_checks(exe, out)
+        if d.HEADLESS and (not only or args.only_m6):
+            run_m6_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)

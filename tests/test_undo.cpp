@@ -37,8 +37,8 @@ TEST(undo_one_group_per_command) {
   CHECK_EQ(s.text(), std::wstring(L" two three\nnext"));
   s.keys(L"C-k");  // kill-line
   CHECK_EQ(s.text(), std::wstring(L"\nnext"));
-  s.keys(L"C-y");  // yank
-  CHECK_EQ(s.text(), std::wstring(L" two three\nnext"));
+  s.keys(L"C-y");  // yank (M6: the two kills in a row are one clipboard text)
+  CHECK_EQ(s.text(), std::wstring(L"one two three\nnext"));
   s.keys(L"C-/");
   CHECK_EQ(s.text(), std::wstring(L"\nnext"));
   s.keys(L"C-/");
