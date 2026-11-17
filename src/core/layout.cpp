@@ -130,7 +130,7 @@ void WrapLayout::note_edit(const PieceTree& tree, size_t offset, size_t inserted
     return;
   }
   revision_ = tree.revision();
-  auto is_space = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'　'; };
+  auto is_space = [](wchar_t c) { return is_trailing_whitespace(c); };
   for (size_t i = 0; i < trailing_.size();) {
     TrailingCache& t = trailing_[i];
     if (offset < t.start) {
@@ -248,7 +248,7 @@ size_t WrapLayout::trailing_start(const PieceTree& tree, size_t line) const {
   sync(tree);
   const size_t start = tree.line_start(line);
   const size_t end = tree.line_end(line);
-  auto is_space = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'　'; };
+  auto is_space = [](wchar_t c) { return is_trailing_whitespace(c); };
   // Walks back from `from` over whitespace, not below `stop`; returns the
   // offset after the last non-whitespace character, or `stop`.
   auto back = [&](size_t from, size_t stop) {

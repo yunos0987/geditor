@@ -31,6 +31,14 @@ size_t prev_char_offset(const PieceTree& tree, size_t offset);
 // Code point starting at `offset` (0 at the end of the text).
 char32_t code_point_at(const PieceTree& tree, size_t offset);
 
+// The whitespace of trailing-whitespace marks (PLAN 4.7): space, TAB and
+// U+3000. The one definition for WrapLayout::trailing_start, its updates
+// after edits, trailing_whitespace_start and build_display_row (deferred fix
+// E3).
+inline bool is_trailing_whitespace(char32_t c) {
+  return c == U' ' || c == U'\t' || c == U'\x3000';
+}
+
 // A screen row: row `row` (0-based) of logical line `line`.
 struct RowPos {
   size_t line = 0;

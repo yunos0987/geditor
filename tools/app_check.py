@@ -1,4 +1,4 @@
-"""Real-app checks of geditor M1, M2, M3a - M3d, M4a, M4b, M5 and M6 (run by hand; Windows only).
+"""Real-app checks of geditor M1, M2, M3a - M3d, M4a, M4b, M5, M6 and the deferred fixes (run by hand; Windows only).
 
 Starts build/release/geditor.exe on generated test files, sends keys and
 characters, takes screenshots and checks file bytes, the clipboard and the
@@ -51,7 +51,14 @@ with a click that is not recorded), --encoding without a file, a revert
 that keeps read-only-mode, the save question of a "!" buffer answered No
 and Yes through 'GANS', and the scroll bar of a 10MB single line
 (GetScrollInfo, <end>, a posted SB_THUMBTRACK; the file is made once under
-build/m6_scroll/).
+build/m6_scroll/). The checks of the deferred fixes after M6
+(--only-deferred, headless only) make a font creation fail at the reload
+that names a missing family and look for "Font not found" once the font is
+in use (E2), post z, C-g and q during a long macro run (E4), and check the
+order of input held during a run, the prefix key echo after a run (no
+killed timer replayed), input after a right click during a run and a drag
+ended by C-g (retries R1, Q1-Q3), a C-g behind a non-client mouse move,
+a non-client button before a key and F10 without a menu bar (P1, P2).
 
 Headless (the default; the line "mode headless" says so): every geditor
 gets --headless. Its window is outside every monitor and never activated,
@@ -690,7 +697,8 @@ def run_retry1_checks(exe: pathlib.Path, out: pathlib.Path):
             time.sleep(0.5)
             d.user32.SendMessageW(app.hwnd, d.WM_SIZE, d.SIZE_RESTORED, (client[1] << 16) | client[0])
             time.sleep(0.5)
-            how = f"synthetic WM_SIZE SIZE_MINIMIZED, then SIZE_RESTORED {client[0]}x{client[1]}"
+            how = (f"synthetic WM_SIZE SIZE_MINIMIZED, then SIZE_RESTORED {client[0]}x{client[1]}; the IsIconic "
+                   "fallback of visible_lines / visible_columns is not exercised (only --visible minimises)")
         else:
             d.user32.ShowWindow(app.hwnd, 6)  # SW_MINIMIZE
             time.sleep(0.5)
@@ -2670,22 +2678,34 @@ def check_clipboard_attribution(exe: pathlib.Path):
 
     def change(owner_image, geditor_alive, pid=1234):
         return {"time": 1.0, "sequence": 10, "owner_pid": pid, "owner_image": owner_image,
-                "geditor_alive": geditor_alive}
+                "geditor_alive": geditor_alive, "at": 100.0}
 
+    # Times (time.monotonic()) of input sent to a geditor (d.ACTIONS); the
+    # changes above come at 100.0 (deferred fix T3).
+    just_before = [50.0, 99.7]   # an input 0.3 s before the change
+    long_before = [50.0, 98.5]   # the last input 1.5 s before it
+    after_only = [100.4]         # input only after the change
     cases = {
-        "no change": ([], "PASS"),
-        "the user copies in Edge while geditor runs": ([change(edge, True)], "INFO"),
-        "geditor owns the clipboard": ([change(target, True)], "FAIL"),
-        "geditor owns it after the run's windows closed": ([change(target, False)], "FAIL"),
-        "unknown owner while a geditor of the run is open": ([change("", True, 0)], "FAIL"),
-        "unknown owner while no geditor is open": ([change("", False, 0)], "INFO"),
-        "Edge, then geditor": ([change(edge, True), change(target, True)], "FAIL"),
+        "no change": ([], None, "PASS"),
+        "the user copies in Edge while geditor runs": ([change(edge, True)], just_before, "INFO"),
+        "geditor owns the clipboard": ([change(target, True)], long_before, "FAIL"),
+        "geditor owns it after the run's windows closed": ([change(target, False)], None, "FAIL"),
+        "unknown owner while a geditor of the run is open, 0.3 s after input sent to it":
+            ([change("", True, 0)], just_before, "FAIL"),
+        "unknown owner while a geditor of the run is open, no input sent to it within 1 s before":
+            ([change("", True, 0)], long_before, "INFO"),
+        "unknown owner while a geditor of the run is open, input only after the change":
+            ([change("", True, 0)], after_only, "INFO"),
+        "unknown owner while a geditor is open, no record of input (as before T3)":
+            ([change("", True, 0)], None, "FAIL"),
+        "unknown owner while no geditor is open": ([change("", False, 0)], just_before, "INFO"),
+        "Edge, then geditor": ([change(edge, True), change(target, True)], long_before, "FAIL"),
     }
-    got = {name: d.clipboard_verdict(changes, target)[0] for name, (changes, _) in cases.items()}
-    check("[R3] clipboard attribution: FAIL only for a geditor owner (or an unknown owner while geditor "
-          "is open), INFO with the owner's name otherwise (made-up owners)",
-          all(got[name] == want for name, (_, want) in cases.items()) and
-          "msedge.exe" in d.clipboard_verdict([change(edge, True)], target)[1],
+    got = {name: d.clipboard_verdict(changes, target, actions)[0] for name, (changes, actions, _) in cases.items()}
+    check("[R3] clipboard attribution: FAIL only for a geditor owner, or an unknown owner while geditor is open "
+          "within 1 s after input sent to it; INFO with the owner's name otherwise (made-up owners and times)",
+          all(got[name] == want for name, (_, _, want) in cases.items()) and
+          "msedge.exe" in d.clipboard_verdict([change(edge, True)], target, just_before)[1],
           f"verdicts={got}")
 
 
@@ -3278,12 +3298,13 @@ def run_m3d_benchmark(exe: pathlib.Path, out: pathlib.Path):
                f"C runtime bytes allocated in 59 frames {v['redraw_alloc_bytes']} (-1: release build), total CPU "
                f"load {v['cpu']} %")
     colour, mono, plain = results["emoji"], results["emoji in one colour"], results["ascii"]
-    # Debug builds only: the colour path allocates nothing per frame of its
-    # own (the same screen in one colour allocates as much; the rest is the
-    # core's rows).
+    # Debug builds only: the frames in colour allocate no more than the same
+    # frames in one colour (deferred fix T2: what is measured; every frame
+    # allocates, mostly the core's rows of build_display_row).
     alloc_ok = colour["redraw_alloc_bytes"] == "-1" or int(colour["redraw_alloc_bytes"]) <= int(
         mono["redraw_alloc_bytes"])
-    check("[M3d C4] the emoji screen redraws without errors; the colour path allocates nothing per frame",
+    check("[M3d C4] the emoji screen redraws without errors; its frames in colour allocate no more than the "
+          "same frames in one colour (debug builds)",
           all(v["redraw_error"] == "none" for v in results.values()) and alloc_ok and "failed" in mono["support"],
           f"errors {[v['redraw_error'] for v in results.values()]}; C runtime bytes in 59 frames: emoji in colour "
           f"{colour['redraw_alloc_bytes']}, the same in one colour {mono['redraw_alloc_bytes']}, ASCII "
@@ -3410,15 +3431,18 @@ def run_m4a_fix_cr_lf_check(exe: pathlib.Path, work: pathlib.Path, shots: pathli
               state.get("text") == "a\n\nb\n",
               f"lines before={before.get('text')!r}; bytes={data!r} message={state.get('message')!r} "
               f"modified={state.get('modified')}")
-        # Marks: the default is CRLF (one each of LF, CRLF, CR when read), so
-        # the two CR lines are eol_other (blue) and the CRLF line eol (green).
+        # Marks: after the save the default is that of the saved file, CR (two
+        # CR, one CRLF; deferred fix F1: HEAD 6064002 kept the CRLF of the
+        # read), so the two CR lines are eol (green) and the CRLF line
+        # eol_other (blue).
         marks = []
         for row, (text, kind) in enumerate([("a", "CR"), ("", "CR"), ("b", "CRLF")]):
             box = cell_box(state, row, len(text), 2)
             marks.append((kind, count_where(shot, is_green, box), count_where(shot, is_blue, box)))
-        check("[M4a fix F1] after the save the buffer's line ends are those of the file (marks: CR, CR, CRLF)",
-              [(g > 0, b > 0) for _, g, b in marks] == [(False, True), (False, True), (True, False)] and
-              state.get("eol") == "Mixed(CRLF)",
+        check("[M4a fix F1] after the save the buffer's line ends are those of the file (marks: CR, CR, CRLF) "
+              "and its default is the file's (Mixed(CR), as reopening gives)",
+              [(g > 0, b > 0) for _, g, b in marks] == [(True, False), (True, False), (False, True)] and
+              state.get("eol") == "Mixed(CR)",
               f"(kind, eol px, eol_other px) per row {marks}; eol={state.get('eol')} (m4a_05_cr_lf_saved.png)")
     finally:
         app.kill()
@@ -3429,8 +3453,10 @@ def run_m4a_fix_cr_lf_check(exe: pathlib.Path, work: pathlib.Path, shots: pathli
         time.sleep(0.3)
         app.capture(shots / "m4a_06_cr_lf_reopened.png")
         names.append("m4a_06_cr_lf_reopened.png")
-        check("[M4a fix F1] reopening the saved file gives the same three lines and an empty last line",
-              state.get("text") == "a\n\nb\n" and path.read_bytes() == b"a\r\rb\r\n",
+        check("[M4a fix F1] reopening the saved file gives the same three lines and an empty last line, and the "
+              "same default line end (Mixed(CR))",
+              state.get("text") == "a\n\nb\n" and path.read_bytes() == b"a\r\rb\r\n" and
+              state.get("eol") == "Mixed(CR)",
               f"text={state.get('text')!r} eol={state.get('eol')} (m4a_06_cr_lf_reopened.png)")
     finally:
         app.kill()
@@ -4318,6 +4344,333 @@ def m6_single_line(folder: pathlib.Path) -> pathlib.Path:
     return path
 
 
+def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
+    """The deferred fixes after M6 that need the real app (headless): E2 (a
+    missing font family reported once the font is in use, also when a font
+    creation failed at the same reload), E4 (C-g anywhere in the input
+    that waits during a macro run), its retries R1 (input order), Q1-Q3
+    (no killed timer replayed, input after an opened question dropped, no
+    drag left behind) and P1 / P2 (non-client mouse input, F10 without a
+    menu bar)."""
+    work = out / "files_deferred"
+    work.mkdir(parents=True, exist_ok=True)
+    shots = out / "shots"
+    settings = work / "settings.json"
+    settings.write_bytes(b"{}\n")
+    doc = work / "fonts.txt"
+    doc.write_bytes(b"font report\n")
+    app = d.App(exe, [str(doc)], cwd=work, settings=settings, height=300)
+    try:
+        app.use_input()
+        wait_state(app, lambda s: s.get("text") == "font report\n")
+        # The next font creation fails, at the reload that names a missing
+        # family; a later rebuild (text-scale) uses that family.
+        app.fault("font")
+        apply_settings(settings, {"font": {"family": "NoSuchFontDeferredE2"}})
+        reloaded = app.state().get("message", "")
+        # The next input rebuilds the font (after_input), now without the
+        # failure; then a text-scale rebuild stays silent.
+        app.keys("C-a")
+        time.sleep(0.3)
+        next_key = app.state().get("message", "")
+        app.keys("C-x C-+")
+        time.sleep(0.3)
+        scaled = app.state().get("message", "")
+        seen = [m for m in (reloaded, next_key, scaled) if "Font not found: NoSuchFontDeferredE2" in m]
+        check("[deferred E2] a missing font.family is reported once the font is in use, also when the font "
+              "creation failed at the same reload",
+              "Cannot create the font NoSuchFontDeferredE2" in reloaded and len(seen) == 1 and
+              seen[0].count("Font not found: NoSuchFontDeferredE2") == 1 and "Font not found" not in scaled,
+              f"after the reload with the injected font failure: {reloaded!r}; after the next key (C-a): "
+              f"{next_key!r}; after C-x C-+: {scaled!r} (HEAD 6064002 never showed 'Font not found' here)")
+    finally:
+        app.kill()
+
+    # E4: a key typed during a long run and then C-g: the run stops at once,
+    # the key before the C-g is dropped with it, a key after it runs.
+    app = d.App(exe, [str(work / "long_run.txt")], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("message") == "(New file)")
+        app.keys("C-x (")
+        app.type("abcdefghij")
+        app.keys("C-x )")
+        wait_state(app, lambda s: s.get("macro_events") == "10")
+        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)  # 1,000,000 characters uninterrupted
+        time.sleep(1.0)
+        app.keys("z")  # typed during the run, before the C-g
+        app.keys("C-g")
+        posted = time.perf_counter()
+        app.keys("q")  # after the C-g
+        after = wait_state(app, lambda s: "q" in s.get("text", ""), 20.0)
+        stop_s = time.perf_counter() - posted
+        text = after.get("text", "")
+        length = int(after.get("length", "0"))
+        check("[deferred E4] during a long macro run, z then C-g then q: the run stops at once, z is dropped "
+              "with the C-g, q is typed after the run",
+              "q" in text and "z" not in text and text.endswith("q") and 10 < length < 1_000_010 and
+              stop_s < 2.0,
+              f"q typed {stop_s:.2f} s after the C-g was posted, length {length} (the whole run would insert "
+              f"1,000,000 characters), text ends {text[-12:]!r}, 'z' in the text: {'z' in text} "
+              "(HEAD 6064002 saw only the first waiting key, z, and ran to the end)")
+    finally:
+        app.kill()
+
+    # Retry R1 ([C7]): input waiting during a run keeps its order, keys and
+    # mouse alike. A click on the first cell of the top row, then Z: Z goes
+    # where the click put point (before R1 the held Z overtook the click).
+    lines = work / "order.txt"
+    lines.write_bytes(b"first line\nsecond line\n")
+    app = d.App(exe, [str(lines)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("text", "").startswith("first line"))
+        app.keys("M->")
+        app.keys("C-x (")
+        app.type("abcdefghij")
+        app.keys("RET")
+        app.keys("C-x )")
+        wait_state(app, lambda s: s.get("macro_events") == "11")
+        x, y = app.cell_point(0, 0)
+        runs = 50000
+        final = 23 + 11 + runs * 11 + 1  # the file, the recording, the run, the Z
+        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        time.sleep(0.3)
+        during = int(app.state().get("length", "0"))
+        app.click(x, y)
+        app.keys("Z")
+        done = wait_state(app, lambda s: s.get("length") == str(final), 120.0)
+        # Every line after "first line" / "second line" is "abcdefghij\n"
+        # (11 units); the top line's start is known without the text (the
+        # state holds 64K characters only).
+        top = int(done.get("top_line", "-1"))
+        z_at = int(done.get("point", "-1")) - 1
+        line_start = 23 + 11 * (top - 2) if top >= 2 else -2
+        check("[deferred R1] during a long macro run, a click on the first cell of the top row and then Z: Z is "
+              "inserted where the click put point",
+              done.get("length") == str(final) and during < final - 1 and z_at == line_start,
+              f"length {during} when the click was posted (final {final}); Z at {z_at} (point - 1), start of the "
+              f"top line {top} at {line_start} (before R1 the held Z ran before the click: Z at the end, "
+              f"{final - 2} before the click moved point)")
+    finally:
+        app.kill()
+
+    # Retry R1 ([C7]): a click, then C-g, then q during a long run: the run
+    # stops at once, the click goes with the C-g, q is typed where the run
+    # stopped.
+    app = d.App(exe, [str(work / "long_run_click.txt")], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("message") == "(New file)")
+        app.keys("C-x (")
+        app.type("abcdefghij")
+        app.keys("C-x )")
+        wait_state(app, lambda s: s.get("macro_events") == "10")
+        x, y = app.cell_point(0, 0)
+        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)
+        time.sleep(1.0)
+        app.click(x, y)  # would put point at the start of the text
+        app.keys("C-g")
+        posted = time.perf_counter()
+        app.keys("q")
+        after = wait_state(app, lambda s: "q" in s.get("text", ""), 20.0)
+        stop_s = time.perf_counter() - posted
+        text = after.get("text", "")
+        length = int(after.get("length", "0"))
+        check("[deferred R1] during a long macro run, a click, C-g and q: the run stops at once, the click is "
+              "dropped with the C-g, q is typed after the run where it stopped",
+              text.endswith("q") and text.count("q") == 1 and not text.startswith("q") and
+              10 < length < 1_000_010 and stop_s < 2.0,
+              f"q typed {stop_s:.2f} s after the C-g was posted, length {length}, text starts {text[:6]!r} ends "
+              f"{text[-6:]!r} (a click applied would have put q at the start)")
+    finally:
+        app.kill()
+
+    def macro_app(name: str):
+        """A file of two lines and a recorded macro "abcdefghij RET" (11 events)."""
+        doc = work / f"{name}.txt"
+        doc.write_bytes(b"first line\nsecond line\n")
+        a = d.App(exe, [str(doc)], cwd=work, settings=settings, height=300)
+        wait_state(a, lambda s: s.get("text", "").startswith("first line"))
+        a.keys("M->")
+        a.keys("C-x (")
+        a.type("abcdefghij")
+        a.keys("RET")
+        a.keys("C-x )")
+        wait_state(a, lambda s: s.get("macro_events") == "11")
+        return a
+
+    # Retry 2, Q1 ([C12]): a run longer than the 1 s of the prefix key echo
+    # (kPendingKeysTimer, set by the C-x of C-x e) must not replay that
+    # timer after the run killed it: the next C-x is echoed after about 1 s,
+    # not at once.
+    app = macro_app("pending_timer")
+    try:
+        runs = 60000
+        final = 23 + 11 + runs * 11
+        start = time.perf_counter()
+        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        done = wait_state(app, lambda s: s.get("length") == str(final), 180.0)
+        run_s = time.perf_counter() - start
+        time.sleep(0.5)
+        app.keys("C-x", pause_s=0.0)
+        time.sleep(0.2)
+        st = app.state()
+        early = app.capture(shots / "deferred_q1_early.png")
+        time.sleep(1.3)
+        late = app.capture(shots / "deferred_q1_late.png")
+        app.keys("C-g")
+        # The prefix key echo is drawn only (not in the state): the echo area
+        # (below the mode line) is one colour without it.
+        top = int(float(st["mode_line_top"]) + float(st["line_height"]))
+
+        def echo_colours(shot) -> int:
+            w, h, px = shot
+            return len({px[(y * w + x) * 4:(y * w + x) * 4 + 3] for y in range(top, h) for x in range(w)})
+
+        early_n, late_n = echo_colours(early), echo_colours(late)
+        check("[deferred Q1] after a macro run of more than 1 s, the next prefix key C-x is echoed after about "
+              "1 s, not at once (no held WM_TIMER of a killed timer is replayed)",
+              done.get("length") == str(final) and run_s > 1.0 and early_n == 1 and late_n > 1,
+              f"run {run_s:.1f} s; colours in the echo area 0.2 s after C-x {early_n} (1: empty), 1.5 s after "
+              f"{late_n} (deferred_q1_early.png / deferred_q1_late.png)")
+    finally:
+        app.kill()
+
+    # Retry 2, Q2 ([C13]): a right click during a run, then Z. Replaying the
+    # click opens the context menu (a question headless); the input held
+    # after it is dropped, as keys during a waiting question are.
+    app = macro_app("menu_then_key")
+    try:
+        runs = 30000
+        final = 23 + 11 + runs * 11
+        x, y = app.cell_point(0, 2)
+        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        time.sleep(0.3)
+        during = int(app.state().get("length", "0"))
+        app.right_click(x, y)
+        app.keys("Z")
+        question = app.wait_question(120.0)
+        answered = app.answer("Cancel") if question else False
+        time.sleep(1.0)
+        after = app.state()
+        check("[deferred Q2] during a long macro run, a right click and then Z: the context menu opens after the "
+              "run, and Z (held after the click) is not typed into the buffer after Cancel",
+              question is not None and question.get("question") == "context_menu" and answered and
+              during < final and after.get("length") == str(final),
+              f"length {during} when the click was posted; question {question and question.get('question')}; "
+              f"answered Cancel {answered}; length after {after.get('length')} (the run alone gives {final}; "
+              f"{final + 1} means Z was typed)")
+    finally:
+        app.kill()
+
+    # Retry 3, P1 ([C15] 1): the mouse moved over the scroll bar during a run
+    # (a non-client WM_NCMOUSEMOVE, HTVSCROLL) and then C-g: the move is
+    # input that is held, so the C-g behind it stops the run at once.
+    app = macro_app("nc_move_cg")
+    try:
+        app.keys("C-u 2 0 0 0 0 0 C-x e", pause_s=0.02)
+        time.sleep(0.5)
+        app.mouse(0x00A0, 10, 10, 7)  # WM_NCMOUSEMOVE, wParam HTVSCROLL
+        app.keys("C-g")
+        posted = time.perf_counter()
+        stopped = wait_state(app, lambda s: s.get("message") in ("Quit", "(Type e to repeat macro)"), 120.0)
+        stop_s = time.perf_counter() - posted
+        full = 23 + 11 + 200000 * 11
+        check("[deferred P1] during a long macro run, a non-client mouse move over the scroll bar and then C-g: "
+              "the run stops at once",
+              stopped.get("message") == "Quit" and stop_s < 2.0 and int(stopped.get("length", "0")) < full,
+              f"message {stopped.get('message')!r} {stop_s:.2f} s after the C-g was posted, length "
+              f"{stopped.get('length')} (the whole run gives {full})")
+    finally:
+        app.kill()
+
+    # Retry 3, P1 ([C15] 2): a non-client button message during a run stops
+    # the scan (replayed later, a button down could start a modal move,
+    # size or scroll loop with a stale button state), so it stays in the
+    # queue with the key after it: both run after the run, in their order.
+    app = macro_app("nc_button_key")
+    try:
+        runs = 30000
+        final = 23 + 11 + runs * 11
+        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        time.sleep(0.3)
+        during = int(app.state().get("length", "0"))
+        app.mouse(0x00A1, 10, 10, 0)  # WM_NCLBUTTONDOWN, wParam HTNOWHERE
+        app.mouse(0x00A2, 10, 10, 0)  # WM_NCLBUTTONUP
+        app.keys("Z")
+        done = wait_state(app, lambda s: s.get("length") == str(final + 1), 120.0)
+        check("[deferred P1] during a long macro run, a non-client button press and release and then Z: the run "
+              "goes to its end and Z is typed after it",
+              during < final and done.get("length") == str(final + 1) and int(done.get("point", "0")) == final + 1,
+              f"length {during} when the button was posted; length after {done.get('length')} (want {final + 1}), "
+              f"point {done.get('point')}")
+    finally:
+        app.kill()
+
+    # Retry 3, P2: F10 during a run when the menu bar could not be made
+    # ('GFLT' "menu" at the reload that shows it): nothing opens, so the
+    # key held after F10 is typed.
+    bar_settings = work / "settings_bar.json"
+    bar_settings.write_bytes(settings_json({"menu_bar": True}))
+    bar_doc = work / "f10_no_bar.txt"
+    bar_doc.write_bytes(b"first line\nsecond line\n")
+    app = d.App(exe, [str(bar_doc)], cwd=work, settings=bar_settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("text", "").startswith("first line"))
+        app.keys("M->")
+        app.keys("C-x (")
+        app.type("abcdefghij")
+        app.keys("RET")
+        app.keys("C-x )")
+        wait_state(app, lambda s: s.get("macro_events") == "11")
+        apply_settings(bar_settings, {"menu_bar": False})
+        app.fault("menu")
+        apply_settings(bar_settings, {"menu_bar": True})
+        no_bar = app.state()
+        runs = 30000
+        final = int(no_bar.get("length", "0")) + runs * 11
+        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        time.sleep(0.3)
+        during = int(app.state().get("length", "0"))
+        app.keys("<f10>")
+        app.keys("Z")
+        done = wait_state(app, lambda s: s.get("length") == str(final + 1), 120.0)
+        time.sleep(0.3)
+        after = app.state()
+        check("[deferred P2] with no menu bar (its creation failed), F10 and then Z during a run: nothing opens, "
+              "so Z is typed after the run",
+              no_bar.get("menu_bar") == "0" and during < final and after.get("length") == str(final + 1) and
+              after.get("question", "none") == "none",
+              f"menu_bar {no_bar.get('menu_bar')} message {no_bar.get('message')!r}; length {during} when F10 was "
+              f"posted; length after {after.get('length')} (want {final + 1}); message {after.get('message')!r}")
+    finally:
+        app.kill()
+
+    # Retry 2, Q3: a drag started before a run, its button release and C-g
+    # posted during the run: the release goes with the C-g, and the drag
+    # ends too (no mouse state is left behind).
+    app = macro_app("drag_cg")
+    try:
+        st = app.state()
+        x0, y0 = app.cell_point(0, 1, st)
+        x1, y1 = app.cell_point(1, 4, st)
+        app.mouse(d.WM_LBUTTONDOWN, x0, y0, d.MK_LBUTTON)
+        app.mouse(0x0200, x1, y1, d.MK_LBUTTON)  # WM_MOUSEMOVE
+        pressed = wait_state(app, lambda s: s.get("dragging") == "1")
+        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)
+        time.sleep(1.0)
+        app.mouse(d.WM_LBUTTONUP, x1, y1, 0)
+        app.keys("C-g")
+        stopped = wait_state(app, lambda s: s.get("message") == "Quit", 20.0)
+        time.sleep(0.3)
+        after = app.state()
+        check("[deferred Q3] a drag started before a run, its release and C-g during the run: the run stops and "
+              "the drag ends (dragging 0)",
+              pressed.get("dragging") == "1" and stopped.get("message") == "Quit" and after.get("dragging") == "0",
+              f"dragging before the run {pressed.get('dragging')}; message {stopped.get('message')!r}; dragging "
+              f"after the stop {after.get('dragging')} (mouse capture is not in the state)")
+    finally:
+        app.kill()
+
+
 def run_m6_checks(exe: pathlib.Path, out: pathlib.Path):
     """[C1]-[C3], [C5] and [C6] (B2, B3, B4 / B5, B6) of the M6 packet on the
     real app (headless)."""
@@ -4624,6 +4977,8 @@ def main() -> int:
                         help="run only the M5 search, replace and goto-line checks")
     parser.add_argument("--only-m6", action="store_true",
                         help="run only the M6 checks (kills, shift selection, macros, B2-B6)")
+    parser.add_argument("--only-deferred", action="store_true",
+                        help="run only the checks of the deferred fixes after M6 (E2, E4; headless only)")
     parser.add_argument("--input", choices=["auto", "post"], default="auto",
                         help="post: always post the keys (never take the foreground; --visible only)")
     parser.add_argument("--visible", action="store_true",
@@ -4647,11 +5002,13 @@ def main() -> int:
     sequence0 = d.user32.GetClipboardSequenceNumber()
     only = (args.only_retry1 or args.only_m2 or args.only_m3a or args.only_m3b or args.only_m3c or
             args.only_m3d or args.only_m4a or args.only_m4b or args.only_m5 or args.only_m6 or
-            args.only_headless or args.only_visible)
+            args.only_deferred or args.only_headless or args.only_visible)
     if args.only_m5 and args.visible:
         parser.error("--only-m5 runs headless only")
     if args.only_m6 and args.visible:
         parser.error("--only-m6 runs headless only")
+    if args.only_deferred and args.visible:
+        parser.error("--only-deferred runs headless only")
     exe, out = args.exe.resolve(), args.out.resolve()
     sampler = None
     if d.HEADLESS:
@@ -4694,6 +5051,8 @@ def main() -> int:
             run_m5_checks(exe, out)
         if d.HEADLESS and (not only or args.only_m6):
             run_m6_checks(exe, out)
+        if d.HEADLESS and (not only or args.only_deferred):
+            run_deferred_checks(exe, out)
         if d.HEADLESS and (not only or args.only_headless):
             run_headless_checks(exe, out)
             check_library_default_headless(exe, out)
@@ -4708,8 +5067,9 @@ def main() -> int:
         sequence1 = d.user32.GetClipboardSequenceNumber()
         # R3: the user may copy something meanwhile; a change counts against
         # geditor only when a geditor process owns the clipboard (or the
-        # owner is unknown while a geditor of the run was open).
-        verdict, why = d.clipboard_verdict(sampler.clipboard_changes, os.path.normcase(str(exe)))
+        # owner is unknown while a geditor of the run was open, right after
+        # input that the run sent to a geditor: T3).
+        verdict, why = d.clipboard_verdict(sampler.clipboard_changes, os.path.normcase(str(exe)), d.ACTIONS)
         if sequence0 != sequence1 and not sampler.clipboard_changes:
             verdict, why = "FAIL", "the sequence number changed but the sampler saw no change"
         check("[C4] the real clipboard was not written by geditor (GetClipboardSequenceNumber, "

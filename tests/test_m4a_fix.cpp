@@ -71,12 +71,15 @@ TEST(m4a_fix_lf_after_cr_is_saved_as_cr_and_no_line_is_lost) {
   CHECK_EQ(again.line_feeds.size() + 1, s.ed.buffer().text.line_count());
   const geditor::PieceTree reread_tree = geditor::make_piece_tree(again);
   CHECK_EQ(eol_names(line_ends(reread_tree)), eol_names(line_ends(s.ed.buffer().text)));
-  CHECK_EQ(s.ed.eol_text(), std::wstring(L"Mixed(CRLF)"));
+  // Deferred fix F1: the default line end is now the file's most frequent
+  // one, CR (HEAD 6064002 kept CRLF, which reopening does not give).
+  CHECK_EQ(s.ed.eol_text(), std::wstring(L"Mixed(CR)"));
   // Opening the saved file gives the same lines.
   Session t;
   open_bytes(t, saved);
   CHECK_EQ(t.text(), s.text());
   CHECK_EQ(eol_names(line_ends(t.ed.buffer().text)), std::string("RRW"));
+  CHECK_EQ(t.ed.eol_text(), s.ed.eol_text());
 }
 
 // A run of LF line ends after one CR: each follows a CR once the one before

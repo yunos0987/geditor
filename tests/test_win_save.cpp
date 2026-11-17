@@ -409,3 +409,25 @@ TEST(win_save_fault_names) {
   CHECK(geditor::win::save_fault_from_name(L"save-nothing", &known) == SaveFault::kNone);
   CHECK(!known);
 }
+
+TEST(win_save_replace_errors_1175_to_1177_name_the_cause) {
+  // Deferred fix F2: without REPLACEFILE_IGNORE_MERGE_ERRORS, a file whose
+  // attributes or permissions cannot be carried over fails with one of these
+  // errors. HEAD 6064002 showed the generic texts of error_text ("The file
+  // to be replaced could not be removed", "The replacement file could not be
+  // moved"); the reason now says what happened, why it can happen and what
+  // to do.
+  for (const unsigned long code : {1175ul, 1176ul, 1177ul}) {
+    const std::wstring text = geditor::win::replace_error_text(code);
+    std::printf("  %lu: %s\n", code, test::to_display(text).c_str());
+    CHECK(text.find(L"Windows error " + std::to_wstring(code)) != std::wstring::npos);
+    CHECK(text.find(L"attributes or the permissions of the file") != std::wstring::npos);
+    CHECK(text.find(L"Save it under another name with write-file (C-x C-w)") != std::wstring::npos);
+    CHECK(text != geditor::win::error_text(code));
+  }
+  CHECK(geditor::win::replace_error_text(1175).find(L"could not remove the old file") != std::wstring::npos);
+  CHECK(geditor::win::replace_error_text(1177).find(L"could not move the new file") != std::wstring::npos);
+  // Other errors keep their short text.
+  CHECK_EQ(geditor::win::replace_error_text(ERROR_ACCESS_DENIED), std::wstring(L"Access is denied"));
+  CHECK_EQ(geditor::win::replace_error_text(ERROR_SHARING_VIOLATION), geditor::win::error_text(ERROR_SHARING_VIOLATION));
+}

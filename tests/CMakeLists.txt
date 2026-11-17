@@ -6,6 +6,7 @@ add_executable(geditor_tests
   test_char_width.cpp
   test_commands_edit.cpp
   test_commands_move.cpp
+  test_deferred_fixes.cpp
   test_display.cpp
   test_encoding.cpp
   test_encoding_stretches.cpp

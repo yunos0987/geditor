@@ -49,6 +49,23 @@ class UndoHistory {
   // happens when there are none.
   void merge_groups_since(size_t first, size_t point_before);
 
+  // The id that the next new group gets. Groups keep their ids through undo
+  // and redo, and the ids grow along the history, so the groups made since
+  // next_group_id() was taken are the newest ones whose id is at least that
+  // value; an undo during that time cannot pull an older group into them,
+  // and a group undone then and not redone is no longer among them (deferred
+  // fix S2).
+  uint64_t next_group_id() const { return next_id_; }
+  // merge_groups_since for the groups whose id is at least `first_id`.
+  void merge_groups_from_id(uint64_t first_id, size_t point_before);
+  // A number carried by each group (query-replace: its replacements; S3):
+  // add_count adds `n` to the group that the current command has opened and
+  // returns false when it has opened none. The counts of merged groups add
+  // up; count_from_id sums those of the groups whose id is at least
+  // `first_id`.
+  bool add_count(size_t n);
+  size_t count_from_id(uint64_t first_id) const;
+
   // The current state becomes the saved state.
   void mark_saved();
   bool modified() const;
@@ -76,6 +93,7 @@ class UndoHistory {
     size_t point_before = 0;
     size_t point_after = 0;
     int typed = 0;
+    size_t count = 0;  // add_count
   };
   static constexpr uint64_t kUnreachable = ~uint64_t{0};
 

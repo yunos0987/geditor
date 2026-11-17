@@ -23,6 +23,14 @@ std::wstring extended_length_path(const std::wstring& path);
 
 // Short English text for a Win32 error code ("Access is denied").
 std::wstring error_text(unsigned long error);
+// The reason of a failed ReplaceFileW (the "replacing the file" step of a
+// save). Errors 1175 - 1177 (ERROR_UNABLE_TO_REMOVE_REPLACED,
+// ERROR_UNABLE_TO_MOVE_REPLACEMENT, ERROR_UNABLE_TO_MOVE_REPLACEMENT_2;
+// without REPLACEFILE_IGNORE_MERGE_ERRORS also the errors of attributes or
+// permissions that cannot be carried over) are explained in plain words with
+// the advice to save under another name (deferred fix F2); any other error
+// is error_text.
+std::wstring replace_error_text(unsigned long error);
 
 // What tells two versions of a file apart without reading it: existence,
 // size and last-write time, and the read-only attribute (all zero when the

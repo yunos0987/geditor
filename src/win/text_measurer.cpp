@@ -599,7 +599,10 @@ void TextMeasurer::set_color_formats(uint32_t formats, uint32_t paint_level) {
 }
 
 void TextMeasurer::fail_next_color() {
-  fail_next_color_ = true;
+  // Deferred fix T1: when colour has failed already, the request is used up
+  // here (the glyphs are in one colour). Armed, it would fail the first
+  // colour glyph after the next font rebuild, which tries colour again.
+  fail_next_color_ = !color_failed_;
   drop_color_layers();
 }
 

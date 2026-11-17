@@ -158,11 +158,30 @@ void UndoHistory::merge_groups_since(size_t first, size_t point_before) {
     for (Op& op : g.ops) merged.ops.push_back(std::move(op));
     merged.point_after = g.point_after;
     merged.id = g.id;  // the newest id: a save after the last group stays saved
+    merged.count += g.count;
   }
   merged.point_before = point_before;
   merged.typed = 0;
   undo_.resize(first + 1);
   last_was_typing_ = false;
+}
+
+void UndoHistory::merge_groups_from_id(uint64_t first_id, size_t point_before) {
+  size_t first = undo_.size();
+  while (first > 0 && undo_[first - 1].id >= first_id) --first;
+  merge_groups_since(first, point_before);
+}
+
+bool UndoHistory::add_count(size_t n) {
+  if (!in_command_ || !open_ || undo_.empty()) return false;
+  undo_.back().count += n;
+  return true;
+}
+
+size_t UndoHistory::count_from_id(uint64_t first_id) const {
+  size_t total = 0;
+  for (size_t i = undo_.size(); i > 0 && undo_[i - 1].id >= first_id; --i) total += undo_[i - 1].count;
+  return total;
 }
 
 void UndoHistory::mark_saved() {

@@ -8,10 +8,6 @@ namespace {
 
 constexpr wchar_t kIdeographicSpace = L'　';
 
-bool is_trailing_space(wchar_t c) {
-  return c == L' ' || c == L'\t' || c == kIdeographicSpace;
-}
-
 }  // namespace
 
 int wrap_width(WrapMode mode, int column, int text_columns) {
@@ -96,7 +92,7 @@ EolMark eol_mark_for_line(const PieceTree& tree, size_t line, Eol eol, const Dis
 size_t trailing_whitespace_start(const PieceTree& tree, size_t line) {
   const size_t start = tree.line_start(line);
   size_t p = tree.line_end(line);
-  while (p > start && is_trailing_space(tree.char_at(p - 1))) --p;
+  while (p > start && is_trailing_whitespace(tree.char_at(p - 1))) --p;
   // On a cluster boundary (as WrapLayout::trailing_start).
   return p > start ? next_cluster_offset(tree, p - 1) : p;
 }
@@ -144,8 +140,7 @@ void build_display_row(const PieceTree& tree, const WrapLayout& layout, Eol eol,
       cell.mark = true;
     }
     if (cell.mark) cell.code_points = 1;
-    cell.trailing = options.trailing && single && rc.offset >= trailing_from &&
-                    (rc.c == U' ' || rc.c == U'\t' || rc.c == kIdeographicSpace);
+    cell.trailing = options.trailing && single && rc.offset >= trailing_from && is_trailing_whitespace(rc.c);
     out->cells.push_back(cell);
   }
   if (out->last_row) out->eol = eol_mark_for_line(tree, pos.line, eol, options);

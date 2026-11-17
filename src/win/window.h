@@ -2,6 +2,7 @@
 // and the Host implementation that the core calls back into.
 #pragma once
 
+#include <deque>
 #include <string>
 
 #include <windows.h>
@@ -40,6 +41,10 @@ class MainWindow final : public Host {
   // Keyboard messages are translated here, before TranslateMessage, so that a
   // handled key produces no WM_CHAR / WM_SYSCHAR. True when consumed.
   bool pre_translate(const MSG& msg);
+  // After each message of the message loop: runs the keyboard and mouse
+  // messages that quit_requested took from the queue during a keyboard macro
+  // run and that no C-g dropped (deferred fix E4, retry R1), in their order.
+  void run_held_keys();
 
   // ---- Host ----
   bool read_file(const std::wstring& path, std::string& bytes, std::wstring& error) override;
@@ -65,6 +70,17 @@ class MainWindow final : public Host {
   static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
   LRESULT handle_message(UINT msg, WPARAM wparam, LPARAM lparam);
   void paint();
+  // The modifiers of a key message: its lParam bits (headless) or
+  // GetKeyState.
+  ModifierState key_message_modifiers(const MSG& msg) const;
+  // A Down / Left / Right that a menu loop did not take (posted with a mark
+  // in lParam): dropped.
+  static bool is_dropped_menu_key(const MSG& msg);
+  // A key that goes to TranslateMessage and the system instead of the
+  // keymap (an unbound M-<f4>, Shift+F10 for the context menu).
+  bool key_goes_to_system(const Key& key) const;
+  // pre_translate of a WM_KEYDOWN / WM_SYSKEYDOWN with its modifiers.
+  bool handle_key_message(const MSG& msg, const ModifierState& mods);
   void handle_key(const Key& key);
   void handle_char(wchar_t unit);
   void handle_ime_composition(LPARAM lparam);
@@ -218,6 +234,21 @@ class MainWindow final : public Host {
   unsigned reloads_drawn_ = 0;     // settings_reloads_ at the last drawn frame
   // ---- 'GRDW' (M3d [C4]) ----
   std::wstring redraw_result_;     // state lines of the last benchmark
+  // ---- keyboard macro runs (quit_requested, E4) ----
+  struct HeldKey {
+    MSG msg{};
+    ModifierState mods;
+    bool translated = false;  // TranslateMessage done when it was taken (visible keys)
+  };
+  std::deque<HeldKey> held_keys_;
+  // Questions and menus opened so far (with menu_loops_: retry Q2).
+  unsigned modal_opens_ = 0;
+  // Drops the held input and ends a drag in progress (retry Q3).
+  void discard_held_input();
+  // Input besides keys and client mouse messages that quit_requested holds:
+  // non-client mouse moves, hover / leave, gestures, touch and pointer
+  // messages (retry P1).
+  static bool is_held_movement(UINT message);
 };
 
 }  // namespace geditor::win

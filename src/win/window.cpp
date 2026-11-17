@@ -267,25 +267,45 @@ bool MainWindow::pre_translate(const MSG& msg) {
   if (msg.hwnd != hwnd_ || (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN)) {
     return false;
   }
-  // The Down key of enter_menu_bar, or the second key of a menu bar
-  // wrap-around, that no menu loop took: dropped.
-  if (msg.message == WM_KEYDOWN && msg.wParam == VK_DOWN && msg.lParam == kMenuDropDownLParam) return true;
-  if (msg.message == WM_KEYDOWN && (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT) &&
-      msg.lParam == kMenuWrapLParam) {
-    return true;
-  }
-  // Another key before the release that would open the menu bar cancels it.
-  if (menu_key_ != 0 && msg.wParam != menu_key_) menu_key_ = 0;
+  return handle_key_message(msg, key_message_modifiers(msg));
+}
+
+ModifierState MainWindow::key_message_modifiers(const MSG& msg) const {
   ModifierState mods;
   if (headless_) {
     // M4a fix F2: the modifiers come with the key (headless.h), never from
     // the keyboard state, which the user's real keys also change.
     mods = headless_key_modifiers(msg.lParam);
   } else {
+    // The state as of the last key message taken from the queue (msg).
     mods.ctrl = GetKeyState(VK_CONTROL) < 0;
     mods.alt = GetKeyState(VK_MENU) < 0;
     mods.shift = GetKeyState(VK_SHIFT) < 0;
   }
+  return mods;
+}
+
+bool MainWindow::is_dropped_menu_key(const MSG& msg) {
+  // The Down key of enter_menu_bar, or the second key of a menu bar
+  // wrap-around, that no menu loop took.
+  if (msg.message != WM_KEYDOWN) return false;
+  if (msg.wParam == VK_DOWN && msg.lParam == kMenuDropDownLParam) return true;
+  return (msg.wParam == VK_LEFT || msg.wParam == VK_RIGHT) && msg.lParam == kMenuWrapLParam;
+}
+
+bool MainWindow::key_goes_to_system(const Key& key) const {
+  if (passes_to_system_when_unbound(key) && !editor_.key_is_bound(key)) return true;
+  // Shift+F10 opens the context menu (decision B6, WM_CONTEXTMENU from
+  // DefWindowProc) unless S-<f10> itself is bound: shift translation would
+  // otherwise make it <f10> (menu-bar-open).
+  return key == Key{kKeyF1 + 9, kModShift} && editor_.pending_keys_text().empty() &&
+         editor_.keymap(KeymapKind::kGlobal).lookup(KeySequence{key}).result == Keymap::Result::kUndefined;
+}
+
+bool MainWindow::handle_key_message(const MSG& msg, const ModifierState& mods) {
+  if (is_dropped_menu_key(msg)) return true;
+  // Another key before the release that would open the menu bar cancels it.
+  if (menu_key_ != 0 && msg.wParam != menu_key_) menu_key_ = 0;
   const unsigned scan_code = static_cast<unsigned>((msg.lParam >> 16) & 0x1FF);
   const std::optional<Key> key =
       translate_key_down(static_cast<unsigned>(msg.wParam), scan_code, mods, &layout_char, nullptr);
@@ -304,15 +324,7 @@ bool MainWindow::pre_translate(const MSG& msg) {
     }
     return true;
   }
-  if (!key) return false;
-  if (passes_to_system_when_unbound(*key) && !editor_.key_is_bound(*key)) return false;
-  // Shift+F10 opens the context menu (decision B6, WM_CONTEXTMENU from
-  // DefWindowProc) unless S-<f10> itself is bound: shift translation would
-  // otherwise make it <f10> (menu-bar-open).
-  if (*key == Key{kKeyF1 + 9, kModShift} && editor_.pending_keys_text().empty() &&
-      editor_.keymap(KeymapKind::kGlobal).lookup(KeySequence{*key}).result == Keymap::Result::kUndefined) {
-    return false;
-  }
+  if (!key || key_goes_to_system(*key)) return false;
   start_input_measure();
   chars_.reset();
   last_key_vk_ = static_cast<UINT>(msg.wParam);
@@ -388,16 +400,19 @@ bool MainWindow::set_clipboard(const std::wstring& text) {
 }
 
 OpenChoice MainWindow::ask_open_choice(const std::wstring& path) {
+  ++modal_opens_;  // retry Q2 (run_held_keys)
   if (!headless_) return win::ask_open_choice(hwnd_, path);
   return open_choice_for(ask_headless(open_choice_question(path))).value_or(OpenChoice::kCancel);
 }
 
 SaveChoice MainWindow::ask_save_changes(const std::wstring& buffer_name) {
+  ++modal_opens_;
   if (!headless_) return win::ask_save_changes(hwnd_, buffer_name);
   return save_choice_for(ask_headless(save_changes_question(buffer_name))).value_or(SaveChoice::kCancel);
 }
 
 bool MainWindow::ask_yes_no(const std::wstring& question) {
+  ++modal_opens_;
   if (!headless_) return win::ask_yes_no(hwnd_, question);
   return yes_no_for(ask_headless(yes_no_question(question))).value_or(false);
 }
@@ -416,6 +431,10 @@ void MainWindow::open_menu_bar() {
   // After the command: the menu loop must not run inside the dispatch of the
   // key (its WM_COMMAND runs another command).
   PostMessageW(hwnd_, kMsgOpenMenu, 0, 0);
+  // The menu opens (there is a bar: enter_menu_bar checks the same): input
+  // held after it is dropped by run_held_keys (Q2). Without a bar nothing
+  // opens, and the held input runs (retry P2).
+  if (GetMenu(hwnd_) != nullptr) ++modal_opens_;
 }
 
 int MainWindow::visible_lines() {
@@ -451,35 +470,137 @@ int MainWindow::dpi() {
   return static_cast<int>(std::lround(renderer_.dpi()));
 }
 
+bool MainWindow::is_held_movement(UINT message) {
+  switch (message) {
+    case WM_NCMOUSEMOVE:      // the pointer over the scroll bar, menu bar, frame
+    case WM_NCMOUSEHOVER:     // hover / leave tracking (TrackMouseEvent,
+    case WM_NCMOUSELEAVE:     // and DefWindowProc for the caption buttons)
+    case WM_MOUSEHOVER:
+    case WM_MOUSELEAVE:
+    case WM_GESTURE:          // touch gestures (DefWindowProc pans)
+      return true;
+    default:
+      break;
+  }
+  // WM_TOUCH (0x240) and the pointer messages of pen and touch
+  // (WM_POINTERDEVICECHANGE..WM_POINTERDEVICEOUTOFRANGE, 0x238-0x23A;
+  // WM_NCPOINTERUPDATE..WM_POINTERHWHEEL, 0x241-0x24F). DefWindowProc turns
+  // an unhandled pointer message into mouse messages when it is replayed.
+  // Non-client button messages (WM_NCLBUTTONDOWN..WM_NCXBUTTONDBLCLK) are
+  // not held: replayed after the run, a button down could start a modal
+  // move, size, scroll or menu loop with a button state that has passed.
+  return (message >= 0x0238 && message <= 0x023A) || (message >= 0x0240 && message <= 0x024F);
+}
+
 bool MainWindow::quit_requested() {
-  // M6 retry R2: a keyboard macro run asks this about every 50 ms. Only the
-  // first waiting key message is looked at (nothing is dispatched); when it
-  // is C-g (Ctrl+G without Alt), it is taken and the run stops. Other keys
-  // stay in the queue for after the run; key downs of Ctrl / Shift / Alt
-  // themselves (they type nothing) are taken to see the key after them.
-  // Headless: the modifiers come from the message's lParam bits only, never
-  // from the keyboard state.
+  // M6 retry R2, deferred fix E4 (retry R1): a keyboard macro run asks this
+  // about every 50 ms. The messages at the head of the thread's queue are
+  // taken in the order PeekMessage returns them (no filter) and held
+  // (held_keys_) while they are keyboard (WM_KEYFIRST..WM_KEYLAST), mouse
+  // (WM_MOUSEFIRST..WM_MOUSELAST) or other movement / touch input
+  // (is_held_movement) messages of this window; the first other message
+  // (WM_COMMAND, WM_CLOSE, WM_SYSCOMMAND, a non-client button message,
+  // WM_DROPFILES, IME messages, the window's own posted messages, a message
+  // of another window or of the thread, ...) stays at the head with
+  // everything after it, so that input never overtakes it. WM_PAINT comes out of PeekMessage only when nothing
+  // is posted and no input waits, so it never stands before input; a
+  // WM_TIMER can (below) and is dropped. A C-g key down (Ctrl+G without Alt)
+  // stops the run: it and the input held before it are dropped (Emacs
+  // discards the input that waits when it quits; a drag in progress ends,
+  // retry Q3); the input after it stays in the queue.
+  // Without a C-g, the held input runs after the run, in its order, before
+  // any later message (run_held_keys). Headless: the modifiers come from the
+  // message's lParam bits only, never from the keyboard state. Visible: the
+  // modifiers are those of GetKeyState right after the message is taken
+  // (Windows keeps them in step with the messages read), and a key without a
+  // command key is translated now (TranslateMessage), so that its WM_CHAR is
+  // held after it. A key that the IME takes (VK_PROCESSKEY) is left in the
+  // queue with everything after it: its composition messages cannot be held.
+  // Retry P1: besides keys and client mouse messages, the messages that
+  // the user produces by merely moving or touching are held the same way
+  // (is_held_movement): a C-g behind them stops the run.
   MSG msg{};
-  for (int i = 0;; ++i) {
-    if (!PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_NOREMOVE | PM_NOYIELD)) return false;
-    const bool modifier = msg.wParam == VK_CONTROL || msg.wParam == VK_SHIFT || msg.wParam == VK_MENU;
-    if (!modifier || i >= 16) break;
-    PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE | PM_NOYIELD);
+  for (;;) {
+    if (!PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_NOYIELD)) return false;
+    const bool key = msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST;
+    const bool mouse =
+        (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) || is_held_movement(msg.message);
+    // A due WM_TIMER that PeekMessage has shown (PM_NOREMOVE) becomes a
+    // posted message at the head, ahead of input posted later (measured,
+    // 2026-11-17): it is taken and dropped (retry Q1: held, it was replayed
+    // after the run had killed its timer). Every timer of the window
+    // (kPendingKeysTimer, kRedrawTimer, kDragScrollTimer) repeats until it
+    // is killed, so a live one fires again one interval later.
+    const bool timer = msg.message == WM_TIMER;
+    if (msg.hwnd != hwnd_ || !(key || mouse || timer)) return false;
+    const bool key_down = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
+    if (!headless_ && key_down && msg.wParam == VK_PROCESSKEY) return false;
+    // The same kind of message again, now taken (the head of the queue).
+    const UINT kind = msg.message;
+    if (!PeekMessageW(&msg, hwnd_, kind, kind, PM_REMOVE | PM_NOYIELD)) return false;
+    if (timer) continue;  // dropped (above)
+    HeldKey held;
+    held.msg = msg;
+    if (!key) {  // mouse, pointer, touch: run later in its place
+      held_keys_.push_back(held);
+      continue;
+    }
+    held.mods = key_message_modifiers(msg);
+    if (msg.message == WM_KEYDOWN && msg.wParam == 'G' && held.mods.ctrl && !held.mods.alt) {
+      discard_held_input();
+      return true;
+    }
+    if (!headless_ && key_down && !is_dropped_menu_key(msg)) {
+      const unsigned scan_code = static_cast<unsigned>((msg.lParam >> 16) & 0x1FF);
+      const std::optional<Key> k =
+          translate_key_down(static_cast<unsigned>(msg.wParam), scan_code, held.mods, &layout_char, nullptr);
+      if (!k) {
+        TranslateMessage(&msg);
+        held.translated = true;
+      }
+      // A key with a command key may still go to the system (an unbound
+      // M-<f4> / M-SPC, Shift+F10): judged when it runs (retry R5).
+    }
+    held_keys_.push_back(held);
   }
-  if (msg.wParam != 'G') return false;
-  bool ctrl = false;
-  bool alt = false;
-  if (headless_) {
-    const ModifierState mods = headless_key_modifiers(msg.lParam);
-    ctrl = mods.ctrl;
-    alt = mods.alt;
-  } else {
-    ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+}
+
+void MainWindow::discard_held_input() {
+  held_keys_.clear();
+  // Retry Q3: a dropped button release must not leave a drag (and the mouse
+  // capture, the drag scroll timer) behind.
+  end_drag();
+}
+
+void MainWindow::run_held_keys() {
+  // The input that quit_requested took from the queue during a macro run,
+  // as the message loop would have run it.
+  while (!held_keys_.empty()) {
+    HeldKey held = held_keys_.front();
+    held_keys_.pop_front();
+    // Retry Q2: held input that opens a question or a menu (a right click,
+    // a key whose command asks) drops the input held after it; without a
+    // run, that input would have reached the question or the menu, not the
+    // text. (A WM_CLOSE is never held: it stays in the queue, and the input
+    // after it with it.)
+    const unsigned opened = modal_opens_ + menu_loops_;
+    const bool key_down = held.msg.message == WM_KEYDOWN || held.msg.message == WM_SYSKEYDOWN;
+    if (!(key_down && !held.translated)) {
+      DispatchMessageW(&held.msg);
+    } else if (!handle_key_message(held.msg, held.mods)) {
+      if (!headless_) {
+        // Visible: a key that goes to the system now (retry R5), as the
+        // message loop does: TranslateMessage, then its own messages first.
+        TranslateMessage(&held.msg);
+        DispatchMessageW(&held.msg);
+        MSG c{};
+        while (PeekMessageW(&c, hwnd_, WM_CHAR, WM_SYSDEADCHAR, PM_REMOVE | PM_NOYIELD)) DispatchMessageW(&c);
+      } else {
+        DispatchMessageW(&held.msg);
+      }
+    }
+    if (modal_opens_ + menu_loops_ != opened) discard_held_input();
   }
-  if (!ctrl || alt) return false;
-  PeekMessageW(&msg, hwnd_, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE | PM_NOYIELD);
-  return true;
 }
 
 // ---- Messages ----
@@ -1304,11 +1425,14 @@ void MainWindow::apply_font(bool force) {
     const FontSpec& kept = renderer_.font_spec();
     append_message(L"Cannot create the font " + spec.family + L" at " +
                    std::to_wstring(std::lround(spec.em * dpi / 96.0f)) + L" px; keeping " + kept.family);
-  }
-  // Decision E1: once per value of font.family / font.fallback; rebuilds for
-  // text-scale, DPI or font.size stay silent.
-  for (const std::wstring& name : missing_fonts_.take(spec.family, spec.fallback, missing)) {
-    append_message(L"Font not found: " + name);
+  } else {
+    // Decision E1: once per value of font.family / font.fallback; rebuilds
+    // for text-scale, DPI or font.size stay silent. Only a font that is now
+    // in use counts as reported (deferred fix E2): after a failed creation
+    // the names are reported by the next rebuild that succeeds.
+    for (const std::wstring& name : missing_fonts_.take(spec.family, spec.fallback, missing)) {
+      append_message(L"Font not found: " + name);
+    }
   }
   editor_.ensure_point_visible();
   update_scroll_bar();
@@ -1498,6 +1622,7 @@ void MainWindow::note_menu_popup(HMENU menu, bool system_menu) {
 }
 
 UINT MainWindow::ask_headless_menu(QuestionKind kind, HMENU menu, POINT position) {
+  ++modal_opens_;  // retry Q2 (run_held_keys); a visible menu counts in menu_loops_
   // What WM_INITMENUPOPUP does before each menu opens, then the built HMENU
   // as it is read back (decision B7).
   update_menu(menu, editor_);

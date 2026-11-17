@@ -417,8 +417,11 @@ bool Editor::run_call(const CommandCall& call_in, const PrefixArg& prefix, bool 
   shift_select_ = false;
   if (own_group) b.undo.begin_command(b.point, typing);
   info->fn(*this);
-  if (own_group) b.undo.end_command(b.point);
+  // The group keeps the point after finish_command's cluster snapping, so
+  // that redo puts point where the command left it (deferred fix E1: after a
+  // joining insertion, the end of the joined cluster).
   finish_command(b);
+  if (own_group) b.undo.end_command(b.point);
   // A region made otherwise (C-SPC, C-x C-x, C-x h, select-all, a kill or
   // an edit that ended it) is no shift selection any more.
   if (!movement && !info->prefix_argument) {
@@ -602,6 +605,7 @@ bool Editor::apply_settings_text(std::string_view utf8) {
   cancel_pending_input();
   ConfigParse parsed = parse_config(utf8);
   std::vector<Diagnostic> errors = std::move(parsed.errors);
+  const CaseFold case_fold_before = config_.case_fold;
   if (parsed.syntax_ok) {
     rebuild_keymaps(parsed.config, &errors);
     config_ = std::move(parsed.config);
@@ -612,7 +616,35 @@ bool Editor::apply_settings_text(std::string_view utf8) {
   });
   settings_errors_ = std::move(errors);
   show_settings_errors();
+  isearch_after_case_fold_change(case_fold_before);
   return parsed.syntax_ok;
+}
+
+void Editor::isearch_after_case_fold_change(CaseFold before) {
+  // S5: a reload that changes search.case_fold for the isearch pattern (not
+  // overridden with M-c) searches again at once, as M-c does: the match, the
+  // highlights, the failing state and the prompt follow the new rule.
+  // The states that DEL goes back to are brought up to date when DEL
+  // returns to them (isearch_delete_char; retry R4 / Q4), not all here.
+  if (!isearch_active()) return;
+  const IsearchStep& s = isearch_.now;
+  if (s.pattern.empty() || s.case_override >= 0 ||
+      search_case_sensitive(before, s.pattern, s.regexp) ==
+          search_case_sensitive(config_.case_fold, s.pattern, s.regexp)) {
+    return;
+  }
+  const uint64_t errors = errors_;
+  const std::wstring shown = message_;
+  message_.clear();
+  isearch_search(false);
+  errors_ = errors;
+  if (message_is_settings_) {
+    message_ = shown;  // the settings errors stay in the echo area
+  } else {
+    const std::wstring prompt = isearch_prompt();
+    message_ = message_.empty() ? prompt : prompt + (prompt.ends_with(L' ') ? L"[" : L" [") + message_ + L"]";
+  }
+  ensure_point_visible();
 }
 
 void Editor::show_settings_errors() {
@@ -649,11 +681,13 @@ void Editor::reload_settings() {
     case FileKind::kNone:
       if (settings_file_seen_) {
         settings_file_seen_ = false;
+        const CaseFold case_fold_before = config_.case_fold;
         config_ = Config();
         apply_view_settings();
         settings_errors_.clear();
         rebuild_keymaps(config_, nullptr);
         show(L"Settings file removed; using defaults");
+        isearch_after_case_fold_change(case_fold_before);
       }
       return;
     case FileKind::kError:
@@ -746,8 +780,8 @@ void Editor::handle_quoted_insert(const Key& key) {
   } else {
     message_ = key_to_string(key) + L" cannot be inserted";
   }
-  b.undo.end_command(b.point);
   finish_command(b);
+  b.undo.end_command(b.point);  // after the snapping (E1)
 }
 
 void Editor::insert_text(std::wstring_view text) {
@@ -781,8 +815,8 @@ void Editor::insert_text(std::wstring_view text) {
   mini_.edited_in_command = false;
   b.undo.begin_command(b.point, false);
   insert(b, normalize_line_ends(text));
-  b.undo.end_command(b.point);
   finish_command(b);
+  b.undo.end_command(b.point);  // after the snapping (E1)
 }
 
 // ---- View state ----
@@ -1567,6 +1601,12 @@ Editor::SearchHighlights Editor::search_highlights(int rows) const {
 }
 
 void Editor::isearch_start(bool forward, bool regexp) {
+  if (query_replace_active() && !minibuffer_active()) {
+    // S6: no minibuffer is open; C-s / C-r are not query-replace answers
+    // (Emacs), and query-replace goes on.
+    fail(L"I-search cannot be started during query-replace");
+    return;
+  }
   if (input_mode_active()) {
     fail(kRecursiveMinibufferMessage);
     return;
@@ -1586,10 +1626,13 @@ void Editor::isearch_push() {
   isearch_.history.push_back(isearch_.now);
 }
 
+bool Editor::isearch_sensitive(const IsearchStep& s) const {
+  return s.case_override >= 0 ? s.case_override == 1 : search_case_sensitive(config_.case_fold, s.pattern, s.regexp);
+}
+
 bool Editor::isearch_prepare() {
   IsearchStep& s = isearch_.now;
-  const bool sensitive =
-      s.case_override >= 0 ? s.case_override == 1 : search_case_sensitive(config_.case_fold, s.pattern, s.regexp);
+  const bool sensitive = isearch_sensitive(s);
   s.invalid = !matcher_.set(s.pattern, s.regexp, sensitive);
   if (s.invalid) message_ = matcher_.error();
   return !s.invalid;
@@ -1602,6 +1645,7 @@ void Editor::isearch_search(bool repeat) {
     return;
   }
   if (!isearch_prepare()) return;  // point stays at the last match
+  s.searched_sensitive = isearch_sensitive(s) ? 1 : 0;
   const PieceTree& t = main_.text;
   if (repeat && s.failing) {
     // A failing search wraps around (Emacs: "Wrapped I-search").
@@ -1701,7 +1745,18 @@ void Editor::isearch_delete_char() {
   isearch_.now = std::move(isearch_.history.back());
   isearch_.history.pop_back();
   main_.point = std::min(isearch_.now.point, main_.text.length());
-  if (!isearch_.now.pattern.empty()) isearch_prepare();
+  IsearchStep& s = isearch_.now;
+  if (s.pattern.empty()) return;
+  if (s.searched_sensitive >= 0 && s.searched_sensitive != (isearch_sensitive(s) ? 1 : 0)) {
+    // Retry R4 / Q4: the step was searched before a settings reload changed
+    // search.case_fold for its pattern; searched again now, from where it
+    // stood, as the reload did for the current step.
+    const uint64_t errors = errors_;
+    isearch_search(false);
+    errors_ = errors;  // going back is no failing input
+    return;
+  }
+  isearch_prepare();
 }
 
 void Editor::isearch_toggle_regexp() {
@@ -1812,7 +1867,9 @@ void Editor::query_replace(bool regexp, std::wstring_view from, std::wstring_vie
   replace_.from = from;
   replace_.to = to;
   replace_.start_point = main_.point;
-  replace_.undo_groups = main_.undo.undo_count();
+  replace_.first_group = main_.undo.next_group_id();
+  replace_.merge_from = replace_.first_group;
+  replace_.merge_point = replace_.start_point;
   query_replace_next(main_.point, false);
 }
 
@@ -1822,8 +1879,8 @@ void Editor::query_replace_next(size_t from, bool not_empty_at_from, bool show) 
       matcher_.find_forward(main_.text, std::min(from, main_.text.length()), not_empty_at_from, &m, true);
   if (r != SearchResult::kFound) {
     query_replace_finish(r == SearchResult::kError ? L"Search stopped (" + matcher_.error() + L"); " +
-                                                         occurrences(replace_.count)
-                                                   : occurrences(replace_.count));
+                                                         occurrences(query_replace_standing())
+                                                   : occurrences(query_replace_standing()));
     return;
   }
   replace_.match = m;
@@ -1836,17 +1893,33 @@ void Editor::query_replace_next(size_t from, bool not_empty_at_from, bool show) 
 void Editor::query_replace_finish(std::wstring message) {
   if (!replace_.active) return;
   replace_.active = false;
-  // Every replacement of this run is one undo unit; undo puts point where
-  // query-replace started.
-  main_.undo.merge_groups_since(replace_.undo_groups, replace_.start_point);
+  // Every replacement of this run that stands is one undo unit; undo puts
+  // point where query-replace started. The groups are found by id (S2): an
+  // undo of older history during the run neither splits the unit nor joins
+  // an older edit to it.
+  main_.undo.merge_groups_from_id(replace_.merge_from, replace_.merge_point);
+  // S4: the edit replaced exactly the matched units, which may end inside a
+  // grapheme cluster (the highlight is widened to clusters, the edit is not).
+  // Point stays after the replaced text: at the end of that cluster, not
+  // back before it (finish_command would move it back).
+  const size_t point = std::min(main_.point, main_.text.length());
+  if (cluster_start(main_.text, point) != point) main_.point = next_cluster_offset(main_.text, point);
   message_ = std::move(message);
+}
+
+void Editor::query_replace_count(size_t n) {
+  if (!main_.undo.add_count(n)) replace_.unrecorded += n;
+}
+
+size_t Editor::query_replace_standing() const {
+  return main_.undo.count_from_id(replace_.first_group) + replace_.unrecorded;
 }
 
 bool Editor::query_replace_replace_current() {
   const SearchMatch m = replace_.match;
   std::wstring text;
   if (!matcher_.expand(replace_.to, &text)) {
-    query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " + occurrences(replace_.count));
+    query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " + occurrences(query_replace_standing()));
     failed_ = true;
     ++errors_;
     return false;
@@ -1860,7 +1933,7 @@ bool Editor::query_replace_replace_current() {
     return false;
   }
   replace(main_, m.start, m.end, text);
-  ++replace_.count;
+  query_replace_count(1);
   main_.point = m.start + text.size();
   return true;
 }
@@ -1873,7 +1946,7 @@ void Editor::query_replace_act(bool and_exit) {
   const SearchMatch m = replace_.match;
   if (!query_replace_replace_current()) return;
   if (and_exit) {
-    query_replace_finish(occurrences(replace_.count));
+    query_replace_finish(occurrences(query_replace_standing()));
     return;
   }
   query_replace_next(main_.point, m.start == m.end);
@@ -1909,11 +1982,12 @@ void Editor::query_replace_all() {
     const bool ok = matcher_.expand_rest_of_line(replace_.to, &line);
     if (line.count > 0) {
       replace(main_, line.from, line.to, line.text);
-      replace_.count += line.count;
+      query_replace_count(line.count);
       main_.point = line.from + line.point;
     }
     if (!ok) {
-      query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " + occurrences(replace_.count));
+      query_replace_finish(L"Invalid replacement: " + matcher_.error() + L"; " +
+                           occurrences(query_replace_standing()));
       failed_ = true;
       ++errors_;
       return;
@@ -1927,7 +2001,7 @@ void Editor::query_replace_exit() {
     fail(L"Not in query-replace");
     return;
   }
-  query_replace_finish(occurrences(replace_.count));
+  query_replace_finish(occurrences(query_replace_standing()));
 }
 
 void Editor::goto_line(int64_t line) {
@@ -1945,7 +2019,7 @@ void Editor::goto_line(int64_t line) {
 
 void Editor::end_search_modes() {
   if (isearch_active()) isearch_end(false);
-  if (query_replace_active()) query_replace_finish(occurrences(replace_.count));
+  if (query_replace_active()) query_replace_finish(occurrences(query_replace_standing()));
 }
 
 // ---- Shift selection (M6, PLAN 4.4) ----
@@ -2071,7 +2145,9 @@ void Editor::run_pending_macro() {
   // characters do not join it.
   main_.undo.begin_command(main_.point, false);
   main_.undo.end_command(main_.point);
-  const size_t first = main_.undo.undo_count();
+  // By id (retry R2, as S2): an event that undoes history older than the
+  // call neither splits the unit nor joins an older edit to it.
+  const uint64_t first = main_.undo.next_group_id();
   const size_t start = main_.point;
   const uint64_t errors = errors_;
   bool ok = true;
@@ -2118,7 +2194,15 @@ void Editor::run_pending_macro() {
     if (query_replace_active()) query_replace_finish(message);
     message_ = message;
   }
-  main_.undo.merge_groups_since(first, start);
+  main_.undo.merge_groups_from_id(first, start);
+  if (query_replace_active()) {
+    // Retry R3: the run ended inside query-replace. The call (with the
+    // replacements it made) stays its own undo unit; the replacements made
+    // after it form another one, which undo takes back to here. They are
+    // still counted from the start of query-replace (first_group).
+    replace_.merge_from = main_.undo.next_group_id();
+    replace_.merge_point = main_.point;
+  }
   // `e` repeats only when the run left no mode open (retry R5): after a
   // run that ends inside isearch, the minibuffer or query-replace, `e` is
   // input for that mode.

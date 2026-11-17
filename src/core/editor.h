@@ -451,6 +451,9 @@ class Editor {
     bool invalid = false;  // the regexp does not compile (the message is shown)
     size_t origin = 0;     // where the search runs from without a match
     size_t point = 0;
+    // The case sensitivity the step was searched with (-1: not searched).
+    // DEL searches a step again when the rule now differs (retry Q4).
+    int searched_sensitive = -1;
   };
   struct IsearchState {
     bool active = false;
@@ -466,9 +469,20 @@ class Editor {
     std::wstring from;
     std::wstring to;
     size_t start_point = 0;
-    size_t undo_groups = 0;  // undo groups before the first replacement
-    size_t count = 0;        // replacements made
-    SearchMatch match;       // the current match
+    // The undo group id when it started (UndoHistory::next_group_id): the
+    // groups of this run are those with this id or a later one (S2). Each
+    // replacement counts in its group (S3), so an undo during the run takes
+    // its replacements out of the count; a replacement that changed nothing
+    // has no group and is counted in `unrecorded` (it always stands).
+    uint64_t first_group = 0;
+    size_t unrecorded = 0;
+    // The groups that finishing merges into one unit (from this id) and the
+    // point that undo restores: first_group and start_point, or, after a
+    // keyboard macro call that ended inside query-replace, the id and point
+    // after that call (retry R3: the call stays its own unit).
+    uint64_t merge_from = 0;
+    size_t merge_point = 0;
+    SearchMatch match;  // the current match
     // What the last query-replace action left, to notice other commands.
     uint64_t revision = 0;
     size_t point = 0;
@@ -481,6 +495,11 @@ class Editor {
   void isearch_search(bool repeat);
   void isearch_add_text(std::wstring_view text);
   void isearch_push();
+  // After a settings reload: searches again when search.case_fold changed
+  // the case sensitivity of the isearch pattern (`before`: the old value).
+  void isearch_after_case_fold_change(CaseFold before);
+  // Whether step `s` is case-sensitive now (M-c, else search.case_fold).
+  bool isearch_sensitive(const IsearchStep& s) const;
   // Ends isearch: the search string is kept for the next empty C-s; `abort`
   // puts point back.
   void isearch_end(bool abort);
@@ -490,6 +509,11 @@ class Editor {
   void query_replace_next(size_t from, bool not_empty_at_from, bool show = true);
   void query_replace_finish(std::wstring message);
   bool query_replace_replace_current();
+  // Counts `n` replacements of this run in the undo group of the current
+  // command (S3).
+  void query_replace_count(size_t n);
+  // The replacements of this run that still stand (not undone) (S3).
+  size_t query_replace_standing() const;
   // The match `m` widened to cluster boundaries.
   SearchMatch snap_match(const SearchMatch& m) const;
   // Runs a key's binding with the pending prefix argument; then a command

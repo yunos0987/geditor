@@ -283,6 +283,27 @@ TEST(win_font_colour_failure_falls_back_to_one_colour) {
   CHECK(m.color_cluster(m.cluster(L"\U0001F600", true)) != nullptr);
 }
 
+TEST(win_font_colour_fault_while_colour_failed_is_used_up) {
+  // Deferred fix T1: 'GFLT' "color" sent while colour has failed already
+  // leaves nothing armed; the colour that the next font (init) tries again
+  // works (HEAD 6064002 failed it then).
+  Factory f;
+  if (f.get() == nullptr) return;
+  TextMeasurer m;
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  const TextMeasurer::ClusterGlyphs& g = m.cluster(L"\U0001F600", true);
+  CHECK(m.color_cluster(g) != nullptr);
+  m.fail_next_color();
+  CHECK(m.color_cluster(g) == nullptr);
+  CHECK(m.color_failed());
+  m.fail_next_color();  // colour has failed already
+  CHECK(m.color_cluster(g) == nullptr);
+  CHECK(m.init(f.get(), FontSpec{}, nullptr));
+  CHECK(!m.color_failed());
+  CHECK(m.color_cluster(m.cluster(L"\U0001F600", true)) != nullptr);
+  CHECK(!m.color_failed());
+}
+
 TEST(win_font_text_scale_steps_change_the_cell_size) {
   // [C9]: each step is 1.2 times the size; Consolas cells scale with it.
   Factory f;

@@ -36,9 +36,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
   MSG msg{};
   while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-    if (window->pre_translate(msg)) continue;
-    TranslateMessage(&msg);
-    DispatchMessageW(&msg);
+    if (!window->pre_translate(msg)) {
+      TranslateMessage(&msg);
+      DispatchMessageW(&msg);
+    }
+    window->run_held_keys();
   }
   delete window;
   return static_cast<int>(msg.wParam);

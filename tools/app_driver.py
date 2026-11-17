@@ -450,6 +450,7 @@ class App:
     def answer(self, label: str) -> bool:
         """Presses the button `label` of the pending question; False when
         geditor rejects it (no such button, or no question)."""
+        note_action()
         return copy_data(self.hwnd, COPYDATA_ANSWER, label) == 1
 
     def clipboard(self) -> str | None:
@@ -458,6 +459,7 @@ class App:
         return s.get("clipboard_text") if s.get("clipboard") == "text" else None
 
     def set_clipboard(self, text: str) -> bool:
+        note_action()
         return copy_data(self.hwnd, COPYDATA_CLIPBOARD_WRITE, text) == 1
 
     def fault(self, what: str) -> bool:
@@ -483,6 +485,7 @@ class App:
 
     def menu_command(self, item_id: int):
         """Posts the WM_COMMAND that the menu sends for item `item_id`."""
+        note_action()
         user32.PostMessageW(self.hwnd, WM_COMMAND, item_id, 0)
 
     def cell_point(self, row: int, column: int, state: dict | None = None) -> tuple[int, int]:
@@ -495,6 +498,7 @@ class App:
 
     def mouse(self, message: int, x: int, y: int, flags: int = 0, pause_s: float = 0.05):
         """Posts a mouse message at client pixels (x, y) with MK_* `flags`."""
+        note_action()
         user32.PostMessageW(self.hwnd, message, flags, ((y & 0xFFFF) << 16) | (x & 0xFFFF))
         time.sleep(pause_s)
 
@@ -513,6 +517,7 @@ class App:
         """WM_MOUSEWHEEL (lParam in screen pixels)."""
         point = wt.POINT(x, y)
         user32.ClientToScreen(self.hwnd, ctypes.byref(point))
+        note_action()
         user32.PostMessageW(self.hwnd, WM_MOUSEWHEEL, (delta & 0xFFFF) << 16,
                             ((point.y & 0xFFFF) << 16) | (point.x & 0xFFFF))
         time.sleep(0.1)
@@ -526,6 +531,7 @@ class App:
     def context_menu(self, x: int | None = None, y: int | None = None):
         """WM_CONTEXTMENU at client pixels (x, y), or from the keyboard
         (lParam -1) when x is None."""
+        note_action()
         if x is None:
             user32.PostMessageW(self.hwnd, WM_CONTEXTMENU, self.hwnd, -1)
             return
@@ -616,6 +622,7 @@ class App:
         for key in notation.split():
             if self.mode == "sendinput":
                 self._require_foreground()
+                note_action()
                 _send(_chord_inputs(key))
             else:
                 self._post_key(key)
@@ -635,6 +642,7 @@ class App:
         self._post_vk(vk, [vk] if vk in (VK_MENU, VK_CONTROL, VK_SHIFT) else [])
 
     def _post_vk(self, vk: int, mods: list):
+        note_action()
         if self.headless:
             self._post_vk_headless(vk, mods)
             return
@@ -681,6 +689,7 @@ class App:
             self.post_chars(text, WM_CHAR, pause_s)
             return
         self._require_foreground()
+        note_action()
         inputs = []
         for unit in struct.unpack(f"<{len(text.encode('utf-16-le')) // 2}H",
                                   text.encode("utf-16-le")):
@@ -692,11 +701,13 @@ class App:
     def post_chars(self, text: str, message: int = WM_CHAR, pause_s: float = 0.05):
         """Posts WM_CHAR (or WM_IME_CHAR) messages, one per UTF-16 unit."""
         data = text.encode("utf-16-le")
+        note_action()
         for (unit,) in struct.iter_unpack("<H", data):
             user32.PostMessageW(self.hwnd, message, unit, 1)
         time.sleep(pause_s)
 
     def close(self):
+        note_action()
         user32.PostMessageW(self.hwnd, WM_CLOSE, 0, 0)
 
     # ---- screen ----
@@ -1095,7 +1106,9 @@ def _sample_foreground(exe: str, interval_s: float):
                     if not window:
                         break
                     geditors.append(pid_of(window))
-                clipboard["changes"].append([round(time.monotonic() - start, 3), sequence, owner_pid, geditors])
+                now_change = time.monotonic()
+                clipboard["changes"].append([round(now_change - start, 3), sequence, owner_pid, geditors,
+                                             now_change])
                 with lock:
                     pending.update(p for p in [owner_pid, *geditors] if p and p not in images)
             # Every headless geditor window (a "geditor.main" tool window)
@@ -1162,29 +1175,64 @@ def _sample_foreground(exe: str, interval_s: float):
     result["menus"] = [[t, hwnd, pid] for (hwnd, pid), t in menus.items() if images.get(pid) == target]
     result["menu_scans"] = dialog_scans["menu_scans"]
     result["menus_any_process"] = len(menus)
+    # "at": time.monotonic() of the change (one clock for every process of
+    # the PC), to compare with the driver's ACTIONS (T3).
     result["clipboard_changes"] = [
         {"time": t, "sequence": seq, "owner_pid": pid, "owner_image": images.get(pid, "") if pid else "",
-         "geditor_alive": any(images.get(p) == target for p in geditors)}
-        for t, seq, pid, geditors in clipboard["changes"]]
+         "geditor_alive": any(images.get(p) == target for p in geditors), "at": at}
+        for t, seq, pid, geditors, at in clipboard["changes"]]
     result["foreground_windows"] = len(foregrounds)
     result["geditor_windows_seen"] = len(seen)
     print(json.dumps(result), flush=True)
 
 
-def clipboard_verdict(changes: list, target: str) -> tuple[str, str]:
+def clipboard_verdict(changes: list, target: str, actions: list | None = None,
+                      window_s: float = 1.0) -> tuple[str, str]:
     """("PASS" | "FAIL" | "INFO", evidence) for the changes of the real
     clipboard that the sampler saw (clipboard_changes; `target` is the
     normcased path of the geditor exe). FAIL when a geditor process owns the
-    new clipboard, or when the owner cannot be identified while a geditor of
-    the run was open; INFO when only other programs (the user) wrote it."""
+    new clipboard, or when the owner cannot be identified (no owner window,
+    or a process that cannot be opened) while a geditor of the run was open
+    and the change came within `window_s` after input that the run sent to a
+    geditor (`actions`: time.monotonic() of each, as in ACTIONS; deferred fix
+    T3). INFO otherwise: other programs (the user) wrote it. Without
+    `actions` (or a change without "at") every unknown owner while a geditor
+    was open counts as near an action."""
+    import bisect
     if not changes:
         return "PASS", "no change of the clipboard sequence number"
-    bad = [c for c in changes if c["owner_image"] == target or (not c["owner_image"] and c["geditor_alive"])]
+    ordered = sorted(actions) if actions is not None else None
+
+    def near_an_action(change) -> bool:
+        if ordered is None or change.get("at") is None:
+            return True
+        at = change["at"]
+        # An action in [at - window_s, at + 0.05] (the sampler sees a change
+        # up to its interval later; 0.05 s for the two processes' reads).
+        i = bisect.bisect_left(ordered, at - window_s)
+        return i < len(ordered) and ordered[i] <= at + 0.05
+
+    unknown = [c for c in changes if not c["owner_image"] and c["geditor_alive"]]
+    bad = [c for c in changes if c["owner_image"] == target or
+           (not c["owner_image"] and c["geditor_alive"] and near_an_action(c))]
     owners = sorted({os.path.basename(c["owner_image"]) or f"pid {c['owner_pid']} (unknown)" for c in changes})
     if bad:
-        return "FAIL", f"{len(bad)} of {len(changes)} changes by geditor or by an unknown owner while geditor " \
-                       f"was open: {bad[:5]}"
-    return "INFO", f"{len(changes)} changes by other programs: {', '.join(owners)}"
+        return "FAIL", f"{len(bad)} of {len(changes)} changes by geditor, or by an unknown owner within " \
+                       f"{window_s} s after input sent to a geditor of the run: {bad[:5]}"
+    apart = f"; {len(unknown)} by an unknown owner while geditor was open but not within {window_s} s after " \
+            f"input sent to it" if unknown else ""
+    return "INFO", f"{len(changes)} changes by other programs: {', '.join(owners)}{apart}"
+
+
+# time.monotonic() of each input or request that an App sent to its geditor
+# (keys, characters, mouse, menu commands, clipboard writes, answers):
+# clipboard_verdict asks whether a change of the real clipboard came right
+# after one of them (deferred fix T3).
+ACTIONS: list[float] = []
+
+
+def note_action():
+    ACTIONS.append(time.monotonic())
 
 
 user32.GetClipboardOwner.restype = wt.HWND

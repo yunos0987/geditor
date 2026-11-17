@@ -143,7 +143,8 @@ class TextMeasurer {
   bool color_failed() const { return color_failed_; }
   // Checks ('GFLT' "color"): the next colour translation fails as if
   // TranslateColorGlyphRun had refused it; the layers looked up so far are
-  // dropped so that the next colour glyph is translated again.
+  // dropped so that the next colour glyph is translated again. When colour
+  // has failed already, nothing is left armed (deferred fix T1).
   void fail_next_color();
   // True when face `face` is a colour font (IDWriteFontFace2::IsColorFont,
   // asked once per face).

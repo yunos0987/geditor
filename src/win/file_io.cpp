@@ -92,6 +92,24 @@ std::wstring error_text(unsigned long error) {
   }
 }
 
+std::wstring replace_error_text(unsigned long error) {
+  std::wstring what;
+  switch (error) {
+    case ERROR_UNABLE_TO_REMOVE_REPLACED:
+      what = L"Windows could not remove the old file to put the new one in its place";
+      break;
+    case ERROR_UNABLE_TO_MOVE_REPLACEMENT:
+    case ERROR_UNABLE_TO_MOVE_REPLACEMENT_2:
+      what = L"Windows could not move the new file to the name of the old one";
+      break;
+    default:
+      return error_text(error);
+  }
+  return what + L" (Windows error " + std::to_wstring(error) +
+         L"; this can happen when the attributes or the permissions of the file, such as its encryption, cannot "
+         L"be carried over to the new file). Save it under another name with write-file (C-x C-w)";
+}
+
 namespace {
 
 unsigned long long join64(DWORD high, DWORD low) {
@@ -399,7 +417,7 @@ bool save_replace(const std::wstring& target, std::string_view bytes, bool backu
       }
     }
     if (path_exists(temp)) delete_file(temp);
-    step_failed(error, L"replacing the file", e);
+    error = L"replacing the file: " + replace_error_text(e);  // deferred fix F2: 1175 - 1177 in plain words
     error += extra;
     return false;
   }

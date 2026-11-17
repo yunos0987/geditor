@@ -418,6 +418,12 @@ bool Editor::save_to(const std::wstring& path) {
   if (cr_kept > 0) {
     message_ += L"; saved " + std::to_wstring(cr_kept) + (cr_kept == 1 ? L" LF line end" : L" LF line ends") +
                 L" after a CR as CR to keep the lines";
+    // Deferred fix F1: the default line end is the one that reading the
+    // saved file gives (load_file: the most frequent line end), so that the
+    // mode line and new line ends do not change on reopening.
+    size_t counts[3] = {};
+    for (const Eol e : {Eol::kLf, Eol::kCrLf, Eol::kCr}) counts[static_cast<size_t>(e)] = main_.text.eol_count(e);
+    main_.format.eol = default_eol_of(counts, new_file_eol());
   }
   // The new state on disk for the next check.
   FileInfo after;
