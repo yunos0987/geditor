@@ -3,11 +3,12 @@
 // including isearch for a word near the end ([M5-5]), and the deferred
 // items done before M6: loading Shift_JIS / EUC-JP / ISO-2022-JP
 // ("decode"), a backward regexp isearch on a long single line
-// ("backsearch") and <end> on long single lines ("endkey"), and a keyboard
-// macro of 1000 self-inserts run 100 times ("macro", M6).
+// ("backsearch") and <end> on long single lines ("endkey"), a keyboard
+// macro of 1000 self-inserts run 100 times ("macro", M6), and one key at the
+// end of lines of 1K to 1M characters ("longkey", deferred item K1).
 // Not registered in ctest; run the Release build by hand:
 //
-//   build/release/tests/geditor_perf.exe [core] [decode] [backsearch] [endkey] [memory] [macro]
+//   build/release/tests/geditor_perf.exe [core] [decode] [backsearch] [endkey] [memory] [macro] [kill] [longkey]
 //
 // Without arguments every section runs. Exits with 1 when a limit is
 // exceeded.
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -605,6 +607,61 @@ bool kill_section() {
   return report("kill: 40000 kills in a row by macro", ms, kKillLimitMs, "ms") && joined;
 }
 
+// Deferred item K1: the cost of one self-insert key at the end of one long
+// logical line (letters a-z, like "macro"), by line length, in the default
+// settings (wrap "max", 80 columns, in a 120 x 40 window). "key": the time
+// of Editor::handle_key; "frame": the core part of drawing the screen after
+// it (point_view, the mode line and 40 display rows from the top), as
+// "endkey". Medians of `keys` keys after 20 keys of warm-up. Reported only.
+void longkey_section() {
+  struct Case {
+    size_t length;
+    int keys;
+  };
+  const Case cases[] = {{1000, 2000}, {10000, 2000}, {100000, 1000}, {1000000, 200}};
+  for (const Case& c : cases) {
+    std::string text;
+    text.reserve(c.length);
+    for (size_t i = 0; i < c.length; ++i) text += static_cast<char>('a' + i % 26);
+    PerfHost host(&text);
+    geditor::Editor ed(host);
+    ed.request_open(kPath);
+    ed.set_point(ed.buffer().text.length());
+    for (int i = 0; i < 20; ++i) ed.handle_key(geditor::Key{U'x', 0});
+    std::vector<double> key_runs;
+    std::vector<double> frame_runs;
+    size_t cells = 0;
+    for (int i = 0; i < c.keys; ++i) {
+      const auto t0 = Clock::now();
+      ed.handle_key(geditor::Key{static_cast<char32_t>(U'a' + i % 26), 0});
+      key_runs.push_back(ms_since(t0));
+      const auto t1 = Clock::now();
+      const geditor::Editor::PointView view = ed.point_view();
+      const std::wstring mode_line = ed.mode_line();
+      geditor::RowPos pos = ed.top();
+      geditor::DisplayRow row;
+      for (int r = 0; r < 40; ++r) {
+        ed.display_row(pos, 0, ed.text_columns() + 1, &row);
+        cells += row.cells.size();
+        if (!ed.next_row(&pos)) break;
+      }
+      frame_runs.push_back(ms_since(t1));
+      if (i + 1 == c.keys) {
+        std::printf("  %zuK line: length %zu point %zu, row %zu column %d, top row %zu, %ls\n", c.length / 1000,
+                    ed.buffer().text.length(), ed.buffer().point, view.pos.row, view.column, ed.top().row,
+                    mode_line.c_str());
+      }
+    }
+    char name[64];
+    std::snprintf(name, sizeof(name), "longkey: %zuK line, key", c.length / 1000);
+    std::printf("%-40s %10.4f ms (mean %.4f, %d keys)\n", name, median(key_runs),
+                std::accumulate(key_runs.begin(), key_runs.end(), 0.0) / static_cast<double>(key_runs.size()),
+                c.keys);
+    std::snprintf(name, sizeof(name), "longkey: %zuK line, frame", c.length / 1000);
+    std::printf("%-40s %10.4f ms (%zu cells drawn in all)\n", name, median(frame_runs), cells);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -616,6 +673,7 @@ int main(int argc, char** argv) {
   bool memory = all;
   bool macro = all;
   bool kill = all;
+  bool longkey = all;
   size_t max_line = 0;
   for (int i = 1; i < argc; ++i) {
     const std::string_view a = argv[i];
@@ -633,10 +691,13 @@ int main(int argc, char** argv) {
       macro = true;
     } else if (a == "kill") {
       kill = true;
+    } else if (a == "longkey") {
+      longkey = true;
     } else if (a.starts_with("max-line=")) {
       max_line = std::strtoull(argv[i] + 9, nullptr, 10);
     } else {
-      std::printf("unknown argument: %s (core, decode, backsearch, endkey, memory, macro, kill, max-line=N)\n",
+      std::printf("unknown argument: %s (core, decode, backsearch, endkey, memory, macro, kill, longkey, "
+                  "max-line=N)\n",
                   argv[i]);
       return 2;
     }
@@ -648,6 +709,7 @@ int main(int argc, char** argv) {
   if (endkey) ok &= endkey_section();
   if (macro) ok &= macro_section();
   if (kill) ok &= kill_section();
+  if (longkey) longkey_section();
   if (!core) {
     std::printf("%s\n", ok ? "all limits met" : "LIMIT EXCEEDED");
     return ok ? 0 : 1;

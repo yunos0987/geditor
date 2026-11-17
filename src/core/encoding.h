@@ -105,6 +105,18 @@ DecodedText decode_detected(std::string_view bytes);
 // small inputs cross many stretch boundaries.
 void set_code_page_stretch_for_testing(size_t bytes);
 
+// Deferred item K2: Shift_JIS and EUC-JP text is compared with the bytes it
+// was read from, and written when saved, stretch by stretch (stretches that
+// end after a line end, of the size above), without a second copy of the
+// whole text or of its bytes. From a stretch that does not give the same
+// bytes back, reading collects the bytes of the rest as the whole-file call
+// writes them; saving converts the whole text as before when a stretch does
+// not write or come back the same; a failed conversion call sends either
+// through the whole-file conversions (see encoding.cpp). Tests only: true
+// makes both use the whole-file conversions alone, so that both can be
+// compared.
+void set_code_page_whole_conversions_for_testing(bool whole);
+
 // The encoding names of docs/PLAN.md 2 ("utf-8", "utf-8-bom", "utf-16le",
 // "utf-16le-bom", "utf-16be", "utf-16be-bom", "shift_jis", "euc-jp",
 // "iso-2022-jp"): sets codec and bom; false for any other name.

@@ -4344,6 +4344,43 @@ def m6_single_line(folder: pathlib.Path) -> pathlib.Path:
     return path
 
 
+# A macro run that is still going long after it starts and keeps its text
+# short, for the checks that post input during a run and stop it with C-g.
+# A run that grows one line fast (C-u 100000 of 10 characters) is over in
+# about 1 s since the deferred performance item K1 (2026-11-17), so those
+# checks no longer rely on how fast a run grows: 499 letters are typed and
+# 498 of them deleted, then RET (998 events that leave "a\n"). On the
+# development PC it made about 225 to 350 runs a second (2026-11-17, with
+# both the exe before K1 and after it), so C-u 30000 of it lasts about 85 to
+# 130 s and is less than 2% done 1 s in; its text never exceeds
+# 2 + 2 * 30000 = 60002 characters, so the state's text (64K characters)
+# holds all of it wherever the run stops.
+SLOW_MACRO_LETTERS = ("abcdefghij" * 50)[:499]
+SLOW_MACRO_EVENTS = 998
+SLOW_MACRO_RUNS = 30000
+SLOW_MACRO_FULL = 2 + 2 * SLOW_MACRO_RUNS  # the length after the recording and the whole run
+
+
+def record_slow_macro(app) -> None:
+    """Records the slow macro in an empty buffer (which then holds "a\\n")."""
+    app.keys("C-x (")
+    app.type(SLOW_MACRO_LETTERS, pause_s=0.002)
+    app.keys(" ".join(["DEL"] * (len(SLOW_MACRO_LETTERS) - 1)), pause_s=0.002)
+    app.keys("RET")
+    app.keys("C-x )")
+    wait_state(app, lambda s: s.get("macro_events") == str(SLOW_MACRO_EVENTS), 10.0)
+
+
+def slow_macro_text(text: str) -> bool:
+    """`text` is what the recording and a run of the slow macro stopped
+    anywhere leave: "a\\n" pairs, then the letters of an unfinished run (a
+    prefix of SLOW_MACRO_LETTERS, being typed or deleted)."""
+    i = 0
+    while text.startswith("a\n", i):
+        i += 2
+    return i >= 2 and SLOW_MACRO_LETTERS.startswith(text[i:])
+
+
 def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     """The deferred fixes after M6 that need the real app (headless): E2 (a
     missing font family reported once the font is in use, also when a font
@@ -4387,15 +4424,13 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         app.kill()
 
     # E4: a key typed during a long run and then C-g: the run stops at once,
-    # the key before the C-g is dropped with it, a key after it runs.
+    # the key before the C-g is dropped with it, a key after it runs. The
+    # slow macro (record_slow_macro) is still running 1 s after it starts.
     app = d.App(exe, [str(work / "long_run.txt")], cwd=work, settings=settings, height=300)
     try:
         wait_state(app, lambda s: s.get("message") == "(New file)")
-        app.keys("C-x (")
-        app.type("abcdefghij")
-        app.keys("C-x )")
-        wait_state(app, lambda s: s.get("macro_events") == "10")
-        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)  # 1,000,000 characters uninterrupted
+        record_slow_macro(app)
+        app.keys(f"C-u {' '.join(str(SLOW_MACRO_RUNS))} C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.keys("z")  # typed during the run, before the C-g
         app.keys("C-g")
@@ -4407,11 +4442,12 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         length = int(after.get("length", "0"))
         check("[deferred E4] during a long macro run, z then C-g then q: the run stops at once, z is dropped "
               "with the C-g, q is typed after the run",
-              "q" in text and "z" not in text and text.endswith("q") and 10 < length < 1_000_010 and
-              stop_s < 2.0,
-              f"q typed {stop_s:.2f} s after the C-g was posted, length {length} (the whole run would insert "
-              f"1,000,000 characters), text ends {text[-12:]!r}, 'z' in the text: {'z' in text} "
-              "(HEAD 6064002 saw only the first waiting key, z, and ran to the end)")
+              text.endswith("q") and text.count("q") == 1 and "z" not in text and slow_macro_text(text[:-1]) and
+              2 < length - 1 < SLOW_MACRO_FULL and stop_s < 2.0,
+              f"q typed {stop_s:.2f} s after the C-g was posted; length {length - 1} before q, the whole run "
+              f"gives {SLOW_MACRO_FULL} (so the run was still going when z and C-g came); text ends "
+              f"{text[-12:]!r}, 'z' in the text: {'z' in text}, the text before q is the run's: "
+              f"{slow_macro_text(text[:-1])} (HEAD 6064002 saw only the first waiting key, z, and ran to the end)")
     finally:
         app.kill()
 
@@ -4430,13 +4466,18 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         app.keys("C-x )")
         wait_state(app, lambda s: s.get("macro_events") == "11")
         x, y = app.cell_point(0, 0)
-        runs = 50000
+        # The input comes 0.3 s into the run. On the development PC about 15%
+        # of a run of 100000 was done by then (2026-11-17), so 200000 leaves
+        # more than 90% of the run after it.
+        runs = 200000
         final = 23 + 11 + runs * 11 + 1  # the file, the recording, the run, the Z
         app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
         time.sleep(0.3)
-        during = int(app.state().get("length", "0"))
         app.click(x, y)
         app.keys("Z")
+        # Read after the click and Z were posted: still short of the run's
+        # end, so they waited during the run.
+        during = int(app.state().get("length", "0"))
         done = wait_state(app, lambda s: s.get("length") == str(final), 120.0)
         # Every line after "first line" / "second line" is "abcdefghij\n"
         # (11 units); the top line's start is known without the text (the
@@ -4447,7 +4488,8 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         check("[deferred R1] during a long macro run, a click on the first cell of the top row and then Z: Z is "
               "inserted where the click put point",
               done.get("length") == str(final) and during < final - 1 and z_at == line_start,
-              f"length {during} when the click was posted (final {final}); Z at {z_at} (point - 1), start of the "
+              f"length {during} just after the click and Z were posted (final {final}); Z at {z_at} (point - 1), "
+              f"start of the "
               f"top line {top} at {line_start} (before R1 the held Z ran before the click: Z at the end, "
               f"{final - 2} before the click moved point)")
     finally:
@@ -4459,12 +4501,9 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     app = d.App(exe, [str(work / "long_run_click.txt")], cwd=work, settings=settings, height=300)
     try:
         wait_state(app, lambda s: s.get("message") == "(New file)")
-        app.keys("C-x (")
-        app.type("abcdefghij")
-        app.keys("C-x )")
-        wait_state(app, lambda s: s.get("macro_events") == "10")
+        record_slow_macro(app)
         x, y = app.cell_point(0, 0)
-        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)
+        app.keys(f"C-u {' '.join(str(SLOW_MACRO_RUNS))} C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.click(x, y)  # would put point at the start of the text
         app.keys("C-g")
@@ -4477,9 +4516,10 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         check("[deferred R1] during a long macro run, a click, C-g and q: the run stops at once, the click is "
               "dropped with the C-g, q is typed after the run where it stopped",
               text.endswith("q") and text.count("q") == 1 and not text.startswith("q") and
-              10 < length < 1_000_010 and stop_s < 2.0,
-              f"q typed {stop_s:.2f} s after the C-g was posted, length {length}, text starts {text[:6]!r} ends "
-              f"{text[-6:]!r} (a click applied would have put q at the start)")
+              slow_macro_text(text[:-1]) and 2 < length - 1 < SLOW_MACRO_FULL and stop_s < 2.0,
+              f"q typed {stop_s:.2f} s after the C-g was posted; length {length - 1} before q, the whole run "
+              f"gives {SLOW_MACRO_FULL} (so the run was still going when the click and C-g came); text starts "
+              f"{text[:6]!r} ends {text[-6:]!r} (a click applied would have put q at the start)")
     finally:
         app.kill()
 
@@ -4503,7 +4543,9 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     # not at once.
     app = macro_app("pending_timer")
     try:
-        runs = 60000
+        # 12.7 s of run on the development PC with the state read every 50 ms
+        # (2026-11-17), well over the 1 s of the timer.
+        runs = 200000
         final = 23 + 11 + runs * 11
         start = time.perf_counter()
         app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
@@ -4539,14 +4581,14 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     # after it is dropped, as keys during a waiting question are.
     app = macro_app("menu_then_key")
     try:
-        runs = 30000
+        runs = 200000  # the input comes 0.3 s in, when less than 10% is done (see [deferred R1] above)
         final = 23 + 11 + runs * 11
         x, y = app.cell_point(0, 2)
         app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
         time.sleep(0.3)
-        during = int(app.state().get("length", "0"))
         app.right_click(x, y)
         app.keys("Z")
+        during = int(app.state().get("length", "0"))  # after both were posted
         question = app.wait_question(120.0)
         answered = app.answer("Cancel") if question else False
         time.sleep(1.0)
@@ -4555,7 +4597,8 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
               "run, and Z (held after the click) is not typed into the buffer after Cancel",
               question is not None and question.get("question") == "context_menu" and answered and
               during < final and after.get("length") == str(final),
-              f"length {during} when the click was posted; question {question and question.get('question')}; "
+              f"length {during} just after the click and Z were posted; question "
+              f"{question and question.get('question')}; "
               f"answered Cancel {answered}; length after {after.get('length')} (the run alone gives {final}; "
               f"{final + 1} means Z was typed)")
     finally:
@@ -4588,19 +4631,20 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     # queue with the key after it: both run after the run, in their order.
     app = macro_app("nc_button_key")
     try:
-        runs = 30000
+        runs = 200000  # the input comes 0.3 s in, when less than 10% is done (see [deferred R1] above)
         final = 23 + 11 + runs * 11
         app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
         time.sleep(0.3)
-        during = int(app.state().get("length", "0"))
         app.mouse(0x00A1, 10, 10, 0)  # WM_NCLBUTTONDOWN, wParam HTNOWHERE
         app.mouse(0x00A2, 10, 10, 0)  # WM_NCLBUTTONUP
         app.keys("Z")
+        during = int(app.state().get("length", "0"))  # after the buttons and Z were posted
         done = wait_state(app, lambda s: s.get("length") == str(final + 1), 120.0)
         check("[deferred P1] during a long macro run, a non-client button press and release and then Z: the run "
               "goes to its end and Z is typed after it",
               during < final and done.get("length") == str(final + 1) and int(done.get("point", "0")) == final + 1,
-              f"length {during} when the button was posted; length after {done.get('length')} (want {final + 1}), "
+              f"length {during} just after the buttons and Z were posted; length after {done.get('length')} "
+              f"(want {final + 1}), "
               f"point {done.get('point')}")
     finally:
         app.kill()
@@ -4625,13 +4669,13 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         app.fault("menu")
         apply_settings(bar_settings, {"menu_bar": True})
         no_bar = app.state()
-        runs = 30000
+        runs = 200000  # the input comes 0.3 s in, when less than 10% is done (see [deferred R1] above)
         final = int(no_bar.get("length", "0")) + runs * 11
         app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
         time.sleep(0.3)
-        during = int(app.state().get("length", "0"))
         app.keys("<f10>")
         app.keys("Z")
+        during = int(app.state().get("length", "0"))  # after F10 and Z were posted
         done = wait_state(app, lambda s: s.get("length") == str(final + 1), 120.0)
         time.sleep(0.3)
         after = app.state()
@@ -4639,8 +4683,8 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
               "so Z is typed after the run",
               no_bar.get("menu_bar") == "0" and during < final and after.get("length") == str(final + 1) and
               after.get("question", "none") == "none",
-              f"menu_bar {no_bar.get('menu_bar')} message {no_bar.get('message')!r}; length {during} when F10 was "
-              f"posted; length after {after.get('length')} (want {final + 1}); message {after.get('message')!r}")
+              f"menu_bar {no_bar.get('menu_bar')} message {no_bar.get('message')!r}; length {during} just after F10 "
+              f"and Z were posted; length after {after.get('length')} (want {final + 1}); message {after.get('message')!r}")
     finally:
         app.kill()
 
@@ -4655,7 +4699,10 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         app.mouse(d.WM_LBUTTONDOWN, x0, y0, d.MK_LBUTTON)
         app.mouse(0x0200, x1, y1, d.MK_LBUTTON)  # WM_MOUSEMOVE
         pressed = wait_state(app, lambda s: s.get("dragging") == "1")
-        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)
+        # C-u 1000000 of 11 events; the release and C-g come 1 s in, when
+        # about 2% of it was done on the development PC (2026-11-17).
+        full = 23 + 11 + 1000000 * 11
+        app.keys("C-u 1 0 0 0 0 0 0 C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.mouse(d.WM_LBUTTONUP, x1, y1, 0)
         app.keys("C-g")
@@ -4664,9 +4711,11 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         after = app.state()
         check("[deferred Q3] a drag started before a run, its release and C-g during the run: the run stops and "
               "the drag ends (dragging 0)",
-              pressed.get("dragging") == "1" and stopped.get("message") == "Quit" and after.get("dragging") == "0",
-              f"dragging before the run {pressed.get('dragging')}; message {stopped.get('message')!r}; dragging "
-              f"after the stop {after.get('dragging')} (mouse capture is not in the state)")
+              pressed.get("dragging") == "1" and stopped.get("message") == "Quit" and after.get("dragging") == "0" and
+              int(stopped.get("length", "0")) < full,
+              f"dragging before the run {pressed.get('dragging')}; message {stopped.get('message')!r}, length "
+              f"{stopped.get('length')} (the whole run gives {full}, so it was still going); dragging after the "
+              f"stop {after.get('dragging')} (mouse capture is not in the state)")
     finally:
         app.kill()
 
@@ -4771,12 +4820,9 @@ def run_m6_checks(exe: pathlib.Path, out: pathlib.Path):
     app = d.App(exe, [str(work / "m6_long_run.txt")], cwd=work, settings=settings, height=400)
     try:
         wait_state(app, lambda s: s.get("message") == "(New file)")
-        app.keys("C-x (")
-        app.type("abcdefghij")
-        app.keys("C-x )")
-        wait_state(app, lambda s: s.get("macro_events") == "10")
+        record_slow_macro(app)  # still running 1 s after it starts (see record_slow_macro)
         start = time.perf_counter()
-        app.keys("C-u 1 0 0 0 0 0 C-x e", pause_s=0.02)  # 1,000,000 characters uninterrupted
+        app.keys(f"C-u {' '.join(str(SLOW_MACRO_RUNS))} C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.keys("C-g")
         posted = time.perf_counter()
@@ -4784,14 +4830,15 @@ def run_m6_checks(exe: pathlib.Path, out: pathlib.Path):
         stop_s = time.perf_counter() - posted
         length = int(stopped.get("length", "0"))
         app.keys("C-/")
-        undone = wait_state(app, lambda s: s.get("length") == "10", 10.0)
-        check("[M6 R2] a posted C-g stops a long macro run (C-u 100000 of 10 characters) at once with Quit; "
-              "one C-/ takes the whole stopped run back",
-              stopped.get("message") == "Quit" and 10 < length < 1_000_010 and stop_s < 2.0 and
-              undone.get("length") == "10" and stopped.get("macro_recording") == "0",
-              f"stopped {stop_s:.2f} s after the C-g ({time.perf_counter() - start:.1f} s in all; the whole run "
-              f"would insert 1,000,000 characters), length when stopped={length}, message="
-              f"{stopped.get('message')!r}, length after C-/={undone.get('length')}")
+        undone = wait_state(app, lambda s: s.get("length") == "2", 10.0)
+        check(f"[M6 R2] a posted C-g stops a long macro run (C-u {SLOW_MACRO_RUNS} of {SLOW_MACRO_EVENTS} events) "
+              "at once with Quit; one C-/ takes the whole stopped run back",
+              stopped.get("message") == "Quit" and 2 < length < SLOW_MACRO_FULL and stop_s < 2.0 and
+              undone.get("text") == "a\n" and stopped.get("macro_recording") == "0",
+              f"stopped {stop_s:.2f} s after the C-g ({time.perf_counter() - start:.1f} s in all); length when "
+              f"stopped={length}, the whole run gives {SLOW_MACRO_FULL} (so it was still going when C-g came); "
+              f"message={stopped.get('message')!r}; text after C-/={undone.get('text')!r} (want 'a\\n', the text "
+              f"before the run)")
     finally:
         app.kill()
 

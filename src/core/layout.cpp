@@ -213,10 +213,27 @@ void WrapLayout::note_wrap_edit(size_t offset) {
   }
 }
 
+// At most kMaxLineCaches of each kind (lines below kCheckpointInterval, and
+// lines at or above it): the least recently used of the new line's kind
+// makes room (layout.h). Not inlined into cache_for (retry 1 of K1: inlined,
+// it made the long walks that call cache_for 6-8% slower, e.g. <end> on a
+// 100 MB line, with the same work; measured, the cause in the generated
+// code was not looked into).
+__declspec(noinline) void WrapLayout::make_room(bool long_line) const {
+  auto is_long = [](const LineCache& c) { return c.end - c.start >= kCheckpointInterval; };
+  const auto same_kind = [&](const LineCache& c) { return is_long(c) == long_line; };
+  if (static_cast<size_t>(std::count_if(caches_.begin(), caches_.end(), same_kind)) < kMaxLineCaches) return;
+  auto oldest = caches_.end();
+  for (auto it = caches_.begin(); it != caches_.end(); ++it) {
+    if (same_kind(*it) && (oldest == caches_.end() || it->used < oldest->used)) oldest = it;
+  }
+  caches_.erase(oldest);
+}
+
 WrapLayout::LineCache* WrapLayout::cache_for(const PieceTree& tree, size_t line) const {
   const size_t start = tree.line_start(line);
   const size_t end = tree.line_end(line);
-  if (end - start < kCheckpointInterval) return nullptr;
+  if (end - start < min_cached_line_) return nullptr;
   for (LineCache& c : caches_) {
     if (c.line != line) continue;
     if (c.start != start) {
@@ -229,11 +246,7 @@ WrapLayout::LineCache* WrapLayout::cache_for(const PieceTree& tree, size_t line)
     c.used = ++clock_;
     return &c;
   }
-  if (caches_.size() >= kMaxLineCaches) {
-    auto oldest = std::min_element(caches_.begin(), caches_.end(),
-                                   [](const LineCache& a, const LineCache& b) { return a.used < b.used; });
-    caches_.erase(oldest);
-  }
+  make_room(end - start >= kCheckpointInterval);
   LineCache c;
   c.line = line;
   c.start = start;
@@ -326,15 +339,18 @@ WrapLayout::State WrapLayout::line_start_state(const PieceTree& tree, size_t lin
 WrapLayout::State WrapLayout::seek(const PieceTree& tree, size_t line, LineCache* cache, size_t row,
                                    int column) const {
   if (cache == nullptr) return line_start_state(tree, line);
-  // States are in increasing (row, column) order: the last one not after
-  // (row, column).
-  auto before = [](const std::pair<size_t, int>& key, const State& s) {
-    return key.first != s.row ? key.first < s.row : key.second < s.column;
+  // States are in increasing (row, column) order: the last one strictly
+  // before (row, column) (else the line start). Not one at (row, column)
+  // itself: a zero-width cluster just before such a state is at that column
+  // too, and a walk from there would miss it (row_chars from that column,
+  // offset_at at that column; retry 1 of K1).
+  auto before = [](const State& s, const std::pair<size_t, int>& key) {
+    return s.row != key.first ? s.row < key.first : s.column < key.second;
   };
   const std::pair<size_t, int> key{row, column};
-  const auto it = std::upper_bound(cache->states.begin(), cache->states.end(), key, before);
+  const auto it = std::lower_bound(cache->states.begin(), cache->states.end(), key, before);
   const State found = it == cache->states.begin() ? cache->states.front() : *(it - 1);
-  if (cache->has_break && !before(key, cache->last_break) && cache->last_break.offset > found.offset) {
+  if (cache->has_break && before(cache->last_break, key) && cache->last_break.offset > found.offset) {
     return cache->last_break;
   }
   return found;
@@ -583,9 +599,22 @@ size_t WrapLayout::offset_at(const PieceTree& tree, size_t line, size_t row, int
   });
   if (result != kNone) return result;
   if (!next_row_reached) return line_end;
-  // Past the end of a row that continues on the next one: its last cluster.
+  // Past the end of a row that continues on the next one: its last cluster
+  // with cells (zero-width clusters after it are passed over).
   if (last_base != kNone) return last_base;
-  return std::max(tree.line_start(line), prev_cluster_offset(tree, from.offset));
+  // The walk started inside the row (a recorded state or the last row
+  // break) after its last cluster with cells: look back for it, as a walk
+  // from the line start finds it (retry 1 of K1: before, the cluster just
+  // before the state was taken, a zero-width one when the row ended in
+  // one). Every row has such a cluster: a row break comes before one.
+  const size_t start = tree.line_start(line);
+  size_t p = from.offset;
+  while (p > start) {
+    p = prev_cluster_offset(tree, p);
+    const Cluster c = cluster_at(tree, p);
+    if (c.first == U'\t' || c.width > 0) return p;
+  }
+  return start;
 }
 
 RowInfo WrapLayout::row_chars(const PieceTree& tree, size_t line, size_t row, int from_column, int to,

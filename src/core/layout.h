@@ -90,6 +90,14 @@ struct RowInfo {
 // segmentation runs only from the recorded state to the rows needed. Edits
 // reported through note_edit keep the states before the edit; any other
 // change of the text (seen through PieceTree::revision) drops them all.
+// Lines of at least kMinCachedLine units (deferred item K1) keep the same
+// cache, which then holds the line start, the last row break walked over
+// and the line end: typing at the end of a line of 10K-64K units walked it
+// from its start three times a key (tests/test_layout_cache.cpp compares
+// it with the walk from the start). Up to 8 lines below kCheckpointInterval
+// and 8 lines at or above it are cached: when a new line needs a cache, the
+// least recently used one of the same kind makes room, so that the medium
+// lines drawn on a screen do not push out the caches of long lines.
 // Runs of lone clusters (grapheme.h lone_cluster_width: most text) that a
 // walk only passes over are placed unit by unit without building clusters,
 // with the same rows, columns and recorded states as the general walk
@@ -97,6 +105,7 @@ struct RowInfo {
 class WrapLayout {
  public:
   static constexpr size_t kCheckpointInterval = 65536;
+  static constexpr size_t kMinCachedLine = 1024;
 
   // Sets the wrap width (0: none) and the tab width; drops the recorded
   // states when either changes.
@@ -153,6 +162,12 @@ class WrapLayout {
   // (for_each_cluster), without the run of lone clusters (walk), so that
   // both can be compared.
   void use_general_walk_for_testing(bool general) { general_walk_ = general; }
+  // Tests only: caches only lines of at least kCheckpointInterval units (as
+  // before kMinCachedLine), so that both can be compared. Drops every cache.
+  void cache_long_lines_only_for_testing(bool only) const {
+    min_cached_line_ = only ? kCheckpointInterval : kMinCachedLine;
+    caches_.clear();
+  }
 
   // Offset where the trailing whitespace (spaces, TABs, U+3000) of `line`
   // starts, on a cluster boundary; the line end when there is none. Kept per
@@ -198,6 +213,8 @@ class WrapLayout {
   void note_wrap_edit(size_t offset);
   // The cache of a long line (nullptr for short lines).
   LineCache* cache_for(const PieceTree& tree, size_t line) const;
+  // Drops the least recently used cache of a kind that is full.
+  void make_room(bool long_line) const;
   // The clusters a walk's f returns true for without doing anything: those
   // that end at or before `end` and are placed on a row before `row`.
   struct Skip {
@@ -237,6 +254,7 @@ class WrapLayout {
   mutable std::vector<TrailingCache> trailing_;
   mutable uint64_t clock_ = 0;
   mutable size_t scanned_ = 0;
+  mutable size_t min_cached_line_ = kMinCachedLine;
   bool general_walk_ = false;
 };
 

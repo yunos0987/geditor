@@ -326,6 +326,60 @@ size_t dbcs_unit_length(Codec codec, unsigned char b) {
 // per line or per character).
 constexpr size_t kStretchBytes = 64 * 1024;
 size_t g_stretch_bytes = kStretchBytes;  // set_code_page_stretch_for_testing
+bool g_whole_conversions = false;       // set_code_page_whole_conversions_for_testing
+
+// Deferred item K2: whether the text read from `bytes` (Shift_JIS or
+// EUC-JP: code pages without state between characters, where 0x0A and
+// 0x0D are never part of a double-byte character) gives the same bytes back,
+// written stretch by stretch instead of in one call: stretches of about
+// g_stretch_bytes units that end after a '\n' (or at the end of the text),
+// so that only one stretch of bytes is held at a time (a 100 MB file held
+// another 100 MB for the bytes written back). The bytes of a stretch are
+// what the whole text writes there (no state between characters), so the
+// answer and the bytes are those of one call for the whole text.
+// kDifferent: *back holds the bytes of the whole text (the bytes that
+// matched, then the stretches from the first one that did not), as the call
+// for the whole text writes them. kFailed: a conversion call failed (the
+// caller converts the whole text, as before).
+enum class GiveBack { kSame, kDifferent, kFailed };
+
+GiveBack gives_back_by_stretches(const CodePage& cp, std::wstring_view text, std::string_view bytes,
+                                 std::string* back) {
+  std::string part;
+  bool used = false;
+  bool different = false;
+  size_t b = 0;  // bytes matched (while not different)
+  size_t t = 0;
+  while (t < text.size()) {
+    size_t end = text.size();
+    if (end - t > g_stretch_bytes) {
+      const size_t lf = text.find(L'\n', t + g_stretch_bytes - 1);
+      if (lf != std::wstring_view::npos) end = lf + 1;
+    }
+    const std::wstring_view stretch = text.substr(t, end - t);
+    // Room for the matching bytes (two per unit at most); more is asked
+    // for when that is not enough.
+    const size_t room = std::max<size_t>(1, std::min(2 * stretch.size(), bytes.size() - std::min(b, bytes.size())));
+    if (!wide_to_mb(cp, stretch, &part, &used, different ? 2 * stretch.size() : room)) return GiveBack::kFailed;
+    if (!different && bytes.substr(b, part.size()) == part) {
+      b += part.size();
+    } else {
+      if (!different) {
+        // From here on the bytes of the whole text are collected (as one
+        // call writes them, in a buffer of the size that call gets).
+        back->clear();
+        back->reserve(bytes.size() + 16);
+        back->assign(bytes.substr(0, b));
+        different = true;
+      }
+      back->append(part);
+    }
+    t = end;
+  }
+  if (!different && b == bytes.size()) return GiveBack::kSame;
+  if (!different) back->assign(bytes.substr(0, b));  // the bytes have more than the text gives
+  return GiveBack::kDifferent;
+}
 
 // Lines [from, to) of `bytes` (from a line start to a line end or the end of
 // the file) after their stretch failed: line by line (0x0A is never part of
@@ -580,9 +634,20 @@ void raw_codepage_text(std::string_view bytes, Codec codec, size_t units, RawTex
   std::string back;
   bool used = false;
   // The whole file at once: it reads and gives the same bytes back.
-  const bool whole_back = (read || mb_to_wide(cp, true, bytes, &raw->text, units)) &&
-                          wide_to_mb(cp, raw->text, &back, &used, bytes.size());
-  if (whole_back && back == bytes) return;
+  const bool whole_read = read || mb_to_wide(cp, true, bytes, &raw->text, units);
+  bool whole_back = false;
+  bool compared = false;
+  if (whole_read && codec != Codec::kIso2022Jp && !g_whole_conversions) {
+    // Shift_JIS and EUC-JP: compared stretch by stretch (K2).
+    const GiveBack given = gives_back_by_stretches(cp, raw->text, bytes, &back);
+    if (given == GiveBack::kSame) return;
+    compared = given == GiveBack::kDifferent;
+    whole_back = compared;
+  }
+  if (!compared) {
+    whole_back = whole_read && wide_to_mb(cp, raw->text, &back, &used, bytes.size());
+    if (whole_back && back == bytes) return;
+  }
   // The whole text and its bytes (in `back`) when it read: the text below is
   // usually the same, and then so are its bytes.
   std::wstring whole;
@@ -816,6 +881,10 @@ void set_code_page_stretch_for_testing(size_t bytes) {
   g_stretch_bytes = bytes == 0 ? kStretchBytes : bytes;
 }
 
+void set_code_page_whole_conversions_for_testing(bool whole) {
+  g_whole_conversions = whole;
+}
+
 bool parse_encoding(std::wstring_view name, FileFormat* format) {
   const std::span<const wchar_t* const> names = encoding_names();
   for (size_t i = 0; i < names.size() && i < std::size(kEncodings); ++i) {
@@ -895,10 +964,23 @@ DecodedText decode_detected(std::string_view bytes) {
   Utf8Stop stop;
   if (raw_utf8(bytes, 0, &utf8, &stop)) return finish_decoding(std::move(utf8), encoding);
   // Shift_JIS when code page 932 reads every byte; that read is the text.
+  const size_t utf8_units = utf8.text.size();
+  bool utf8_released = false;
   {
     RawText raw;
     bool broken = false;
-    const size_t units = bytes.size() <= static_cast<size_t>(INT_MAX) ? shift_jis_units(bytes, &broken) : 0;
+    const bool sized = bytes.size() <= static_cast<size_t>(INT_MAX);
+    const size_t units = sized ? shift_jis_units(bytes, &broken) : 0;
+    // The buffer of the UTF-8 text is not held while code page 932 reads
+    // (K2: it was as large as the Shift_JIS text): only the units decoded
+    // before the stop are kept, when they are few (copied cheaply), and the
+    // size that raw_utf8 gave it is set again when UTF-8 goes on. Not when
+    // 932 is not tried (a broken lead byte: UTF-8 goes on at once).
+    if (sized && !broken && stop.units <= utf8_units / 4) {
+      utf8.text.resize(stop.units);
+      utf8.text.shrink_to_fit();
+      utf8_released = true;
+    }
     if (!broken && mb_to_wide(kShiftJisPage, true, bytes, &raw.text, units)) {
       utf8 = RawText();
       encoding.codec = Codec::kShiftJis;
@@ -907,6 +989,7 @@ DecodedText decode_detected(std::string_view bytes) {
       return finish_decoding(std::move(raw), encoding);
     }
   }
+  if (utf8_released) utf8.text.resize(utf8_units);
   raw_utf8_from(bytes, stop.byte, stop.units, &utf8, nullptr);
   DecodedText result = finish_decoding(std::move(utf8), encoding);
   result.detection_failed = true;
@@ -1052,6 +1135,95 @@ std::wstring text_with_line_ends(const PieceTree& tree) {
   return out;
 }
 
+// The text of text_with_line_ends(tree) from tree offset `from` into `out`:
+// about g_stretch_bytes units that end after the line end of a '\n' of the
+// tree (or at the end of the text). Returns the tree offset after it.
+size_t stretch_with_line_ends(const PieceTree& tree, size_t from, std::wstring* out) {
+  out->clear();
+  size_t offset = from;
+  tree.for_each_chunk_eol(from, tree.length() - from, [&](std::wstring_view chunk, Eol eol) {
+    // The '\n' of this chunk at or after which the stretch is long enough.
+    const size_t need = g_stretch_bytes > out->size() ? g_stretch_bytes - out->size() : 0;
+    size_t stop = std::wstring_view::npos;
+    if (eol == Eol::kLf) {
+      if (need <= chunk.size()) stop = chunk.find(L'\n', need > 0 ? need - 1 : 0);
+      const size_t n = stop == std::wstring_view::npos ? chunk.size() : stop + 1;
+      out->append(chunk.substr(0, n));
+      offset += n;
+      return stop == std::wstring_view::npos;
+    }
+    for (size_t i = 0; i < chunk.size(); ++i) {
+      const wchar_t w = chunk[i];
+      ++offset;
+      if (w != L'\n') {
+        out->push_back(w);
+        continue;
+      }
+      if (eol == Eol::kCrLf) {
+        out->append(L"\r\n");
+      } else {
+        out->push_back(L'\r');
+      }
+      if (out->size() >= g_stretch_bytes) return false;
+    }
+    return true;
+  });
+  return offset;
+}
+
+// encode_text for Shift_JIS and EUC-JP stretch by stretch (K2): the
+// stretches of stretch_with_line_ends, first sized (one query each), then
+// written into bytes of that size and read back one by one, so that neither
+// the whole text with its line ends nor its bytes read back are held (a
+// 100 MB text held 433 MB more while it was saved). The bytes are what one
+// call for the whole text writes (no state between characters; a stretch
+// ends after a line end), and the text comes back the same when each
+// stretch does. False (`*bytes` cleared) when a call fails, a character has
+// no bytes or a stretch does not come back the same: then the caller
+// converts the whole text as before, which finds the character.
+bool encode_by_stretches(const PieceTree& tree, const CodePage& cp, std::string* bytes) {
+  const DWORD flags = cp.write_flags ? WC_NO_BEST_FIT_CHARS : 0;
+  BOOL used = FALSE;
+  BOOL* const used_out = cp.write_flags ? &used : nullptr;
+  std::wstring stretch;
+  std::vector<int> sizes;
+  size_t total = 0;
+  for (size_t at = 0; at < tree.length();) {
+    at = stretch_with_line_ends(tree, at, &stretch);
+    if (stretch.size() > static_cast<size_t>(INT_MAX)) return false;
+    const int n = WideCharToMultiByte(cp.id, flags, stretch.data(), static_cast<int>(stretch.size()), nullptr, 0,
+                                      nullptr, used_out);
+    if (n <= 0) return false;
+    sizes.push_back(n);
+    total += static_cast<size_t>(n);
+  }
+  // Room to spare after the last stretch, as wide_to_mb gives (encoding.h:
+  // on 932 a conversion into exactly the size asked can fail).
+  bytes->resize(total + 16);
+  std::wstring back;
+  size_t pos = 0;
+  size_t k = 0;
+  for (size_t at = 0; at < tree.length(); ++k) {
+    at = stretch_with_line_ends(tree, at, &stretch);
+    used = FALSE;
+    const size_t room = std::min(bytes->size() - pos, static_cast<size_t>(INT_MAX));
+    const int written = k < sizes.size() ? WideCharToMultiByte(cp.id, flags, stretch.data(),
+                                                               static_cast<int>(stretch.size()), bytes->data() + pos,
+                                                               static_cast<int>(room), nullptr, used_out)
+                                         : 0;
+    if (written != (k < sizes.size() ? sizes[k] : -1) || used != FALSE ||
+        !mb_to_wide(cp, false, std::string_view(bytes->data() + pos, static_cast<size_t>(written)), &back,
+                    stretch.size()) ||
+        back != stretch) {
+      bytes->clear();
+      return false;
+    }
+    pos += static_cast<size_t>(written);
+  }
+  bytes->resize(pos);
+  return true;
+}
+
 // The units of the character (one, or a surrogate pair) at `index`.
 size_t char_units(std::wstring_view text, size_t index) {
   return is_high_surrogate(text[index]) && index + 1 < text.size() && is_low_surrogate(text[index + 1]) ? 2 : 1;
@@ -1109,6 +1281,13 @@ EncodedText encode_text(const PieceTree& tree, const FileFormat& format) {
       break;
   }
   const CodePage& cp = code_page(format.codec);
+  // Shift_JIS and EUC-JP: stretch by stretch when every stretch writes and
+  // comes back (K2); anything else as before.
+  if (format.codec != Codec::kIso2022Jp && !g_whole_conversions &&
+      tree.length() + tree.eol_count(Eol::kCrLf) <= static_cast<size_t>(INT_MAX) &&
+      encode_by_stretches(tree, cp, &result.bytes)) {
+    return result;
+  }
   const std::wstring text = text_with_line_ends(tree);
   if (text.size() > static_cast<size_t>(INT_MAX)) {
     result.ok = false;
