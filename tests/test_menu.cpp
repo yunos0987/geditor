@@ -582,8 +582,8 @@ TEST(menu_items_take_the_prefix_argument) {
   s.keys(L"RET");
   s.type(L"c");
   CHECK_EQ(s.text(), std::wstring(L"a\nb\nc"));
-  // C-u 2 then Edit > Undo undoes two groups.
-  s.keys(L"C-u 2");
+  // M-2 then Edit > Undo undoes two groups.
+  s.keys(L"M-2");
   run_item(s, L"Edit > Undo");
   CHECK_EQ(s.text(), std::wstring(L"a\nb"));
   CHECK(s.ed.pending_keys_text().empty());

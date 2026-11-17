@@ -136,7 +136,7 @@ TEST(mx_is_refused_inside_the_minibuffer) {
 TEST(mx_passes_the_prefix_argument_through) {
   test::Session s;
   s.load(L"0123456789");
-  s.keys(L"C-u 3 M-x");
+  s.keys(L"M-3 M-x");
   CHECK_EQ(s.ed.pending_keys_text(), std::wstring());
   s.type(L"forward-char");
   s.keys(L"RET");
@@ -172,11 +172,12 @@ constexpr const char* kPlanCommands[] = {
     "set-mark-command", "exchange-point-and-mark", "mark-whole-buffer", "keyboard-quit",
     // delete and kill
     "kill-line", "kill-word", "backward-kill-word", "kill-region", "kill-ring-save", "yank",
+    "backward-kill-line",
     // input
     "newline", "open-line", "insert-tab", "quoted-insert", "transpose-chars", "upcase-word",
     "downcase-word", "capitalize-word",
     // search and replace
-    "isearch-backward", "query-replace-regexp",
+    "isearch-backward", "query-replace-regexp", "isearch-forward-regexp", "isearch-backward-regexp",
     // files
     "find-file", "write-file", "read-only-mode",
     // encodings
@@ -194,11 +195,12 @@ constexpr const char* kPlanCommands[] = {
 
 // Names of Emacs operations that PLAN 4.4 mentions only as not implemented
 // (the Emacs commands of the C-M- letter keys, which are undefined in
-// geditor, and text-scale-adjust): geditor has no such command.
+// geditor, and text-scale-adjust): geditor has no such command. Since
+// 2026-11-17 C-M-s / C-M-r are isearch-forward-regexp /
+// isearch-backward-regexp (kPlanCommands above).
 constexpr const char* kReplacedEmacsOperations[] = {
-    "beginning-of-defun", "exit-recursive-edit", "eval-defun",   "scroll-other-window",
-    "isearch-forward-regexp", "append-next-kill", "forward-sexp", "mark-defun",
-    "isearch-backward-regexp", "text-scale-adjust",
+    "beginning-of-defun", "exit-recursive-edit", "eval-defun", "scroll-other-window", "append-next-kill",
+    "forward-sexp",       "mark-defun",          "text-scale-adjust",
 };
 
 // The keys of the commands that were "not implemented yet" until M6 (D9):

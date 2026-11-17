@@ -520,6 +520,17 @@ void kill_line(Editor& ed) {
   kill_range(ed, b, start, b.point, true);
 }
 
+// C-u (2026-11-17, as Bash's unix-line-discard): kills from the start of the
+// logical line to point, to the clipboard, prepended to a kill in a row (as
+// backward-kill-word). Nothing to kill at the line start is no error (a
+// macro run goes on). A prefix argument is ignored. In the minibuffer the
+// line is the input (the prompt is not text).
+void backward_kill_line(Editor& ed) {
+  Buffer& b = ed.current();
+  const size_t start = b.text.line_start(b.text.line_of(b.point));
+  kill_range(ed, b, start, b.point, true);
+}
+
 // End of the |n|th word from p (start of a word for a negative n).
 size_t words_away(const PieceTree& t, size_t p, int n) {
   for (int i = 0; i < n && p < t.length(); ++i) p = forward_word_end(t, p);
@@ -896,13 +907,24 @@ void menu_bar_open(Editor& ed) {
 
 // ---- Search and replace (M5) ----
 
-// C-s / C-r; with a prefix argument (C-u C-s) a regexp search.
+// C-s / C-r; with a prefix argument (C-u C-s where universal-argument is
+// bound in the settings, M-1 C-s by default) a regexp search.
 void isearch_forward(Editor& ed) {
   ed.isearch_start(true, ed.has_prefix_arg());
 }
 
 void isearch_backward(Editor& ed) {
   ed.isearch_start(false, ed.has_prefix_arg());
+}
+
+// C-M-s / C-M-r (Emacs's keys): a regexp search, as C-s / C-r with a prefix
+// argument.
+void isearch_forward_regexp(Editor& ed) {
+  ed.isearch_start(true, true);
+}
+
+void isearch_backward_regexp(Editor& ed) {
+  ed.isearch_start(false, true);
 }
 
 void isearch_repeat_forward(Editor& ed) {
@@ -1065,6 +1087,7 @@ constexpr Param kQueryReplaceRegexpParams[] = {{L"Query replace regexp: ", Param
 // (tests/test_mx.cpp checks).
 constexpr CommandInfo kCommands[] = {
     {"backward-char", &backward_char},
+    {"backward-kill-line", &backward_kill_line},
     {"backward-kill-word", &backward_kill_word},
     {"backward-word", &backward_word},
     {"beginning-of-buffer", &beginning_of_buffer},
@@ -1091,9 +1114,11 @@ constexpr CommandInfo kCommands[] = {
     {"insert-text", &insert_text, kTextParams},
     {"isearch-abort", &isearch_abort},
     {"isearch-backward", &isearch_backward},
+    {"isearch-backward-regexp", &isearch_backward_regexp},
     {"isearch-delete-char", &isearch_delete_char},
     {"isearch-exit", &isearch_exit},
     {"isearch-forward", &isearch_forward},
+    {"isearch-forward-regexp", &isearch_forward_regexp},
     {"isearch-query-replace", &isearch_query_replace},
     {"isearch-repeat-backward", &isearch_repeat_backward},
     {"isearch-repeat-forward", &isearch_repeat_forward},
@@ -1174,7 +1199,7 @@ const CommandInfo* find_command(std::string_view name) {
 
 bool is_kill_command(std::string_view name) {
   return name == "kill-line" || name == "kill-word" || name == "backward-kill-word" || name == "kill-region" ||
-         name == "cut";
+         name == "cut" || name == "backward-kill-line";
 }
 
 bool is_shift_select_command(std::string_view name) {

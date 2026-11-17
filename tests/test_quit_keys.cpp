@@ -38,6 +38,10 @@ TEST(quit_c_x_c_g) {
 TEST(quit_c_u_c_g) {
   test::Session s;
   s.load(L"0123456789");
+  // C-u is backward-kill-line by default since 2026-11-17: universal-argument
+  // bound to it as before.
+  s.settings("{\"keys\": {\"C-u\": \"universal-argument\"}}");
+  CHECK(s.ed.settings_errors().empty());
   s.keys(L"C-u 3 C-g");
   CHECK_EQ(s.message(), std::wstring(L"Quit"));
   check_nothing_pending(s);
@@ -57,6 +61,7 @@ TEST(quit_m_g_c_g) {
 TEST(quit_esc_c_g_after_prefix_argument) {
   test::Session s;
   s.load(L"0123456789");
+  s.settings("{\"keys\": {\"C-u\": \"universal-argument\"}}");  // as quit_c_u_c_g
   s.keys(L"C-u 3 ESC C-g");
   CHECK_EQ(s.message(), std::wstring(L"Quit"));
   check_nothing_pending(s);

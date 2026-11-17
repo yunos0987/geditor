@@ -189,6 +189,10 @@ class Editor {
   // Tests only: how often a macro run asks Host::quit_requested (0: before
   // every event; default 50 ms).
   void set_macro_poll_ms_for_testing(int ms) { macro_poll_ms_ = ms; }
+  // Tests only ([C12]): the repeated backward isearch of before 2026-11-18
+  // (the current match's start was looked at first; an empty match there
+  // then moved one unit back), to compare the two.
+  void use_old_backward_repeat_for_testing(bool old) { old_backward_repeat_ = old; }
 
   // ---- Encoding of a new buffer (B2) ----
   // --encoding=NAME without a file: the untitled buffer is saved in `name`
@@ -618,6 +622,7 @@ class Editor {
   ReplaceState replace_;
   // The last isearch strings (literal, regexp), for C-s on an empty pattern.
   std::wstring last_search_[2];
+  bool old_backward_repeat_ = false;  // use_old_backward_repeat_for_testing
 
   // Settings
   std::wstring settings_path_;

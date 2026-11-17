@@ -1662,13 +1662,26 @@ void Editor::isearch_search(bool repeat) {
     } else {
       r = matcher_.find_forward(t, s.has_match ? s.match.start : s.origin, false, &m);
     }
-  } else if (repeat && s.has_match) {
+  } else if (repeat && s.has_match && old_backward_repeat_) {
     r = matcher_.find_backward(t, s.match.start, s.match.start, &m);
     if (r == SearchResult::kFound && m == s.match) {
       // The same empty match: one further back.
       r = s.match.start > 0 ? matcher_.find_backward(t, s.match.start - 1, s.match.start, &m)
                             : SearchResult::kNotFound;
     }
+  } else if (repeat && s.has_match) {
+    // [C12] (2026-11-18): a repeated C-r never returns a match that starts
+    // at the current match's start; the next one starts before it (the limit
+    // stays the current match's start, S1). Before, the repeat first looked
+    // for a match up to that start itself: after a non-empty match of a
+    // pattern that can also match empty (.*, o*) that gave the empty match
+    // at the same start, so the C-r after each non-empty match stood still
+    // (every second C-r for .*; the always empty \b and () took the step
+    // back every time and did not stand still). A match that cannot
+    // be empty ends at or before the limit only by starting before it, so
+    // its answers are unchanged.
+    r = s.match.start > 0 ? matcher_.find_backward(t, s.match.start - 1, s.match.start, &m)
+                          : SearchResult::kNotFound;
   } else {
     // From the origin, a match must end there; a longer pattern keeps the
     // current match's start (or one before it) and may end anywhere on its

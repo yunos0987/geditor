@@ -80,16 +80,16 @@ TEST(r3_huge_prefix_count_is_refused_quickly) {
   test::Session s;
   s.load(L"abc");
   const auto start = std::chrono::steady_clock::now();
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9");
   s.type(L"a");
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 RET");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 RET");
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 C-o");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 C-o");
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 TAB");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 TAB");
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
-  s.keys(L"C-u 1 0 0 0 0 0 0 1");  // one over the limit
+  s.keys(L"M-1 0 0 0 0 0 0 1");  // one over the limit
   s.type(L"a");
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
   CHECK_EQ(s.text(), std::wstring(L"abc"));
@@ -97,7 +97,7 @@ TEST(r3_huge_prefix_count_is_refused_quickly) {
   const auto ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
   CHECK(ms < 1000);
-  s.keys(L"C-u 1 0 0 0");  // a normal count still works
+  s.keys(L"M-1 0 0 0");  // a normal count still works
   s.type(L"a");
   CHECK_EQ(s.text().size(), size_t{1003});
 }
@@ -107,14 +107,14 @@ TEST(r3_huge_prefix_count_on_a_sequence_is_refused) {
   s.load(L"abc");
   s.settings(
       "{\"keys\": {\"C-c x\": [[\"insert-text\", \"xy\"]], \"C-c b\": [[\"beginning-of-line\"]]}}");
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 C-c x");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 C-c x");
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
-  s.keys(L"C-u 5 0 0 0 0 0 1 C-c x");  // 2 characters x 5000001 > 10,000,000
+  s.keys(L"M-5 0 0 0 0 0 1 C-c x");  // 2 characters x 5000001 > 10,000,000
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 C-c b");  // no insertion, but far too many repeats
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 C-c b");  // no insertion, but far too many repeats
   CHECK_EQ(s.message(), std::wstring(L"Repeat count too large"));
   CHECK_EQ(s.text(), std::wstring(L"abc"));
-  s.keys(L"C-u 3 C-c x");
+  s.keys(L"M-3 C-c x");
   CHECK_EQ(s.text(), std::wstring(L"xyxyxyabc"));
 }
 
@@ -122,11 +122,11 @@ TEST(r3_huge_prefix_count_on_movement_stays_bounded) {
   test::Session s;
   s.load(L"abc\ndef\n");
   const auto start = std::chrono::steady_clock::now();
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 C-f");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 C-f");
   CHECK_EQ(s.point(), size_t{8});
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 DEL");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 DEL");
   CHECK_EQ(s.text(), std::wstring(L"abc\ndef\n"));  // fewer characters: nothing deleted
-  s.keys(L"C-u 9 9 9 9 9 9 9 9 9 C-p");
+  s.keys(L"M-9 9 9 9 9 9 9 9 9 C-p");
   CHECK_EQ(s.point(), size_t{0});
   const auto ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();

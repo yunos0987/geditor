@@ -151,12 +151,29 @@ bool report(const char* name, double value, double limit, const char* unit) {
   return ok;
 }
 
+// A result that is not as expected (as opposed to a time over its limit):
+// the run still exits with 1, but the last line says so instead of
+// "LIMIT EXCEEDED" (the S1 case of backsearch).
+bool g_results_ok = true;
+
+// The last line and the exit code: a time over a limit wins.
+int finish(bool limits_ok) {
+  if (!limits_ok) {
+    std::printf("LIMIT EXCEEDED\n");
+  } else if (!g_results_ok) {
+    std::printf("RESULT NOT AS EXPECTED\n");
+  } else {
+    std::printf("all limits met\n");
+  }
+  return limits_ok && g_results_ok ? 0 : 1;
+}
+
 // ---- Deferred items before M6 (decode, backsearch, endkey) ----
 
 constexpr double kShiftJisDetectedLimitMs = 1500.0;  // 100MB Shift_JIS, auto-detected
 constexpr double kShiftJisBadByteLimitMs = 2000.0;   // the same with one bad byte
 constexpr double kIso2022JpLineLimitMs = 1000.0;     // 10MB one line without the final ESC ( B
-constexpr double kBackSearchLimitMs = 100.0;         // C-u C-r .* from the end of a 400K line
+constexpr double kBackSearchLimitMs = 100.0;         // C-M-r .* from the end of a 400K line (and S1)
 constexpr double kEndKeyLimitMs = 500.0;             // <end> on a 100MB single line (wrap window)
 
 // The words of tools/measure_input.py.
@@ -396,7 +413,7 @@ bool backsearch_section(size_t max_line) {
     ed.request_open(kPath);
     ed.set_point(ed.buffer().text.length());
     if (c.regexp) {
-      type_keys(ed, {L"C-u", L"C-r"}, L"");
+      type_keys(ed, {L"C-M-r"}, L"");
     } else {
       type_keys(ed, {L"C-r"}, L"");
     }
@@ -412,6 +429,42 @@ bool backsearch_section(size_t max_line) {
     } else {
       std::printf("%-40s %10.4f ms\n", name, ms);
     }
+  }
+  // S1: from the middle of the line, C-M-r .* and then C-r: the repeat is
+  // bounded at the current match's start, which every ".*" of the line
+  // crossed before S1 (about 5 to 7 s on 100K).
+  for (const size_t length : {size_t{100000}, size_t{400000}}) {
+    if (max_line != 0 && length > max_line) continue;
+    std::string text;
+    text.reserve(length);
+    while (text.size() < length) text += "abcdefg ";
+    text.resize(length);
+    PerfHost host(&text);
+    geditor::Editor ed(host);
+    ed.request_open(kPath);
+    ed.set_point(length / 2);
+    type_keys(ed, {L"C-M-r"}, L"");
+    const auto t0 = Clock::now();
+    type_keys(ed, {}, L".*");
+    const double typed_ms = ms_since(t0);
+    const size_t before = ed.buffer().point;
+    const auto t1 = Clock::now();
+    type_keys(ed, {L"C-r"}, L"");
+    const double ms = ms_since(t1);
+    char name[96];
+    std::snprintf(name, sizeof(name), "backsearch: %zuK middle, .* then C-r", length / 1000);
+    // The result: the match from one character before the current match's
+    // start, ending at that start (the limit, S1; [C12]), not failing.
+    const geditor::Editor::SearchHighlights h = ed.search_highlights(40);
+    const size_t start = length / 2 - 1;  // the current match's start after typing ".*"
+    const bool right = before == start && ed.buffer().point == start - 1 && h.has_current &&
+                       h.current.start == start - 1 && h.current.end == start &&
+                       ed.echo_area_text() == L"Regexp I-search backward: .*";
+    std::printf("  %s: typing .* %.4f ms (point %zu); after C-r point %zu, match %zu-%zu, echo \"%ls\": %s\n", name,
+                typed_ms, before, ed.buffer().point, h.current.start, h.current.end, ed.echo_area_text().c_str(),
+                right ? "as expected" : "NOT as expected (want the match one character before, ending at the limit)");
+    g_results_ok = g_results_ok && right;
+    ok &= report(name, ms, kBackSearchLimitMs, "ms");
   }
   return ok;
 }
@@ -489,7 +542,7 @@ bool endkey_section() {
 }
 
 // M6 [C5]: a keyboard macro of 1000 self-inserts replayed 100 times
-// (C-u 100 C-x e) on an empty buffer, through the same key entry point as
+// (M-1 0 0 C-x e) on an empty buffer, through the same key entry point as
 // typing. The 100000 characters make one logical line, where each key costs
 // what typing on a long line costs (about 0.2 ms at 100K characters, a
 // known deferred item), so the replay is judged against the same 100000
@@ -501,7 +554,7 @@ bool macro_section() {
   const std::string empty;
   std::wstring letters;
   for (int i = 0; i < 1000; ++i) letters += static_cast<wchar_t>(L'a' + i % 26);
-  // Records the 1000 letters (and RET when `newline`), then times C-u 100 C-x e.
+  // Records the 1000 letters (and RET when `newline`), then times M-1 0 0 C-x e.
   auto run_macro = [&](bool newline, size_t* length, size_t* events) {
     PerfHost host(&empty);
     geditor::Editor ed(host);
@@ -509,7 +562,7 @@ bool macro_section() {
     if (newline) type_keys(ed, {L"RET"}, L"");
     type_keys(ed, {L"C-x", L")"}, L"");
     const auto t0 = Clock::now();
-    type_keys(ed, {L"C-u", L"1", L"0", L"0", L"C-x", L"e"}, L"");
+    type_keys(ed, {L"M-1", L"0", L"0", L"C-x", L"e"}, L"");
     const double ms = ms_since(t0);
     *length = ed.buffer().text.length();
     *events = ed.macro_size();
@@ -597,7 +650,7 @@ bool kill_section() {
   type_keys(ed, {L"C-x", L"(", L"C-k", L"C-k", L"C-x", L")"}, L"");
   host.writes = 0;
   const auto t0 = Clock::now();
-  type_keys(ed, {L"C-u", L"2", L"0", L"0", L"0", L"0", L"C-x", L"e"}, L"");
+  type_keys(ed, {L"M-2", L"0", L"0", L"0", L"0", L"C-x", L"e"}, L"");
   const double ms = ms_since(t0);
   const bool joined = host.clip == expected;
   std::printf("  kill: %zu characters left, clipboard %zu characters (joined text of lines 1-20000: %s), %zu clipboard "
@@ -710,10 +763,7 @@ int main(int argc, char** argv) {
   if (macro) ok &= macro_section();
   if (kill) ok &= kill_section();
   if (longkey) longkey_section();
-  if (!core) {
-    std::printf("%s\n", ok ? "all limits met" : "LIMIT EXCEEDED");
-    return ok ? 0 : 1;
-  }
+  if (!core) return finish(ok);
   std::printf("generating text...\n");
   const std::string bytes = generate_text();
   std::printf("text: %zu bytes\n", bytes.size());
@@ -919,6 +969,5 @@ int main(int argc, char** argv) {
     }
   }
 
-  std::printf("%s\n", ok ? "all limits met" : "LIMIT EXCEEDED");
-  return ok ? 0 : 1;
+  return finish(ok);
 }

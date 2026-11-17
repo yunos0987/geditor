@@ -122,7 +122,9 @@ constexpr DefaultBinding kGlobalBindings[] = {
     // Delete and kill
     {L"C-d", "delete-char"},
     {L"DEL", "delete-backward-char"},
+    {L"C-h", "delete-backward-char"},  // as DEL (Backspace); 2026-11-17
     {L"C-k", "kill-line"},
+    {L"C-u", "backward-kill-line"},  // as in Bash; universal-argument has no default key (2026-11-17)
     {L"M-d", "kill-word"},
     {L"M-DEL", "backward-kill-word"},
     {L"C-w", "kill-region"},
@@ -153,6 +155,8 @@ constexpr DefaultBinding kGlobalBindings[] = {
     // Search and replace (M5)
     {L"C-s", "isearch-forward"},
     {L"C-r", "isearch-backward"},
+    {L"C-M-s", "isearch-forward-regexp"},
+    {L"C-M-r", "isearch-backward-regexp"},
     {L"M-%", "query-replace"},
     {L"C-M-%", "query-replace-regexp"},
     {L"M-g g", "goto-line"},
@@ -168,8 +172,7 @@ constexpr DefaultBinding kGlobalBindings[] = {
     {L"C-x C--", "text-scale-decrease"},
     {L"C-x C-0", "text-scale-reset"},
     {L"<f10>", "menu-bar-open"},
-    // Prefix argument
-    {L"C-u", "universal-argument"},
+    // Prefix argument (universal-argument: no default key, M-x or settings)
     {L"M-0", "digit-argument"},
     {L"M-1", "digit-argument"},
     {L"M-2", "digit-argument"},
@@ -234,7 +237,10 @@ constexpr DefaultBinding kCompatBindings[] = {
 constexpr DefaultBinding kIsearchBindings[] = {
     {L"C-s", "isearch-repeat-forward"},
     {L"C-r", "isearch-repeat-backward"},
+    {L"C-M-s", "isearch-repeat-forward"},  // as in Emacs's isearch-mode-map
+    {L"C-M-r", "isearch-repeat-backward"},
     {L"DEL", "isearch-delete-char"},
+    {L"C-h", "isearch-delete-char"},
     {L"RET", "isearch-exit"},
     {L"C-g", "isearch-abort"},
     {L"M-r", "isearch-toggle-regexp"},
@@ -248,6 +254,7 @@ constexpr DefaultBinding kQueryReplaceBindings[] = {
     {L"SPC", "query-replace-act"},
     {L"n", "query-replace-skip"},
     {L"DEL", "query-replace-skip"},
+    {L"C-h", "query-replace-skip"},
     {L"!", "query-replace-all"},
     {L".", "query-replace-act-and-exit"},
     {L"q", "query-replace-exit"},

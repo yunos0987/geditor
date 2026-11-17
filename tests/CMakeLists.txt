@@ -3,6 +3,7 @@ add_executable(geditor_tests
   test_harness_selftest.cpp
   test_pcre2.cpp
   fake_host.cpp
+  test_c_h_c_u.cpp
   test_char_width.cpp
   test_commands_edit.cpp
   test_commands_move.cpp

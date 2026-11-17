@@ -333,7 +333,7 @@ TEST(m5_isearch_m_percent_starts_query_replace_with_the_pattern) {
 TEST(m5_isearch_m_percent_in_a_regexp_search_starts_query_replace_regexp) {
   Session s;
   s.load(L"a1 b22\n");
-  s.keys(L"C-u C-s");
+  s.keys(L"C-M-s");
   s.type(L"[0-9]+");
   s.keys(L"M-%");
   CHECK_EQ(s.ed.minibuffer_prompt(), std::wstring(L"Query replace regexp [0-9]+ with: "));
@@ -343,17 +343,19 @@ TEST(m5_isearch_m_percent_in_a_regexp_search_starts_query_replace_regexp) {
   CHECK_EQ(s.text(), std::wstring(L"a<1> b<22>\n"));
 }
 
-TEST(m5_isearch_c_u_c_s_and_c_u_c_r_search_regexps) {
+// C-u C-s / C-u C-r before 2026-11-17 (C-u is now backward-kill-line; the
+// prefix-argument form is in test_c_h_c_u.cpp).
+TEST(m5_isearch_c_m_s_and_c_m_r_search_regexps) {
   Session s;
   s.load(L"x12 y345\n");
-  s.keys(L"C-u C-s");
+  s.keys(L"C-M-s");
   CHECK_EQ(echo(s), std::wstring(L"Regexp I-search: "));
   s.type(L"[0-9]+");
   CHECK_EQ(s.point(), size_t{3});
   s.keys(L"C-s");
   CHECK_EQ(s.point(), size_t{8});
   s.keys(L"RET");
-  s.keys(L"C-u C-r");
+  s.keys(L"C-M-r");
   CHECK_EQ(echo(s), std::wstring(L"Regexp I-search backward: "));
   s.type(L"[a-z][0-9]");
   CHECK_EQ(s.point(), size_t{4});
@@ -434,7 +436,7 @@ TEST(m5_isearch_empty_c_s_uses_the_last_search_string) {
   CHECK_EQ(s.point(), size_t{9});
   s.keys(L"RET");
   // No previous regexp search string.
-  s.keys(L"C-u C-s C-s");
+  s.keys(L"C-M-s C-s");
   CHECK(echo(s).find(L"[No previous search string]") != std::wstring::npos);
 }
 
@@ -791,7 +793,7 @@ TEST(m5_query_replace_empty_from_and_read_only_are_refused) {
 TEST(m5_regexp_dot_matches_a_surrogate_pair) {
   Session s;
   s.load(L"a\U0001F600c\n");
-  s.keys(L"C-u C-s");
+  s.keys(L"C-M-s");
   s.type(L"a.c");
   CHECK_EQ(s.point(), size_t{4});  // the pair is one character
   s.keys(L"RET");
@@ -803,12 +805,12 @@ TEST(m5_regexp_dot_matches_a_surrogate_pair) {
 TEST(m5_regexp_full_width_characters) {
   Session s;
   s.load(L"\xFF21\xFF22\xFF23 \x6F22\x5B57\x30AB\x30CA\n");
-  s.keys(L"C-u C-s");
+  s.keys(L"C-M-s");
   s.type(L"[\xFF21-\xFF3A]+");
   CHECK_EQ(s.point(), size_t{3});
   s.keys(L"RET");
   // \w (Unicode properties) covers kanji and katakana.
-  s.keys(L"C-u C-s");
+  s.keys(L"C-M-s");
   s.type(L"\\w+");
   CHECK_EQ(s.point(), size_t{8});
   s.keys(L"RET");
@@ -821,7 +823,7 @@ TEST(m5_regexp_full_width_characters) {
 TEST(m5_regexp_invalid_pattern_shows_the_message_and_keeps_the_buffer) {
   Session s;
   s.load(L"a(b\n");
-  s.keys(L"C-u C-s");
+  s.keys(L"C-M-s");
   s.type(L"a(");
   CHECK(s.ed.isearch_active());
   CHECK_EQ(echo(s), std::wstring(L"Regexp I-search: a( [missing closing parenthesis]"));
@@ -839,7 +841,7 @@ TEST(m5_regexp_never_matches_across_a_line_end) {
   for (const wchar_t* pattern : {L"a.b", L"a\\sb", L"a[^x]b", L"a\\nb", L"a$\\n^b", L"a\\Rb", L"a[\\s\\S]b"}) {
     Session s;
     s.load(L"xa\nb\n");
-    s.keys(L"C-u C-s");
+    s.keys(L"C-M-s");
     s.type(pattern);
     if (s.ed.isearch_pattern() != pattern) std::printf("  pattern %s\n", test::to_display(std::wstring(pattern)).c_str());
     CHECK(echo(s).find(L"Failing") == 0);
@@ -1195,9 +1197,9 @@ TEST(m5_goto_line_takes_the_prefix_argument) {
   s.keys(L"M-3 M-g g");
   CHECK(!s.ed.minibuffer_active());
   CHECK_EQ(s.point(), size_t{6});
-  s.keys(L"C-u M-g M-g");  // C-u alone is 4
+  s.keys(L"M-4 M-g M-g");  // what C-u alone gave (4)
   CHECK_EQ(s.point(), size_t{9});
-  s.keys(L"C-u 2 M-x");
+  s.keys(L"M-2 M-x");
   s.type(L"goto-line");
   s.keys(L"RET");
   CHECK(!s.ed.minibuffer_active());
@@ -1330,7 +1332,10 @@ TEST(m5_search_finds_lines_split_over_pieces) {
   CHECK(p.find_backward(s.ed.buffer().text, 16, 16, &m) == geditor::SearchResult::kFound);
   CHECK(m == (SearchMatch{10, 15}));
   CHECK(p.find_backward(s.ed.buffer().text, 9, 16, &m) == geditor::SearchResult::kNotFound);
-  CHECK(p.find_backward(s.ed.buffer().text, 16, 14, &m) == geditor::SearchResult::kNotFound);  // ends after 14
+  // S1: the text ends at the limit 14, so "e+" stops there ("hEre", not
+  // "hEree"; before S1 no match: the one match ended after 14).
+  CHECK(p.find_backward(s.ed.buffer().text, 16, 14, &m) == geditor::SearchResult::kFound);
+  CHECK(m == (SearchMatch{10, 14}));
   // ^ sees the text before `from` on its line.
   CHECK(p.set(L"^t", true, true));
   CHECK(p.find_forward(s.ed.buffer().text, 5, false, &m) == geditor::SearchResult::kFound);

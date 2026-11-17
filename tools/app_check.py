@@ -4346,19 +4346,28 @@ def m6_single_line(folder: pathlib.Path) -> pathlib.Path:
 
 # A macro run that is still going long after it starts and keeps its text
 # short, for the checks that post input during a run and stop it with C-g.
-# A run that grows one line fast (C-u 100000 of 10 characters) is over in
+# A run that grows one line fast (100000 runs of 10 characters) is over in
 # about 1 s since the deferred performance item K1 (2026-11-17), so those
 # checks no longer rely on how fast a run grows: 499 letters are typed and
 # 498 of them deleted, then RET (998 events that leave "a\n"). On the
 # development PC it made about 225 to 350 runs a second (2026-11-17, with
-# both the exe before K1 and after it), so C-u 30000 of it lasts about 85 to
-# 130 s and is less than 2% done 1 s in; its text never exceeds
+# both the exe before K1 and after it), so 30000 runs of it last about 85 to
+# 130 s and are less than 2% done 1 s in; its text never exceeds
 # 2 + 2 * 30000 = 60002 characters, so the state's text (64K characters)
 # holds all of it wherever the run stops.
 SLOW_MACRO_LETTERS = ("abcdefghij" * 50)[:499]
 SLOW_MACRO_EVENTS = 998
 SLOW_MACRO_RUNS = 30000
 SLOW_MACRO_FULL = 2 + 2 * SLOW_MACRO_RUNS  # the length after the recording and the whole run
+
+
+def count_keys(count: int) -> str:
+    """The keys of a prefix argument of `count`: M- with its first digit,
+    then the other digits ("M-3 0 0 0 0" for 30000). C-u is
+    backward-kill-line since 2026-11-17 (universal-argument has no default
+    key)."""
+    digits = str(count)
+    return " ".join([f"M-{digits[0]}", *digits[1:]])
 
 
 def record_slow_macro(app) -> None:
@@ -4388,7 +4397,8 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     that waits during a macro run), its retries R1 (input order), Q1-Q3
     (no killed timer replayed, input after an opened question dropped, no
     drag left behind) and P1 / P2 (non-client mouse input, F10 without a
-    menu bar)."""
+    menu bar); and the changes of 2026-11-17: B (non-client clicks during a
+    run dropped, C-g behind them), the default keys C-h, C-u and C-M-s."""
     work = out / "files_deferred"
     work.mkdir(parents=True, exist_ok=True)
     shots = out / "shots"
@@ -4430,7 +4440,7 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     try:
         wait_state(app, lambda s: s.get("message") == "(New file)")
         record_slow_macro(app)
-        app.keys(f"C-u {' '.join(str(SLOW_MACRO_RUNS))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(SLOW_MACRO_RUNS)} C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.keys("z")  # typed during the run, before the C-g
         app.keys("C-g")
@@ -4471,7 +4481,7 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         # more than 90% of the run after it.
         runs = 200000
         final = 23 + 11 + runs * 11 + 1  # the file, the recording, the run, the Z
-        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(runs)} C-x e", pause_s=0.02)
         time.sleep(0.3)
         app.click(x, y)
         app.keys("Z")
@@ -4503,7 +4513,7 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         wait_state(app, lambda s: s.get("message") == "(New file)")
         record_slow_macro(app)
         x, y = app.cell_point(0, 0)
-        app.keys(f"C-u {' '.join(str(SLOW_MACRO_RUNS))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(SLOW_MACRO_RUNS)} C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.click(x, y)  # would put point at the start of the text
         app.keys("C-g")
@@ -4548,7 +4558,7 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         runs = 200000
         final = 23 + 11 + runs * 11
         start = time.perf_counter()
-        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(runs)} C-x e", pause_s=0.02)
         done = wait_state(app, lambda s: s.get("length") == str(final), 180.0)
         run_s = time.perf_counter() - start
         time.sleep(0.5)
@@ -4584,7 +4594,7 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         runs = 200000  # the input comes 0.3 s in, when less than 10% is done (see [deferred R1] above)
         final = 23 + 11 + runs * 11
         x, y = app.cell_point(0, 2)
-        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(runs)} C-x e", pause_s=0.02)
         time.sleep(0.3)
         app.right_click(x, y)
         app.keys("Z")
@@ -4609,7 +4619,7 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     # input that is held, so the C-g behind it stops the run at once.
     app = macro_app("nc_move_cg")
     try:
-        app.keys("C-u 2 0 0 0 0 0 C-x e", pause_s=0.02)
+        app.keys("M-2 0 0 0 0 0 C-x e", pause_s=0.02)
         time.sleep(0.5)
         app.mouse(0x00A0, 10, 10, 7)  # WM_NCMOUSEMOVE, wParam HTVSCROLL
         app.keys("C-g")
@@ -4625,27 +4635,171 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     finally:
         app.kill()
 
-    # Retry 3, P1 ([C15] 2): a non-client button message during a run stops
-    # the scan (replayed later, a button down could start a modal move,
-    # size or scroll loop with a stale button state), so it stays in the
-    # queue with the key after it: both run after the run, in their order.
+    # Retry 3, P1 ([C15] 2), changed 2026-11-17: a non-client button message
+    # during a run is taken and dropped (replayed later, a button down could
+    # start a modal move, size or scroll loop with a stale button state), so
+    # the key after it is held and typed after the run; the click has no
+    # effect (before 2026-11-17 the button message stayed in the queue with
+    # the key after it, and both ran after the run).
     app = macro_app("nc_button_key")
     try:
         runs = 200000  # the input comes 0.3 s in, when less than 10% is done (see [deferred R1] above)
         final = 23 + 11 + runs * 11
-        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(runs)} C-x e", pause_s=0.02)
         time.sleep(0.3)
         app.mouse(0x00A1, 10, 10, 0)  # WM_NCLBUTTONDOWN, wParam HTNOWHERE
         app.mouse(0x00A2, 10, 10, 0)  # WM_NCLBUTTONUP
         app.keys("Z")
         during = int(app.state().get("length", "0"))  # after the buttons and Z were posted
         done = wait_state(app, lambda s: s.get("length") == str(final + 1), 120.0)
-        check("[deferred P1] during a long macro run, a non-client button press and release and then Z: the run "
-              "goes to its end and Z is typed after it",
+        check("[deferred P1] during a long macro run, a non-client button press and release (HTNOWHERE: no visible "
+              "effect whether it is kept or dropped) and then Z: the run goes to its end and Z is typed after it",
               during < final and done.get("length") == str(final + 1) and int(done.get("point", "0")) == final + 1,
               f"length {during} just after the buttons and Z were posted; length after {done.get('length')} "
               f"(want {final + 1}), "
               f"point {done.get('point')}")
+    finally:
+        app.kill()
+
+    # 2026-11-17 (B): a non-client button press and release during a run
+    # (the scroll bar; then the title bar and the menu bar) are taken and
+    # dropped, so a C-g behind them stops the run at once; no scroll, no
+    # move or menu loop happens, during the run or after it.
+    def nc_click_then_c_g(name: str, places: list):
+        """`places`: (label, hit-test value, screen x, screen y) per click,
+        computed from the window; returns (ok, evidence)."""
+        a = d.App(exe, [str(work / f"{name}.txt")], cwd=work, settings=settings, height=300)
+        try:
+            wait_state(a, lambda s: s.get("message") == "(New file)")
+            record_slow_macro(a)
+            before = a.state()
+            rect = wt.RECT()
+            d.user32.GetWindowRect(a.hwnd, ctypes.byref(rect))
+            client = wt.RECT()
+            d.user32.GetClientRect(a.hwnd, ctypes.byref(client))
+            origin = wt.POINT(0, 0)
+            d.user32.ClientToScreen(a.hwnd, ctypes.byref(origin))
+            spots = places(rect, client, origin)
+            a.keys(f"{count_keys(SLOW_MACRO_RUNS)} C-x e", pause_s=0.02)
+            time.sleep(1.0)
+            for _label, hit, x, y in spots:
+                a.mouse(0x00A1, x, y, hit)  # WM_NCLBUTTONDOWN, wParam = hit-test value
+                a.mouse(0x00A2, x, y, hit)  # WM_NCLBUTTONUP
+            a.keys("C-g")
+            posted = time.perf_counter()
+            stopped = wait_state(a, lambda s: s.get("message") in ("Quit", "(Type e to repeat macro)"), 150.0)
+            stop_s = time.perf_counter() - posted
+            time.sleep(0.5)
+            later = a.state()
+            after_rect = wt.RECT()
+            d.user32.GetWindowRect(a.hwnd, ctypes.byref(after_rect))
+            length = int(stopped.get("length", "0"))
+            point = int(stopped.get("point", "-1"))
+            text = stopped.get("text", "")
+            point_line = text.count("\n", 0, point)
+            top = int(stopped.get("top_line", "-1"))
+            rows = int(float(stopped.get("text_rows", "0")))
+            a.keys("C-/")
+            undone = wait_state(a, lambda s: s.get("length") == "2", 10.0)
+            ok = (stopped.get("message") == "Quit" and stop_s < 2.0 and 2 < length < SLOW_MACRO_FULL and
+                  slow_macro_text(text) and point == length and top <= point_line < top + rows and
+                  later.get("top_line") == stopped.get("top_line") and later.get("point") == stopped.get("point") and
+                  later.get("scroll_bar") == stopped.get("scroll_bar") and
+                  later.get("menu_loops") == before.get("menu_loops") and
+                  later.get("keymenu_count") == before.get("keymenu_count") and
+                  later.get("question", "none") == "none" and
+                  (after_rect.left, after_rect.top, after_rect.right, after_rect.bottom) ==
+                  (rect.left, rect.top, rect.right, rect.bottom) and undone.get("text") == "a\n")
+            evidence = (f"clicks {[(lb, h, x, y) for lb, h, x, y in spots]}; message {stopped.get('message')!r} "
+                        f"{stop_s:.2f} s after the C-g was posted; length {length} (the whole run gives "
+                        f"{SLOW_MACRO_FULL}); point {point} (= length: no scroll moved it), its line {point_line} "
+                        f"on screen (top {top}, {rows} rows) and top / point / scroll bar the same 0.5 s later "
+                        f"({later.get('top_line')} / {later.get('point')} / {later.get('scroll_bar')}); menu_loops "
+                        f"{before.get('menu_loops')} -> {later.get('menu_loops')}, keymenu requests "
+                        f"{before.get('keymenu_count')} -> {later.get('keymenu_count')}; window rect unchanged "
+                        f"{(after_rect.left, after_rect.top) == (rect.left, rect.top)}; one C-/ leaves "
+                        f"{undone.get('text')!r} (before 2026-11-17 the C-g waited for the end of the run, about "
+                        f"85 to 130 s)")
+            return ok, evidence
+        finally:
+            a.kill()
+
+    def scroll_bar_spot(rect, client, origin):
+        # Right of the client area, half way down (HTVSCROLL 7).
+        return [("scroll bar", 7, origin.x + client.right + 4, origin.y + client.bottom // 2)]
+
+    def title_and_menu_spots(rect, client, origin):
+        # The caption (HTCAPTION 2) near the top edge of the window and the
+        # menu bar (HTMENU 5) just above the client area.
+        return [("title bar", 2, (rect.left + rect.right) // 2, rect.top + 6),
+                ("menu bar", 5, origin.x + 20, origin.y - 4)]
+
+    ok, evidence = nc_click_then_c_g("nc_scroll_cg", scroll_bar_spot)
+    check("[B] during a long macro run, a click on the scroll bar (WM_NCLBUTTONDOWN / UP, HTVSCROLL) and then C-g: "
+          "the click is dropped and the run stops at once; no scroll and no modal loop", ok, evidence)
+    ok, evidence = nc_click_then_c_g("nc_title_menu_cg", title_and_menu_spots)
+    check("[B] during a long macro run, clicks on the title bar (HTCAPTION) and the menu bar (HTMENU) and then "
+          "C-g: the clicks are dropped and the run stops at once; no move and no menu loop", ok, evidence)
+
+    # [C5] (retry 1): WM_COMMAND and WM_CLOSE during a run still end the
+    # holding (unlike the non-client buttons above): they stay at the head of
+    # the queue, so the C-g behind them waits for the end of the run and the
+    # run reaches its full length. A posted WM_DROPFILES is left out: its
+    # HDROP is a handle of the process that made it, which another process
+    # cannot hand over in a posted message.
+    app = macro_app("command_then_cg")
+    try:
+        runs = 200000  # the input comes 0.3 s in, when less than 10% is done (see [deferred R1] above)
+        final = 23 + 11 + runs * 11
+        before = app.state()
+        app.keys(f"{count_keys(runs)} C-x e", pause_s=0.02)
+        time.sleep(0.3)
+        d.note_action()
+        d.user32.PostMessageW(app.hwnd, 0x0111, 0xFFFE, 0)  # WM_COMMAND, an id no menu item has
+        app.keys("C-g")
+        during = int(app.state().get("length", "0"))  # after WM_COMMAND and C-g were posted
+        quit_state = wait_state(app, lambda s: s.get("message") == "Quit", 180.0)
+        rejected_before = int(before.get("rejected", "0"))
+        check("[C5] during a long macro run, WM_COMMAND (an unknown id) and then C-g: the WM_COMMAND ends the "
+              "holding, so the run goes to its full length and Quit shows only after it; the WM_COMMAND runs "
+              "after the run (rejected as no menu command)",
+              during < final and quit_state.get("message") == "Quit" and quit_state.get("length") == str(final) and
+              int(quit_state.get("rejected", "0")) == rejected_before + 1 and
+              "WM_COMMAND 65534" in quit_state.get("last_rejected", ""),
+              f"length {during} just after WM_COMMAND and C-g were posted; at Quit: message "
+              f"{quit_state.get('message')!r}, length {quit_state.get('length')} (the whole run gives {final}); "
+              f"rejected requests {rejected_before} -> {quit_state.get('rejected')}, last "
+              f"{quit_state.get('last_rejected')!r} (taken and dropped, the C-g would stop the run short of "
+              f"{final} and nothing would be rejected)")
+    finally:
+        app.kill()
+
+    app = macro_app("close_then_cg")
+    try:
+        runs = 200000
+        final = 23 + 11 + runs * 11
+        app.keys(f"{count_keys(runs)} C-x e", pause_s=0.02)
+        time.sleep(0.3)
+        app.close()  # WM_CLOSE: the buffer is modified, so quit asks whether to save
+        app.keys("C-g")
+        during = int(app.state().get("length", "0"))  # after WM_CLOSE and C-g were posted
+        question = app.wait_question(180.0)
+        asked = app.state()
+        answered = app.answer("Cancel") if question else False
+        time.sleep(0.5)
+        after = app.state()
+        alive = app.proc.poll() is None
+        check("[C5] during a long macro run, WM_CLOSE and then C-g: the WM_CLOSE ends the holding, so the run goes "
+              "to its full length and the save_changes question comes only after it (Cancel keeps the window); "
+              "the C-g behind it never stops the run",
+              during < final and question is not None and question.get("question") == "save_changes" and
+              asked.get("length") == str(final) and answered and alive and after.get("length") == str(final) and
+              after.get("question", "none") == "none",
+              f"length {during} just after WM_CLOSE and C-g were posted; question "
+              f"{question and question.get('question')} with length {asked.get('length')} (the whole run gives "
+              f"{final}); Cancel answered {answered}, window alive {alive}, length after {after.get('length')} "
+              f"(taken and dropped, the C-g would stop the run short of {final} and no question would come; "
+              f"a WM_DROPFILES is not posted here: an HDROP cannot be handed over from another process)")
     finally:
         app.kill()
 
@@ -4671,7 +4825,7 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         no_bar = app.state()
         runs = 200000  # the input comes 0.3 s in, when less than 10% is done (see [deferred R1] above)
         final = int(no_bar.get("length", "0")) + runs * 11
-        app.keys(f"C-u {' '.join(str(runs))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(runs)} C-x e", pause_s=0.02)
         time.sleep(0.3)
         app.keys("<f10>")
         app.keys("Z")
@@ -4699,10 +4853,10 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
         app.mouse(d.WM_LBUTTONDOWN, x0, y0, d.MK_LBUTTON)
         app.mouse(0x0200, x1, y1, d.MK_LBUTTON)  # WM_MOUSEMOVE
         pressed = wait_state(app, lambda s: s.get("dragging") == "1")
-        # C-u 1000000 of 11 events; the release and C-g come 1 s in, when
+        # 1000000 runs of 11 events; the release and C-g come 1 s in, when
         # about 2% of it was done on the development PC (2026-11-17).
         full = 23 + 11 + 1000000 * 11
-        app.keys("C-u 1 0 0 0 0 0 0 C-x e", pause_s=0.02)
+        app.keys("M-1 0 0 0 0 0 0 C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.mouse(d.WM_LBUTTONUP, x1, y1, 0)
         app.keys("C-g")
@@ -4716,6 +4870,47 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
               f"dragging before the run {pressed.get('dragging')}; message {stopped.get('message')!r}, length "
               f"{stopped.get('length')} (the whole run gives {full}, so it was still going); dragging after the "
               f"stop {after.get('dragging')} (mouse capture is not in the state)")
+    finally:
+        app.kill()
+
+    # 2026-11-17 (C, D): the default keys C-h (as DEL), C-u
+    # (backward-kill-line) and C-M-s (isearch-forward-regexp), posted as the
+    # headless keys are (WM_KEYDOWN with the modifier bits in lParam).
+    keys_doc = work / "keys_c_h_c_u.txt"
+    keys_doc.write_bytes(b"")
+    app = d.App(exe, [str(keys_doc)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("length") == "0")
+        app.type("abc")
+        wait_state(app, lambda s: s.get("text") == "abc")
+        app.keys("C-h")
+        after_c_h = wait_state(app, lambda s: s.get("text") == "ab")
+        check("[C-h] type abc, then C-h: one character is deleted (text ab)",
+              after_c_h.get("text") == "ab" and after_c_h.get("point") == "2",
+              f"text {after_c_h.get('text')!r} point {after_c_h.get('point')} (two deletions, key down and a "
+              f"WM_CHAR, would leave 'a')")
+        app.keys("C-/")
+        app.keys("C-a C-k")  # an empty line again (the kill is replaced by the next one)
+        app.type("abc def")
+        wait_state(app, lambda s: s.get("text") == "abc def")
+        app.keys("C-u")
+        after_c_u = wait_state(app, lambda s: s.get("length") == "0")
+        clip = app.clipboard()
+        check("[C-u] abc def, then C-u at its end: the line is empty and the private clipboard holds abc def",
+              after_c_u.get("text") == "" and clip == "abc def",
+              f"text {after_c_u.get('text')!r}; clipboard {clip!r}")
+        app.type("x12 y345\n")
+        app.keys("M-<")
+        app.keys("C-M-s")
+        prompt = wait_state(app, lambda s: s.get("isearch") == "1")
+        app.type("[0-9]+")
+        found = wait_state(app, lambda s: s.get("point") == "3")
+        app.keys("RET")
+        check("[C-M-s] C-M-s starts a regexp isearch: [0-9]+ moves to the end of 12",
+              prompt.get("echo", "").startswith("Regexp I-search: ") and found.get("point") == "3" and
+              found.get("isearch_pattern") == "[0-9]+",
+              f"echo after C-M-s {prompt.get('echo')!r}; point {found.get('point')} pattern "
+              f"{found.get('isearch_pattern')!r}")
     finally:
         app.kill()
 
@@ -4808,10 +5003,10 @@ def run_m6_checks(exe: pathlib.Path, out: pathlib.Path):
     try:
         wait_state(app, lambda s: s.get("text", "").startswith("k0\n"))
         app.keys("C-x ( C-k C-k C-x )")
-        app.keys("C-u 4 C-x e")
+        app.keys("M-4 C-x e")
         state = wait_state(app, lambda s: s.get("text", "").startswith("k5\n"))
         clip = app.clipboard()
-        check("[M6 R1] C-x ( C-k C-k C-x ), C-u 4 C-x e: the private clipboard holds the 8 kills of the run "
+        check("[M6 R1] C-x ( C-k C-k C-x ), M-4 C-x e: the private clipboard holds the 8 kills of the run "
               "as one text",
               clip == "k1\r\nk2\r\nk3\r\nk4\r\n" and state.get("text", "").startswith("k5\n"),
               f"clipboard={clip!r} text starts {state.get('text', '')[:6]!r}")
@@ -4822,7 +5017,7 @@ def run_m6_checks(exe: pathlib.Path, out: pathlib.Path):
         wait_state(app, lambda s: s.get("message") == "(New file)")
         record_slow_macro(app)  # still running 1 s after it starts (see record_slow_macro)
         start = time.perf_counter()
-        app.keys(f"C-u {' '.join(str(SLOW_MACRO_RUNS))} C-x e", pause_s=0.02)
+        app.keys(f"{count_keys(SLOW_MACRO_RUNS)} C-x e", pause_s=0.02)
         time.sleep(1.0)
         app.keys("C-g")
         posted = time.perf_counter()
@@ -4831,7 +5026,7 @@ def run_m6_checks(exe: pathlib.Path, out: pathlib.Path):
         length = int(stopped.get("length", "0"))
         app.keys("C-/")
         undone = wait_state(app, lambda s: s.get("length") == "2", 10.0)
-        check(f"[M6 R2] a posted C-g stops a long macro run (C-u {SLOW_MACRO_RUNS} of {SLOW_MACRO_EVENTS} events) "
+        check(f"[M6 R2] a posted C-g stops a long macro run ({SLOW_MACRO_RUNS} runs of {SLOW_MACRO_EVENTS} events) "
               "at once with Quit; one C-/ takes the whole stopped run back",
               stopped.get("message") == "Quit" and 2 < length < SLOW_MACRO_FULL and stop_s < 2.0 and
               undone.get("text") == "a\n" and stopped.get("macro_recording") == "0",

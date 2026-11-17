@@ -96,7 +96,7 @@ TEST(m6_kill_move_kill_replaces) {
 TEST(m6_kill_region_after_kill_appends_and_prefix_argument_keeps_the_sequence) {
   Session s;
   s.load(L"one\ntwo\nthree\n");
-  s.keys(L"C-k C-u 2 C-k");  // C-u between kills does not end the sequence
+  s.keys(L"C-k M-2 C-k");  // a prefix argument between kills does not end the sequence
   CHECK_EQ(s.text(), std::wstring(L"three\n"));
   CHECK_EQ(s.host.clipboard, std::wstring(L"one\ntwo\n"));
 }
@@ -197,7 +197,7 @@ TEST(m6_shift_select_s_prior) {
   s.load(thirty_lines());
   s.keys(L"<next>");  // top line 8, point on line 8
   CHECK_EQ(s.ed.top_line(), size_t{8});
-  s.keys(L"C-u 9 C-n");  // line 17, the bottom row
+  s.keys(L"M-9 C-n");  // line 17, the bottom row
   CHECK_EQ(s.point(), size_t{34});
   s.keys(L"S-<prior>");  // top line 0: point goes up to the bottom row (line 9)
   CHECK_EQ(s.ed.top_line(), size_t{0});
@@ -332,7 +332,7 @@ TEST(m6_macro_c_u_3_c_x_e_runs_three_times) {
   s.keys(L"C-x (");
   s.type(L"x");
   s.keys(L"C-x )");
-  s.keys(L"C-u 3 C-x e");
+  s.keys(L"M-3 C-x e");
   CHECK_EQ(s.text(), std::wstring(L"xxxx"));
 }
 
@@ -485,8 +485,8 @@ TEST(m6_macro_one_run_is_one_undo) {
   s.keys(L"C-/");
   CHECK_EQ(s.text(), std::wstring(L"xyazbcdef"));
   CHECK_EQ(s.point(), size_t{4});
-  // C-u 2: both runs of one call are one undo unit too.
-  s.keys(L"C-u 2 C-x e");
+  // M-2: both runs of one call are one undo unit too.
+  s.keys(L"M-2 C-x e");
   CHECK_EQ(s.text(), std::wstring(L"xyazxybzxyczdef"));
   CHECK_EQ(s.point(), size_t{12});
   s.keys(L"C-/");
@@ -507,7 +507,7 @@ TEST(m6_macro_error_stops_the_run_and_the_repeats) {
   s.type(L"-");
   s.keys(L"C-x )");
   CHECK_EQ(s.text(), std::wstring(L"a-b"));
-  s.keys(L"C-u 5 C-x e");  // the second C-f fails at the end of the buffer
+  s.keys(L"M-5 C-x e");  // the second C-f fails at the end of the buffer
   CHECK_EQ(s.text(), std::wstring(L"a-b-"));
   CHECK_EQ(s.message(), std::wstring(L"End of buffer"));
   s.keys(L"e");  // no repeat after a failed run
@@ -524,7 +524,7 @@ TEST(m6_macro_failing_search_stops_the_run) {
   s.type(L"x");
   s.keys(L"C-x )");
   CHECK_EQ(s.text(), std::wstring(L"foox foo"));
-  s.keys(L"C-u 5 C-x e");
+  s.keys(L"M-5 C-x e");
   CHECK_EQ(s.text(), std::wstring(L"foox foox"));
   CHECK(!s.ed.isearch_active());  // the failing isearch ended (as C-g)
   CHECK_EQ(s.point(), size_t{9});
@@ -537,7 +537,7 @@ TEST(m6_macro_read_only_stops_the_run) {
   s.type(L"a");
   s.keys(L"C-x )");
   s.keys(L"C-x C-q");
-  s.keys(L"C-u 3 C-x e");
+  s.keys(L"M-3 C-x e");
   CHECK_EQ(s.text(), std::wstring(L"a"));
   CHECK_EQ(s.message(), std::wstring(L"Buffer is read-only"));
 }
@@ -830,7 +830,7 @@ TEST(m6_r1_macro_forward_kills_write_the_joined_text_once) {
   s.keys(L"C-x ( C-k C-k C-x )");
   CHECK_EQ(s.host.clipboard, std::wstring(L"a\n"));
   s.host.clipboard_writes = 0;
-  s.keys(L"C-u 3 C-x e");
+  s.keys(L"M-3 C-x e");
   CHECK_EQ(s.text(), std::wstring(L"e\n"));
   CHECK_EQ(s.host.clipboard, std::wstring(L"b\nc\nd\n"));
   CHECK_EQ(s.host.clipboard_writes, 1);
@@ -843,7 +843,7 @@ TEST(m6_r1_macro_backward_kills_prepend) {
   s.keys(L"C-x ( M-DEL C-x )");
   CHECK_EQ(s.host.clipboard, std::wstring(L"four"));
   s.host.clipboard_writes = 0;
-  s.keys(L"C-u 2 C-x e");
+  s.keys(L"M-2 C-x e");
   CHECK_EQ(s.text(), std::wstring(L"one "));
   CHECK_EQ(s.host.clipboard, std::wstring(L"two three "));
   CHECK_EQ(s.host.clipboard_writes, 1);
@@ -900,7 +900,7 @@ TEST(m6_r2_c_g_stops_a_macro_run) {
   s.keys(L"C-x )");
   s.ed.set_macro_poll_ms_for_testing(0);  // ask before every event
   s.host.quit_at_poll = 5;                // C-g before the fifth event
-  s.keys(L"C-u 1 0 0 C-x e");
+  s.keys(L"M-1 0 0 C-x e");
   CHECK_EQ(s.text(), std::wstring(L"xxxxx"));  // the recording and 4 events
   CHECK_EQ(s.message(), std::wstring(L"Quit"));
   CHECK_EQ(s.host.quit_polls, 5);
@@ -921,7 +921,7 @@ TEST(m6_r3_declined_questions_stop_the_run) {
   s.keys(L"RET C-x )");
   CHECK_EQ(s.host.yes_no_dialogs, 1);
   for (int i = 0; i < 3; ++i) s.host.yes_no_answers.push_back(false);
-  s.keys(L"C-u 3 C-x e");
+  s.keys(L"M-3 C-x e");
   CHECK_EQ(s.host.yes_no_dialogs, 2);  // asked once: No stopped the run
   CHECK_EQ(s.message(), std::wstring(L"Cancelled"));
   // Cancel of the save question of C-x C-c.
@@ -929,7 +929,7 @@ TEST(m6_r3_declined_questions_stop_the_run) {
   s.keys(L"C-x ( C-x C-c C-x )");
   CHECK_EQ(s.host.save_dialogs, 1);
   for (int i = 0; i < 3; ++i) s.host.save_answers.push_back(geditor::SaveChoice::kCancel);
-  s.keys(L"C-u 3 C-x e");
+  s.keys(L"M-3 C-x e");
   CHECK_EQ(s.host.save_dialogs, 2);
   CHECK_EQ(s.host.quit_calls, 0);
   // Cancel of the open choice of C-x C-f.
@@ -940,7 +940,7 @@ TEST(m6_r3_declined_questions_stop_the_run) {
   s.keys(L"RET C-x )");
   CHECK_EQ(s.host.open_dialogs, 1);
   for (int i = 0; i < 3; ++i) s.host.open_answers.push_back(geditor::OpenChoice::kCancel);
-  s.keys(L"C-u 3 C-x e");
+  s.keys(L"M-3 C-x e");
   CHECK_EQ(s.host.open_dialogs, 2);
   // No to overwriting a file in write-file.
   s.host.yes_no_answers.clear();
@@ -950,7 +950,7 @@ TEST(m6_r3_declined_questions_stop_the_run) {
   s.keys(L"RET C-x )");
   CHECK_EQ(s.host.yes_no_dialogs, 3);
   for (int i = 0; i < 3; ++i) s.host.yes_no_answers.push_back(false);
-  s.keys(L"C-u 3 C-x e");
+  s.keys(L"M-3 C-x e");
   CHECK_EQ(s.host.yes_no_dialogs, 4);
   CHECK_EQ(s.host.file(L"C:\\work\\other.txt"), std::string("other\n"));
 }

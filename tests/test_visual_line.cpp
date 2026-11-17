@@ -79,9 +79,9 @@ TEST(visual_prefix_count_moves_screen_rows) {
   wrap_at_10(s);
   s.load(kWrapped);
   s.set_point(2);
-  s.keys(L"C-u 3 C-n");  // E4: rows, not logical lines
+  s.keys(L"M-3 C-n");  // E4: rows, not logical lines
   CHECK_EQ(s.point(), size_t{26});
-  s.keys(L"C-u 2 C-p");
+  s.keys(L"M-2 C-p");
   CHECK_EQ(s.point(), size_t{12});
   s.keys(L"M-- C-n");  // a negative count goes the other way
   CHECK_EQ(s.point(), size_t{2});
@@ -118,7 +118,7 @@ TEST(visual_scroll_commands_move_by_rows_and_keep_point_visible) {
   s.keys(L"C-v");  // visible - 2 = 2 rows
   CHECK(s.ed.top() == (geditor::RowPos{0, 2}));
   CHECK_EQ(s.point(), size_t{20});  // point left the window: start of the top row
-  s.keys(L"C-u 5 C-v");
+  s.keys(L"M-5 C-v");
   CHECK(s.ed.top() == (geditor::RowPos{0, 7}));
   s.keys(L"C-v C-v");
   // Stops where the last row is on the bottom row: rows 9..12 = (0,9)..(3,0).
@@ -130,7 +130,7 @@ TEST(visual_scroll_commands_move_by_rows_and_keep_point_visible) {
   // Point stays on screen: below the window it moves to the bottom row.
   s.keys(L"M->");
   CHECK(s.ed.top() == (geditor::RowPos{0, 9}));
-  s.keys(L"C-u 3 M-v");
+  s.keys(L"M-3 M-v");
   CHECK(s.ed.top() == (geditor::RowPos{0, 6}));
   const geditor::Editor::PointView v = s.ed.point_view();
   CHECK(v.pos == (geditor::RowPos{0, 9}));

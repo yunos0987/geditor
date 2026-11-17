@@ -332,6 +332,7 @@ struct ReadOnlyRow {
 
 // Text "ab CD\nef\n": every row would change it if the buffer were writable.
 constexpr ReadOnlyRow kReadOnlyRows[] = {
+    {"backward-kill-line", R"("backward-kill-line")", L"<f12>", L"", 2, -1},
     {"backward-kill-word", R"("backward-kill-word")", L"<f12>", L"", 2, -1},
     {"capitalize-word", R"("capitalize-word")", L"<f12>", L"", 0, -1},
     {"cut", R"("cut")", L"<f12>", L"", 0, 2},
@@ -368,6 +369,7 @@ constexpr const char* kNonEditingCommands[] = {
     "goto-line", "isearch-abort", "isearch-backward", "isearch-delete-char", "isearch-exit", "isearch-forward",
     "isearch-query-replace", "isearch-repeat-backward", "isearch-repeat-forward", "isearch-toggle-case-fold",
     "isearch-toggle-regexp", "query-replace-exit", "query-replace-skip",
+    "isearch-backward-regexp", "isearch-forward-regexp",  // 2026-11-17
     "keyboard-escape-quit", "keyboard-quit",
     // M6: the macro commands edit nothing themselves; the keys a macro runs
     // are refused one by one (test_m6.cpp).

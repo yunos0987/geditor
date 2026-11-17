@@ -62,6 +62,8 @@ TEST(escape_quit_deactivates_the_region) {
 TEST(escape_quit_uses_up_a_prefix_argument) {
   Session s;
   s.load(L"abcdef");
+  // universal-argument has no default key since 2026-11-17: bound to C-u.
+  s.settings("{\"keys\": {\"C-u\": \"universal-argument\"}}");
   s.keys(L"C-u ESC ESC ESC C-f");
   CHECK_EQ(s.point(), size_t{1});  // the C-u did not reach C-f
 }

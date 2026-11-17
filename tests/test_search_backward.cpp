@@ -3,7 +3,11 @@
 // from the line start. `head_find_backward` below is a copy of
 // find_backward at HEAD 63a24a6 (every match of a forward scan of each line,
 // the last one that qualifies), on a pattern compiled with the same options;
-// the tests compare the two on generated lines and patterns.
+// the tests compare the two on generated lines and patterns. Since S1 the
+// subject of a backward search ends at end_bound (the search limit), so
+// the copy is compared with each line cut at end_bound (`cut_at_bound`);
+// where no match crosses the limit, and for literal patterns, it is also
+// compared with the copy as it was (the line not cut).
 
 #ifndef PCRE2_CODE_UNIT_WIDTH
 #define PCRE2_CODE_UNIT_WIDTH 16
@@ -57,8 +61,13 @@ class HeadPattern {
   HeadPattern& operator=(const HeadPattern&) = delete;
   bool valid() const { return code_ != nullptr; }
 
-  // find_backward of 63a24a6 on the text `text` (the whole buffer).
-  SearchResult find_backward(const std::wstring& text, size_t max_start, size_t end_bound, SearchMatch* out) {
+  // find_backward of 63a24a6 on the text `text` (the whole buffer). With
+  // `cut_at_bound` (the S1 rule), each line is first cut at end_bound
+  // (matched with PCRE2_NOTEOL when the cut is inside the line; a line that
+  // starts after end_bound has no match), and the scan is otherwise the
+  // same.
+  SearchResult find_backward(const std::wstring& text, size_t max_start, size_t end_bound, SearchMatch* out,
+                             bool cut_at_bound = false) {
     max_start = std::min(max_start, text.size());
     end_bound = std::min(end_bound, text.size());
     // Line starts.
@@ -70,15 +79,24 @@ class HeadPattern {
     while (line + 1 < starts.size() && starts[line + 1] <= max_start) ++line;
     for (;; --line) {
       const size_t line_start = starts[line];
-      const size_t line_end = line + 1 < starts.size() ? starts[line + 1] - 1 : text.size();
+      size_t line_end = line + 1 < starts.size() ? starts[line + 1] - 1 : text.size();
+      uint32_t options = 0;
+      if (cut_at_bound && end_bound < line_end) {
+        if (end_bound < line_start) {
+          if (line == 0) return SearchResult::kNotFound;
+          continue;
+        }
+        line_end = end_bound;
+        options = PCRE2_NOTEOL;
+      }
       const std::wstring_view subject(text.data() + line_start, line_end - line_start);
       bool found = false;
       SearchMatch best;
       size_t start = 0;
       while (start <= subject.size()) {
         const wchar_t* s = subject.data() == nullptr ? L"" : subject.data();
-        const int rc = pcre2_match_16(code_, reinterpret_cast<PCRE2_SPTR16>(s), subject.size(), start, 0, data_,
-                                      context_);
+        const int rc = pcre2_match_16(code_, reinterpret_cast<PCRE2_SPTR16>(s), subject.size(), start, options,
+                                      data_, context_);
         if (rc == PCRE2_ERROR_NOMATCH) break;
         if (rc < 0) return SearchResult::kError;
         const PCRE2_SIZE* ov = pcre2_get_ovector_pointer_16(data_);
@@ -99,6 +117,37 @@ class HeadPattern {
         return SearchResult::kFound;
       }
       if (line == 0) return SearchResult::kNotFound;
+    }
+  }
+
+  // Whether a forward scan (as in find_backward of 63a24a6) of a whole line
+  // at or before max_start's line has a match that starts at or before
+  // max_start and ends after end_bound (crosses the limit).
+  bool any_match_crosses(const std::wstring& text, size_t max_start, size_t end_bound) {
+    max_start = std::min(max_start, text.size());
+    end_bound = std::min(end_bound, text.size());
+    size_t line_start = 0;
+    for (;;) {
+      if (line_start > max_start) return false;
+      size_t line_end = text.find(L'\n', line_start);
+      if (line_end == std::wstring::npos) line_end = text.size();
+      const std::wstring_view subject(text.data() + line_start, line_end - line_start);
+      size_t start = 0;
+      while (start <= subject.size()) {
+        const wchar_t* s = subject.data() == nullptr ? L"" : subject.data();
+        const int rc = pcre2_match_16(code_, reinterpret_cast<PCRE2_SPTR16>(s), subject.size(), start, 0, data_,
+                                      context_);
+        if (rc < 0) break;
+        const PCRE2_SIZE* ov = pcre2_get_ovector_pointer_16(data_);
+        if (line_start + ov[0] > max_start) break;
+        if (line_start + ov[1] > end_bound) return true;
+        if (ov[0] >= subject.size()) break;
+        size_t units = 0;
+        geditor::decode_at(subject, ov[0], &units);
+        start = ov[0] + units;
+      }
+      if (line_end >= text.size()) return false;
+      line_start = line_end + 1;
     }
   }
 
@@ -197,7 +246,8 @@ TEST(search_backward_windows_match_head) {
           SearchMatch a{7, 7};
           SearchMatch b{7, 7};
           const SearchResult ra = now.find_backward(tree, max_start, end_bound, &a);
-          const SearchResult rb = head.find_backward(text, max_start, end_bound, &b);
+          // S1: HEAD's scan on the line cut at end_bound.
+          const SearchResult rb = head.find_backward(text, max_start, end_bound, &b, true);
           ++cases;
           found += rb == SearchResult::kFound ? 1 : 0;
           if (ra != rb || (rb == SearchResult::kFound && !(a == b))) {
@@ -241,7 +291,7 @@ TEST(search_backward_long_line_matches_head) {
         SearchMatch a;
         SearchMatch b;
         const SearchResult ra = now.find_backward(tree, max_start, end_bound, &a);
-        const SearchResult rb = head.find_backward(text, max_start, end_bound, &b);
+        const SearchResult rb = head.find_backward(text, max_start, end_bound, &b, true);  // S1: cut at end_bound
         ++cases;
         CHECK(ra == rb);
         if (ra == SearchResult::kFound && rb == SearchResult::kFound) {
@@ -252,4 +302,131 @@ TEST(search_backward_long_line_matches_head) {
     }
   }
   std::printf("  [search backward] long line: %zu cases compared\n", cases);
+}
+
+namespace {
+
+// Patterns whose result can change at a cut even when no match crosses it:
+// "$", word boundaries, look-ahead and the end-of-subject assertions see the
+// limit as the end of the text.
+bool sees_the_end(std::wstring_view p) {
+  for (const wchar_t* s : {L"$", L"\\b", L"\\B", L"(?=", L"(?!", L"\\z", L"\\Z"}) {
+    if (p.find(s) != std::wstring_view::npos) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+// S1 ([C2] third part, [C3] literal): where no match of HEAD's scan crosses
+// the limit, the cut makes no difference; a literal pattern never sees the
+// cut at all. Compared with HEAD's copy as it was (the line not cut).
+TEST(search_backward_cut_changes_nothing_when_no_match_crosses) {
+  size_t cases = 0;
+  size_t literal_cases = 0;
+  size_t different = 0;
+  size_t literal_different = 0;
+  size_t found = 0;
+  Rng rng(0x51CA7);
+  for (int round = 0; round < 40; ++round) {
+    const std::wstring text = random_text(rng, rng.below(6) + 1, round % 4 == 0 ? 3000 : 900);
+    const PieceTree tree = tree_of(rng, text);
+    for (const Pattern& p : kPatterns) {
+      if (p.regexp && sees_the_end(p.text)) continue;
+      for (const bool case_sensitive : {false, true}) {
+        HeadPattern head(p.text, p.regexp, case_sensitive);
+        SearchPattern now;
+        if (!now.set(p.text, p.regexp, case_sensitive) || !head.valid()) continue;
+        for (int q = 0; q < 12; ++q) {
+          const size_t max_start = rng.below(text.size() + 1);
+          size_t end_bound = q % 2 == 0 ? max_start : rng.below(text.size() + 2);
+          // A limit on a code point boundary, as the callers pass it (a match
+          // start or point): a cut inside a surrogate pair makes the empty
+          // end of the subject a match position that the whole line lacks.
+          if (end_bound > 0 && end_bound < text.size() && geditor::is_low_surrogate(text[end_bound]) &&
+              geditor::is_high_surrogate(text[end_bound - 1])) {
+            --end_bound;
+          }
+          // Literal patterns: every case; regexps: only where nothing crosses.
+          if (p.regexp && head.any_match_crosses(text, max_start, end_bound)) continue;
+          SearchMatch a{7, 7};
+          SearchMatch b{7, 7};
+          const SearchResult ra = now.find_backward(tree, max_start, end_bound, &a);
+          const SearchResult rb = head.find_backward(text, max_start, end_bound, &b);
+          const bool differs = ra != rb || (rb == SearchResult::kFound && !(a == b));
+          ++(p.regexp ? cases : literal_cases);
+          found += rb == SearchResult::kFound ? 1 : 0;
+          if (differs) {
+            ++(p.regexp ? different : literal_different);
+            if (different + literal_different <= 5) {
+              ::test::report_failure(__FILE__, __LINE__,
+                                     "differs from HEAD (no cut): pattern " +
+                                         ::test::to_display(std::wstring(p.text)) + " max_start " +
+                                         std::to_string(max_start) + " end_bound " + std::to_string(end_bound) +
+                                         ": " + std::to_string(a.start) + "-" + std::to_string(a.end) + " vs " +
+                                         std::to_string(b.start) + "-" + std::to_string(b.end));
+            }
+          }
+        }
+      }
+    }
+  }
+  std::printf(
+      "  [search backward] no match crosses the limit: %zu regexp cases compared with HEAD (%zu different); "
+      "literal: %zu cases (%zu different); %zu found\n",
+      cases, different, literal_cases, literal_different, found);
+  CHECK(cases > 1000);
+  CHECK(literal_cases > 1000);
+  CHECK_EQ(different, size_t{0});
+  CHECK_EQ(literal_different, size_t{0});
+}
+
+// S1: ".*" from the middle of a line ends at the limit (HEAD found no match
+// on the line: every ".*" ran past it to the line end).
+TEST(search_backward_dot_star_ends_at_the_limit) {
+  const std::wstring text = L"first\nabcdefghij";
+  const PieceTree tree(text);
+  SearchPattern p;
+  CHECK(p.set(L".*", true, false));
+  SearchMatch m;
+  // max_start 9 ("d"), limit 12 (before "g"): the match from 9 is cut at 12.
+  CHECK(p.find_backward(tree, 9, 12, &m) == SearchResult::kFound);
+  CHECK_EQ(m.start, size_t{9});
+  CHECK_EQ(m.end, size_t{12});
+  // The limit at max_start: the empty match there.
+  CHECK(p.find_backward(tree, 12, 12, &m) == SearchResult::kFound);
+  CHECK_EQ(m.start, size_t{12});
+  CHECK_EQ(m.end, size_t{12});
+  HeadPattern head(L".*", true, false);
+  SearchMatch h;
+  CHECK(head.find_backward(text, 12, 12, &h) == SearchResult::kFound);
+  CHECK_EQ(h.start, size_t{5});  // HEAD: the empty match at the end of the previous line
+}
+
+// S1: "$" does not match at a limit inside a line; it does at the real end
+// of the line (also when the limit is that end).
+TEST(search_backward_dollar_only_at_the_real_line_end) {
+  const std::wstring text = L"abc\nabc";
+  const PieceTree tree(text);
+  SearchPattern p;
+  CHECK(p.set(L"c$", true, true));
+  SearchMatch m;
+  // Limit after "ab" of the second line: no "c$" there; the first line's.
+  CHECK(p.find_backward(tree, 6, 6, &m) == SearchResult::kFound);
+  CHECK_EQ(m.start, size_t{2});
+  CHECK_EQ(m.end, size_t{3});
+  // "b$" at the limit after "ab" inside the line: no match on the line.
+  CHECK(p.set(L"b$", true, true));
+  CHECK(p.find_backward(tree, 6, 6, &m) == SearchResult::kNotFound);
+  // The limit at the line end, and at the end of the text: "c$" matches.
+  CHECK(p.set(L"c$", true, true));
+  CHECK(p.find_backward(tree, 7, 7, &m) == SearchResult::kFound);
+  CHECK_EQ(m.start, size_t{6});
+  CHECK(p.find_backward(tree, 2, 3, &m) == SearchResult::kFound);
+  CHECK_EQ(m.start, size_t{2});
+  CHECK_EQ(m.end, size_t{3});
+  // An empty "$" at the limit inside a line: not there either.
+  CHECK(p.set(L"$", true, true));
+  CHECK(p.find_backward(tree, 6, 6, &m) == SearchResult::kFound);
+  CHECK_EQ(m.start, size_t{3});  // the end of the first line
 }

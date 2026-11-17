@@ -405,15 +405,16 @@ constexpr CompatRow kCompatRows[] = {
     {L"C-S-s", "save-buffer", "isearch-forward"},
     {L"C-S-w", "quit", "kill-region"},
     {L"C-S-f", "isearch-forward", "forward-char"},
-    {L"C-S-h", "query-replace", ""},
+    {L"C-S-h", "query-replace", "delete-backward-char"},  // C-h since 2026-11-17
     {L"C-S-r", "query-replace", "isearch-backward"},
     {L"C-S-g", "goto-line", "keyboard-quit"},
 };
 
-// The 12 keys of the old Windows layer (Ctrl+Alt), undefined since 2026-11-15.
+// The 12 keys of the old Windows layer (Ctrl+Alt), undefined since
+// 2026-11-15, but for C-M-s / C-M-r: isearch-forward-regexp /
+// isearch-backward-regexp (Emacs's keys) since 2026-11-17.
 constexpr const wchar_t* kOldCompatKeys[] = {
-    L"C-M-a", L"C-M-c", L"C-M-x", L"C-M-v", L"C-M-z", L"C-M-y",
-    L"C-M-s", L"C-M-w", L"C-M-f", L"C-M-h", L"C-M-r", L"C-M-g",
+    L"C-M-a", L"C-M-c", L"C-M-x", L"C-M-v", L"C-M-z", L"C-M-y", L"C-M-w", L"C-M-f", L"C-M-h", L"C-M-g",
 };
 
 // What `keys` resolves to through shift translation in `map`: the command
@@ -585,8 +586,8 @@ TEST(settings_reload_cancels_pending_keys_and_prefix_argument) {
   s.keys(L"C-f");  // a key of its own, not C-x C-f
   CHECK(!s.ed.minibuffer_active());
   CHECK_EQ(s.point(), size_t{1});
-  s.keys(L"C-u 3");
-  CHECK_EQ(s.ed.pending_keys_text(), std::wstring(L"C-u 3-"));
+  s.keys(L"M-3 4");
+  CHECK_EQ(s.ed.pending_keys_text(), std::wstring(L"M-3 4-"));
   s.ed.reload_settings();
   CHECK_EQ(s.ed.pending_keys_text(), std::wstring());
   s.keys(L"C-f");

@@ -50,7 +50,8 @@ std::span<const CommandInfo> all_commands();
 const CommandInfo* find_command(std::string_view name);
 
 // The kill commands (kill-line, kill-word, backward-kill-word, kill-region,
-// cut): a kill right after one of them adds to the clipboard text (M6).
+// cut, backward-kill-line): a kill right after one of them adds to the
+// clipboard text (M6).
 bool is_kill_command(std::string_view name);
 // The movement commands of the Windows editing keys of PLAN 4.4 (and the
 // Emacs keys of the same commands): a shift-translated key runs them with

@@ -484,12 +484,25 @@ bool MainWindow::is_held_movement(UINT message) {
   }
   // WM_TOUCH (0x240) and the pointer messages of pen and touch
   // (WM_POINTERDEVICECHANGE..WM_POINTERDEVICEOUTOFRANGE, 0x238-0x23A;
-  // WM_NCPOINTERUPDATE..WM_POINTERHWHEEL, 0x241-0x24F). DefWindowProc turns
-  // an unhandled pointer message into mouse messages when it is replayed.
-  // Non-client button messages (WM_NCLBUTTONDOWN..WM_NCXBUTTONDBLCLK) are
-  // not held: replayed after the run, a button down could start a modal
-  // move, size, scroll or menu loop with a button state that has passed.
+  // WM_NCPOINTERUPDATE..WM_POINTERHWHEEL, 0x241-0x24F, without the
+  // non-client contacts of is_dropped_button). DefWindowProc turns an
+  // unhandled pointer message into mouse messages when it is replayed.
+  if (is_dropped_button(message)) return false;
   return (message >= 0x0238 && message <= 0x023A) || (message >= 0x0240 && message <= 0x024F);
+}
+
+bool MainWindow::is_dropped_button(UINT message) {
+  // Non-client button messages (WM_NCLBUTTONDOWN..WM_NCXBUTTONDBLCLK: the
+  // scroll bar, title bar, menu bar, frame) are not held: replayed after the
+  // run, a button down could start a modal move, size, scroll or menu loop
+  // with a button state that has passed. They are taken and dropped, so
+  // that a C-g behind them still stops the run (2026-11-17; before, they
+  // ended the holding and that C-g waited for the end of the run). The
+  // non-client pointer contacts of pen and touch (WM_NCPOINTERDOWN /
+  // WM_NCPOINTERUP, 0x242 / 0x243) likewise: DefWindowProc performs system
+  // actions by their hit-test value (Microsoft's WM_NCPOINTERDOWN page).
+  return (message >= WM_NCLBUTTONDOWN && message <= WM_NCXBUTTONDBLCLK) || message == 0x0242 ||
+         message == 0x0243;
 }
 
 bool MainWindow::quit_requested() {
@@ -498,8 +511,9 @@ bool MainWindow::quit_requested() {
   // taken in the order PeekMessage returns them (no filter) and held
   // (held_keys_) while they are keyboard (WM_KEYFIRST..WM_KEYLAST), mouse
   // (WM_MOUSEFIRST..WM_MOUSELAST) or other movement / touch input
-  // (is_held_movement) messages of this window; the first other message
-  // (WM_COMMAND, WM_CLOSE, WM_SYSCOMMAND, a non-client button message,
+  // (is_held_movement) messages of this window; non-client button messages
+  // of this window (is_dropped_button) are taken and dropped; the first
+  // other message (WM_COMMAND, WM_CLOSE, WM_SYSCOMMAND,
   // WM_DROPFILES, IME messages, the window's own posted messages, a message
   // of another window or of the thread, ...) stays at the head with
   // everything after it, so that input never overtakes it. WM_PAINT comes out of PeekMessage only when nothing
@@ -532,13 +546,16 @@ bool MainWindow::quit_requested() {
     // (kPendingKeysTimer, kRedrawTimer, kDragScrollTimer) repeats until it
     // is killed, so a live one fires again one interval later.
     const bool timer = msg.message == WM_TIMER;
-    if (msg.hwnd != hwnd_ || !(key || mouse || timer)) return false;
+    // A non-client button press or release (is_dropped_button) is taken and
+    // dropped too: neither held nor left at the head (2026-11-17).
+    const bool dropped = timer || is_dropped_button(msg.message);
+    if (msg.hwnd != hwnd_ || !(key || mouse || dropped)) return false;
     const bool key_down = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
     if (!headless_ && key_down && msg.wParam == VK_PROCESSKEY) return false;
     // The same kind of message again, now taken (the head of the queue).
     const UINT kind = msg.message;
     if (!PeekMessageW(&msg, hwnd_, kind, kind, PM_REMOVE | PM_NOYIELD)) return false;
-    if (timer) continue;  // dropped (above)
+    if (dropped) continue;  // a timer or a non-client button (above)
     HeldKey held;
     held.msg = msg;
     if (!key) {  // mouse, pointer, touch: run later in its place

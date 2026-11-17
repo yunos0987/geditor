@@ -5,7 +5,9 @@
 #include <windows.h>
 
 #include <optional>
+#include <vector>
 
+#include "headless.h"
 #include "input.h"
 #include "key.h"
 #include "test_harness.h"
@@ -292,4 +294,62 @@ TEST(win_input_char_controls) {
   CHECK_KEY(chars.feed(L'\b'), L"DEL");
   CHECK(!chars.feed(0x01).has_value());  // Ctrl+A as WM_CHAR
   CHECK(!chars.feed(0x7F).has_value());  // Ctrl+Backspace
+}
+
+// ---- C-h and DEL (2026-11-17), C-M-s / C-M-r ----
+
+namespace {
+
+// The keys one key press gives, as the message loop runs it
+// (MainWindow::pre_translate, the macro holding of quit_requested): the
+// key down goes to translate_key_down first; a key it returns is handled
+// and the message never reaches TranslateMessage, so no WM_CHAR is made
+// for it. Only a key down that gives no key goes on to TranslateMessage,
+// whose WM_CHAR `translated_char` (the control character Windows makes)
+// goes to CharAssembler.
+std::vector<Key> keys_of_press(unsigned vk, ModifierState mods, wchar_t translated_char) {
+  std::vector<Key> keys;
+  if (const std::optional<Key> k = translate_key_down(vk, 0, mods, &us_layout, nullptr)) {
+    keys.push_back(*k);
+    return keys;  // consumed: no TranslateMessage, no WM_CHAR
+  }
+  CharAssembler chars;
+  if (const std::optional<Key> k = chars.feed(translated_char)) keys.push_back(*k);
+  return keys;
+}
+
+}  // namespace
+
+TEST(win_input_ctrl_h_is_one_c_h_and_backspace_one_del) {
+  // Ctrl+H: Windows's TranslateMessage would make WM_CHAR 0x08 (the same
+  // character as Backspace), but the key down is already C-h.
+  const std::vector<Key> ctrl_h = keys_of_press('H', mods_of(kC), L'\b');
+  CHECK_EQ(ctrl_h.size(), size_t{1});
+  if (!ctrl_h.empty()) CHECK_EQ(shown(ctrl_h[0]), std::wstring(L"C-h"));
+  // Backspace: DEL from the key down (named key), no WM_CHAR either.
+  const std::vector<Key> backspace = keys_of_press(VK_BACK, mods_of(kNone), L'\b');
+  CHECK_EQ(backspace.size(), size_t{1});
+  if (!backspace.empty()) CHECK_EQ(shown(backspace[0]), std::wstring(L"DEL"));
+  // Headless: the modifiers come from the lParam bits of the posted key.
+  const std::vector<Key> headless_ctrl_h =
+      keys_of_press('H', geditor::win::headless_key_modifiers(geditor::win::kHeadlessKeyCtrl), L'\b');
+  CHECK_EQ(headless_ctrl_h.size(), size_t{1});
+  if (!headless_ctrl_h.empty()) CHECK_EQ(shown(headless_ctrl_h[0]), std::wstring(L"C-h"));
+  CHECK(!(ctrl_h.empty() || backspace.empty()) && !(ctrl_h[0] == backspace[0]));
+  // A WM_CHAR 0x08 that does arrive on its own (posted, or from a key down
+  // that gave no key) is DEL, as before.
+  CharAssembler chars;
+  CHECK_KEY(chars.feed(L'\b'), L"DEL");
+}
+
+TEST(win_input_ctrl_alt_s_and_r_are_c_m_s_and_c_m_r) {
+  CHECK_KEY(us('S', kC | kM), L"C-M-s");
+  CHECK_KEY(us('R', kC | kM), L"C-M-r");
+  CHECK_KEY(jis('S', kC | kM), L"C-M-s");
+  const ModifierState headless =
+      geditor::win::headless_key_modifiers(geditor::win::kHeadlessKeyCtrl | geditor::win::kHeadlessKeyAlt);
+  CHECK_KEY(translate_key_down('S', 0, headless, &us_layout, nullptr), L"C-M-s");
+  CHECK_KEY(translate_key_down('R', 0, headless, &us_layout, nullptr), L"C-M-r");
+  // C-u (Ctrl+U) too: a key of its own.
+  CHECK_KEY(us('U', kC), L"C-u");
 }

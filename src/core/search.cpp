@@ -257,21 +257,33 @@ SearchResult SearchPattern::find_backward(const PieceTree& text, size_t max_star
   end_bound = std::min(end_bound, text.length());
   for (size_t line = text.line_of(max_start);; --line) {
     const size_t line_start = text.line_start(line);
-    const std::wstring_view subject = line_text(text, line_start, text.line_end(line));
-    const SearchResult r = start_dependent_ ? last_match_by_scan(subject, line_start, max_start, end_bound, match_out)
-                                            : last_match(subject, line_start, max_start, end_bound, match_out);
-    if (r != SearchResult::kNotFound) return r;
+    const size_t line_end = text.line_end(line);
+    // S1: the subject ends at end_bound (the search limit). As in Emacs, a
+    // match does not extend past the limit, and "$" matches only at the real
+    // end of a line, not at a limit inside it (PCRE2_NOTEOL; Emacs's "$"
+    // looks at the character after). geditor's own: the limit is the end of
+    // the PCRE2 subject, so "\b", "\B", "\z", "\Z" and look-ahead see it as
+    // the end of the text (Emacs's "\'" does not match there). A line that
+    // starts after the limit has no match that ends at or before it.
+    if (line_start <= end_bound) {
+      const bool bounded = end_bound < line_end;
+      const unsigned options = bounded ? PCRE2_NOTEOL : 0;
+      const std::wstring_view subject = line_text(text, line_start, bounded ? end_bound : line_end);
+      const SearchResult r = start_dependent_ ? last_match_by_scan(subject, line_start, max_start, options, match_out)
+                                              : last_match(subject, line_start, max_start, options, match_out);
+      if (r != SearchResult::kNotFound) return r;
+    }
     if (line == 0) return SearchResult::kNotFound;
   }
 }
 
 SearchResult SearchPattern::last_match_by_scan(std::wstring_view subject, size_t line_start, size_t max_start,
-                                               size_t end_bound, SearchMatch* match_out) {
+                                               unsigned options, SearchMatch* match_out) {
   bool found = false;
   SearchMatch best;
   size_t start = 0;
   while (start <= subject.size()) {
-    const int rc = match(subject, start, 0, data_);
+    const int rc = match(subject, start, options, data_);
     if (rc == PCRE2_ERROR_NOMATCH) break;
     if (rc < 0) {
       set_match_error(rc);
@@ -281,10 +293,8 @@ SearchResult SearchPattern::last_match_by_scan(std::wstring_view subject, size_t
     const size_t s = line_start + ov[0];
     const size_t e = line_start + ov[1];
     if (s > max_start) break;
-    if (e <= end_bound) {
-      best = SearchMatch{s, e};
-      found = true;
-    }
+    best = SearchMatch{s, e};
+    found = true;
     // The next match that starts after this one (matches may overlap).
     if (ov[0] >= subject.size()) break;
     start = next_code_point(subject, ov[0]);
@@ -297,15 +307,16 @@ SearchResult SearchPattern::last_match_by_scan(std::wstring_view subject, size_t
 // The matches of the forward scan (last_match_by_scan) are the positions
 // where a match attempt succeeds, each with the match of that attempt, and
 // an attempt does not depend on where the scan started (without \G, \K and
-// the verbs; the subject is always the whole line, so look-behind and ^ see
-// the same text). So a forward scan from any code point boundary `lo` finds
-// exactly the scan's matches that start at or after `lo`: windows [lo, hi)
-// back from max_start are scanned until one has a match that qualifies.
+// the verbs; the subject is always the whole line up to the limit, so
+// look-behind and ^ see the same text). So a forward scan from any code
+// point boundary `lo` finds exactly the scan's matches that start at or
+// after `lo`: windows [lo, hi) back from max_start are scanned until one has
+// a match (every match ends at or before the limit: the subject ends there).
 SearchResult SearchPattern::last_match(std::wstring_view subject, size_t line_start, size_t max_start,
-                                       size_t end_bound, SearchMatch* match_out) {
+                                       unsigned options, SearchMatch* match_out) {
   // The first match of the line: none, or none at or before max_start, is
   // no match on the line (as for the scan).
-  int rc = match(subject, 0, 0, data_);
+  int rc = match(subject, 0, options, data_);
   if (rc == PCRE2_ERROR_NOMATCH) return SearchResult::kNotFound;
   if (rc < 0) {
     set_match_error(rc);
@@ -327,7 +338,7 @@ SearchResult SearchPattern::last_match(std::wstring_view subject, size_t line_st
     SearchMatch best;
     size_t start = lo;
     while (start <= subject.size()) {
-      rc = match(subject, start, 0, data_);
+      rc = match(subject, start, options, data_);
       if (rc == PCRE2_ERROR_NOMATCH) break;
       if (rc < 0) {
         set_match_error(rc);
@@ -335,10 +346,8 @@ SearchResult SearchPattern::last_match(std::wstring_view subject, size_t line_st
       }
       const PCRE2_SIZE* ov = pcre2_get_ovector_pointer_16(data_);
       if (ov[0] >= hi) break;
-      if (line_start + ov[1] <= end_bound) {
-        best = SearchMatch{line_start + ov[0], line_start + ov[1]};
-        found = true;
-      }
+      best = SearchMatch{line_start + ov[0], line_start + ov[1]};
+      found = true;
       if (ov[0] >= subject.size()) break;
       start = next_code_point(subject, ov[0]);
     }

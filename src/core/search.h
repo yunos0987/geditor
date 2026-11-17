@@ -72,10 +72,14 @@ class SearchPattern {
   // line is kept: pcre2_substitute wants the subject of the match itself).
   SearchResult find_forward(const PieceTree& text, size_t from, bool not_empty_at_from, SearchMatch* match,
                             bool for_expand = false);
-  // The match with the greatest start <= `max_start` that ends at or before
-  // `end_bound`: of the matches that a forward scan of the line finds (the
-  // first one, then the first one that starts after the start of the one
-  // before), the last one that qualifies. Long lines are scanned in windows
+  // The match with the greatest start <= `max_start`, matched with the text
+  // ending at `end_bound` (S1: the search limit is the end of the subject.
+  // As in Emacs, a match does not extend past it and "$" matches only at the
+  // real end of a line, PCRE2_NOTEOL; geditor's own, "\b", "\B", "\z", "\Z"
+  // and look-ahead see the limit as the end): of the matches that a forward scan of the
+  // line up to the limit finds (the first one, then the first one that
+  // starts after the start of the one before), the last one that starts at
+  // or before `max_start`. Long lines are scanned in windows
   // back from `max_start` (each window as the forward scan would see it),
   // so that the answer near `max_start` does not cost a scan of the whole
   // line; patterns whose matches depend on where a scan starts (\G, \K and
@@ -121,12 +125,13 @@ class SearchPattern {
   int match(std::wstring_view subject, size_t start, unsigned options, pcre2_real_match_data_16* data);
   bool ensure_context();
   void set_match_error(int rc);
-  // find_backward on one line (`subject` at `line_start`): kFound with
-  // *match, kNotFound, or kError. last_match_by_scan scans the whole line
-  // forward; last_match scans windows back from max_start.
-  SearchResult last_match_by_scan(std::wstring_view subject, size_t line_start, size_t max_start, size_t end_bound,
+  // find_backward on one line (`subject` at `line_start`, already ending at
+  // the limit; `options`: PCRE2_NOTEOL when the limit is inside the line):
+  // kFound with *match, kNotFound, or kError. last_match_by_scan scans the
+  // whole subject forward; last_match scans windows back from max_start.
+  SearchResult last_match_by_scan(std::wstring_view subject, size_t line_start, size_t max_start, unsigned options,
                                   SearchMatch* match);
-  SearchResult last_match(std::wstring_view subject, size_t line_start, size_t max_start, size_t end_bound,
+  SearchResult last_match(std::wstring_view subject, size_t line_start, size_t max_start, unsigned options,
                           SearchMatch* match);
   // [from, to) of `text` (within one line) as one view: in place when it
   // lies in one chunk, else copied into buf_.

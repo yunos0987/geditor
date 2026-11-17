@@ -249,6 +249,9 @@ class MainWindow final : public Host {
   // non-client mouse moves, hover / leave, gestures, touch and pointer
   // messages (retry P1).
   static bool is_held_movement(UINT message);
+  // Non-client button presses and releases (mouse, and the non-client
+  // contacts of pen and touch) that quit_requested takes and drops.
+  static bool is_dropped_button(UINT message);
 };
 
 }  // namespace geditor::win

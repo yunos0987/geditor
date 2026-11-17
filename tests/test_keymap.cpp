@@ -39,7 +39,9 @@ constexpr Expected kExpectedGlobal[] = {
     {L"C-d", "delete-char"},
     {L"<delete>", "delete-char"},
     {L"DEL", "delete-backward-char"},
+    {L"C-h", "delete-backward-char"},  // 2026-11-17
     {L"C-k", "kill-line"},
+    {L"C-u", "backward-kill-line"},  // 2026-11-17 (was universal-argument)
     {L"M-d", "kill-word"},
     {L"M-DEL", "backward-kill-word"},
     {L"C-w", "kill-region"},
@@ -68,6 +70,8 @@ constexpr Expected kExpectedGlobal[] = {
     // (registered as not implemented), the prefix argument and M-x.
     {L"C-s", "isearch-forward"},
     {L"C-r", "isearch-backward"},
+    {L"C-M-s", "isearch-forward-regexp"},   // 2026-11-17
+    {L"C-M-r", "isearch-backward-regexp"},  // 2026-11-17
     {L"M-%", "query-replace"},
     {L"C-M-%", "query-replace-regexp"},
     {L"M-g g", "goto-line"},
@@ -81,7 +85,6 @@ constexpr Expected kExpectedGlobal[] = {
     {L"C-x C--", "text-scale-decrease"},
     {L"C-x C-0", "text-scale-reset"},
     {L"<f10>", "menu-bar-open"},
-    {L"C-u", "universal-argument"},
     {L"M-0", "digit-argument"},
     {L"M-1", "digit-argument"},
     {L"M-2", "digit-argument"},

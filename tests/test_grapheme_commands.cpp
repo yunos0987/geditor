@@ -62,7 +62,7 @@ TEST(cluster_backward_char_steps_over_each_sample) {
 TEST(cluster_char_motion_with_prefix_counts) {
   Session s;
   s.load(L"a" + kFamily + kFlag + kAcute + L"b");
-  s.keys(L"C-u 3 C-f");
+  s.keys(L"M-3 C-f");
   CHECK_EQ(s.point(), 1 + kFamily.size() + kFlag.size());
   s.keys(L"M-2 C-b");
   CHECK_EQ(s.point(), size_t{1});
@@ -102,13 +102,13 @@ TEST(cluster_delete_with_prefix_counts) {
   Session s;
   s.load(L"a" + kVs16 + kKeycap + kHangul + L"b");
   s.set_point(1);
-  s.keys(L"C-u 2 C-d");
+  s.keys(L"M-2 C-d");
   CHECK_EQ(s.text(), L"a" + kHangul + L"b");
   s.keys(L"M->");
-  s.keys(L"C-u 2 DEL");
+  s.keys(L"M-2 DEL");
   CHECK_EQ(s.text(), std::wstring(L"a"));
   // More clusters than there are: nothing is deleted (as Emacs).
-  s.keys(L"C-u 5 DEL");
+  s.keys(L"M-5 DEL");
   CHECK_EQ(s.text(), std::wstring(L"a"));
   CHECK_EQ(s.message(), std::wstring(L"Beginning of buffer"));
 }

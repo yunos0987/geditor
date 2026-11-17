@@ -133,7 +133,7 @@ void random_step(Rng& rng, Session& a, Session& b, std::string* what) {
   static const wchar_t* const kKeys[] = {
       L"RET", L"DEL", L"C-d", L"C-k", L"C-/", L"C-/", L"C-?", L"C-n", L"C-p", L"C-f", L"C-b", L"C-a", L"C-e",
       L"M-f", L"M-b", L"C-v", L"M-v", L"M->", L"M-<", L"C-SPC", L"C-w", L"C-y", L"M-w", L"C-l", L"<end>",
-      L"<home>", L"C-u 3 C-f", L"C-u 2 C-n", L"S-<right>", L"S-<down>", L"TAB", L"C-x C-x", L"M-d"};
+      L"<home>", L"M-3 C-f", L"M-2 C-n", L"S-<right>", L"S-<down>", L"TAB", L"C-x C-x", L"M-d"};
   const size_t kind = rng.below(10);
   if (kind < 4) {
     // Typing: mostly at the end of a line, as the deferred item measures.
