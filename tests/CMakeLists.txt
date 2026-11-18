@@ -29,6 +29,7 @@ add_executable(geditor_tests
   test_m4b_encoding.cpp
   test_m5_search.cpp
   test_m6.cpp
+  test_macro_keys.cpp
   test_readme.cpp
   test_layout_cache.cpp
   test_layout_lone.cpp

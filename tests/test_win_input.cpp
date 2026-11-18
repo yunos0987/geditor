@@ -31,6 +31,7 @@ constexpr LayoutRow kUsRows[] = {
     {'6', U'6', U'^'},          {'0', U'0', U')'},          {VK_SPACE, U' ', U' '},
     {VK_OEM_2, U'/', U'?'},     {VK_OEM_MINUS, U'-', U'_'}, {VK_OEM_PLUS, U'=', U'+'},
     {VK_OEM_COMMA, U',', U'<'}, {VK_OEM_PERIOD, U'.', U'>'}, {VK_OEM_7, U'\'', U'"'},
+    {'8', U'8', U'*'},          {'9', U'9', U'('},
 };
 
 // JIS: '_' is Shift + the "ro" key (VK_OEM_102), Shift + '-' gives '=',
@@ -40,7 +41,7 @@ constexpr LayoutRow kJisRows[] = {
     {'6', U'6', U'&'},          {'0', U'0', 0},             {VK_SPACE, U' ', U' '},
     {VK_OEM_2, U'/', U'?'},     {VK_OEM_MINUS, U'-', U'='}, {VK_OEM_PLUS, U';', U'+'},
     {VK_OEM_COMMA, U',', U'<'}, {VK_OEM_PERIOD, U'.', U'>'}, {VK_OEM_7, U'^', U'~'},
-    {VK_OEM_102, U'\\', U'_'},
+    {VK_OEM_102, U'\\', U'_'},  {'8', U'8', U'('},          {'9', U'9', U')'},
 };
 
 template <size_t N>
@@ -352,4 +353,27 @@ TEST(win_input_ctrl_alt_s_and_r_are_c_m_s_and_c_m_r) {
   CHECK_KEY(translate_key_down('R', 0, headless, &us_layout, nullptr), L"C-M-r");
   // C-u (Ctrl+U) too: a key of its own.
   CHECK_KEY(us('U', kC), L"C-u");
+}
+
+// 2026-11-18: the macro keys C-( / C-) / C-S-e. "(" and ")" are the
+// characters that Shift gives, on the keys the layout has them on; the Key
+// has no S- (key.cpp does not parse "C-S-8").
+TEST(win_input_ctrl_parens_and_ctrl_shift_e) {
+  CHECK_KEY(jis('8', kC | kS), L"C-(");
+  CHECK_KEY(jis('9', kC | kS), L"C-)");
+  CHECK_KEY(us('9', kC | kS), L"C-(");
+  CHECK_KEY(us('0', kC | kS), L"C-)");
+  CHECK_KEY(us('E', kC | kS), L"C-S-e");
+  CHECK_KEY(jis('E', kC | kS), L"C-S-e");
+  // Without Shift the digit keys are C-8 / C-9, not the macro keys.
+  CHECK_KEY(jis('8', kC), L"C-8");
+  CHECK_KEY(jis('9', kC), L"C-9");
+  CHECK_KEY(us('9', kC), L"C-9");
+  CHECK_KEY(us('8', kC | kS), L"C-*");
+  // Headless: the modifiers of the lParam bits give the same keys.
+  const ModifierState headless =
+      geditor::win::headless_key_modifiers(geditor::win::kHeadlessKeyCtrl | geditor::win::kHeadlessKeyShift);
+  CHECK_KEY(translate_key_down('8', 0, headless, &jis_layout, nullptr), L"C-(");
+  CHECK_KEY(translate_key_down('9', 0, headless, &jis_layout, nullptr), L"C-)");
+  CHECK_KEY(translate_key_down('E', 0, headless, &jis_layout, nullptr), L"C-S-e");
 }

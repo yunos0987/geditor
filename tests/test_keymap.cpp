@@ -101,6 +101,9 @@ constexpr Expected kExpectedGlobal[] = {
     {L"C-x )", "kmacro-end-macro"},
     {L"C-x e", "kmacro-end-and-call-macro"},
     {L"<f4>", "kmacro-end-and-call-macro"},
+    {L"C-(", "kmacro-start-macro"},           // 2026-11-18
+    {L"C-)", "kmacro-end-macro"},             // 2026-11-18
+    {L"C-S-e", "kmacro-end-and-call-macro"},  // 2026-11-18
     {L"M-x", "execute-extended-command"},
     {L"<left>", "backward-char"},
     {L"<right>", "forward-char"},

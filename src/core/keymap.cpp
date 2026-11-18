@@ -190,6 +190,12 @@ constexpr DefaultBinding kGlobalBindings[] = {
     {L"C-x )", "kmacro-end-macro"},
     {L"C-x e", "kmacro-end-and-call-macro"},
     {L"<f4>", "kmacro-end-and-call-macro"},
+    // 2026-11-18: one key each. "(" and ")" are written as the characters
+    // that Shift gives (key.cpp); C-S-e, being bound, is not shift-translated
+    // to C-e.
+    {L"C-(", "kmacro-start-macro"},
+    {L"C-)", "kmacro-end-macro"},
+    {L"C-S-e", "kmacro-end-and-call-macro"},
     // Other
     {L"M-x", "execute-extended-command"},
     // Windows editing keys that do not conflict with Emacs

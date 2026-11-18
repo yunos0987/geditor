@@ -4400,7 +4400,8 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     menu bar); and the changes of 2026-11-17: B (non-client clicks during a
     run dropped, C-g behind them), the default keys C-h, C-u and C-M-s; and
     those of 2026-11-18: C-u inside isearch and query-replace, a repeated
-    isearch over a cluster of several units."""
+    isearch over a cluster of several units, the macro keys C-( / C-) /
+    C-S-e."""
     work = out / "files_deferred"
     work.mkdir(parents=True, exist_ok=True)
     shots = out / "shots"
@@ -4991,6 +4992,35 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
               moved and failed and points[:3] == ["1", "9", "10"],
               f"points {points} (UTF-16 units; the family is 8 units, 1 to 9); echoes {echoes}")
         app.keys("RET")
+    finally:
+        app.kill()
+
+    # 2026-11-18: the one-key defaults of the macro commands. C-( and C-)
+    # are sent as Ctrl + the key that has "(" / ")" in this layout (with
+    # Shift when the layout needs it), C-S-e as Ctrl + Shift + E.
+    macro_doc = work / "macro_keys.txt"
+    macro_doc.write_bytes(b"")
+    app = d.App(exe, [str(macro_doc)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("length") == "0")
+        app.keys("C-(")
+        recording = wait_state(app, lambda s: s.get("macro_recording") == "1")
+        app.type("ab")
+        wait_state(app, lambda s: s.get("text") == "ab")
+        app.keys("C-)")
+        defined = wait_state(app, lambda s: s.get("macro_recording") == "0" and s.get("macro_events") == "2")
+        app.keys("C-S-e")
+        ran = wait_state(app, lambda s: s.get("text") == "abab")
+        app.keys("C-S-e")
+        again = wait_state(app, lambda s: s.get("text") == "ababab")
+        check("[macro keys] C-( ab C-) records two events (C-) is not one of them); C-S-e runs the macro, and "
+              "once more when pressed again",
+              recording.get("macro_recording") == "1" and defined.get("macro_recording") == "0" and
+              defined.get("macro_events") == "2" and ran.get("text") == "abab" and again.get("text") == "ababab",
+              f"after C-(: recording {recording.get('macro_recording')} message {recording.get('message')!r}; "
+              f"after C-): recording {defined.get('macro_recording')} events {defined.get('macro_events')} message "
+              f"{defined.get('message')!r}; after C-S-e: text {ran.get('text')!r} message {ran.get('message')!r}; "
+              f"after the second C-S-e: text {again.get('text')!r}")
     finally:
         app.kill()
 
