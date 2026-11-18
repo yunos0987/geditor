@@ -147,6 +147,9 @@ class Editor {
   void isearch_repeat(bool forward);
   // DEL: back to the state before the last input (a character or a repeat).
   void isearch_delete_char();
+  // C-u (2026-11-18): empties the search string; isearch goes on from where
+  // it started. One input for DEL; nothing on an empty pattern.
+  void isearch_delete_pattern();
   // RET: ends isearch at the match; the mark goes where the search started.
   void isearch_exit();
   // C-g: ends isearch with point and the view back where it started.
@@ -193,6 +196,19 @@ class Editor {
   // (the current match's start was looked at first; an empty match there
   // then moved one unit back), to compare the two.
   void use_old_backward_repeat_for_testing(bool old) { old_backward_repeat_ = old; }
+  // Tests only (2026-11-18): the repeated isearch of HEAD 078b156, which
+  // returns the next match even when the cursor (at a cluster boundary)
+  // stays, to compare the two.
+  void use_raw_repeat_for_testing(bool raw) { raw_repeat_ = raw; }
+  // Tests only: the isearch's current match as found (UTF-16 units, not
+  // widened to clusters); false without one.
+  bool isearch_raw_match_for_testing(SearchMatch* m) const {
+    if (!isearch_.active || !isearch_.now.has_match) return false;
+    *m = isearch_.now.match;
+    return true;
+  }
+  // Tests only: the failures counted so far (they stop a macro run).
+  uint64_t errors_for_testing() const { return errors_; }
 
   // ---- Encoding of a new buffer (B2) ----
   // --encoding=NAME without a file: the untitled buffer is saved in `name`
@@ -623,6 +639,7 @@ class Editor {
   // The last isearch strings (literal, regexp), for C-s on an empty pattern.
   std::wstring last_search_[2];
   bool old_backward_repeat_ = false;  // use_old_backward_repeat_for_testing
+  bool raw_repeat_ = false;           // use_raw_repeat_for_testing
 
   // Settings
   std::wstring settings_path_;

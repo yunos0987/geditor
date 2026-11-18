@@ -1658,7 +1658,18 @@ void Editor::isearch_search(bool repeat) {
   SearchResult r = SearchResult::kNotFound;
   if (s.forward) {
     if (repeat && s.has_match) {
+      // 2026-11-18 (decision 4 a): a repeat returns only a match that moves
+      // the cursor, one whose displayed end (snap_match, where the cursor
+      // goes) is after the current match's displayed end. The matches that
+      // end inside the same cluster are skipped, each searched from the end
+      // of the one before as the repeat does from the current match.
+      // shown_end is a cluster boundary, so a match's displayed end is at or
+      // before it exactly when its raw end is (no cluster walk per match).
+      const size_t shown_end = snap_match(s.match).end;
       r = matcher_.find_forward(t, s.match.end, true, &m);
+      while (!raw_repeat_ && r == SearchResult::kFound && m.end <= shown_end) {
+        r = matcher_.find_forward(t, m.end, true, &m);
+      }
     } else {
       r = matcher_.find_forward(t, s.has_match ? s.match.start : s.origin, false, &m);
     }
@@ -1680,8 +1691,19 @@ void Editor::isearch_search(bool repeat) {
     // back every time and did not stand still). A match that cannot
     // be empty ends at or before the limit only by starting before it, so
     // its answers are unchanged.
-    r = s.match.start > 0 ? matcher_.find_backward(t, s.match.start - 1, s.match.start, &m)
-                          : SearchResult::kNotFound;
+    // 2026-11-18 (decision 4 a): only a match whose displayed start
+    // (snap_match, where the cursor goes) is before the current match's
+    // displayed start is returned; the others (starting inside the same
+    // cluster) are skipped, each with the same step from the skipped match.
+    // shown_start is a cluster boundary, so a match's displayed start is
+    // before it exactly when its raw start is.
+    const size_t shown_start = snap_match(s.match).start;
+    SearchMatch from = s.match;
+    for (;;) {
+      r = from.start > 0 ? matcher_.find_backward(t, from.start - 1, from.start, &m) : SearchResult::kNotFound;
+      if (raw_repeat_ || r != SearchResult::kFound || m.start < shown_start) break;
+      from = m;
+    }
   } else {
     // From the origin, a match must end there; a longer pattern keeps the
     // current match's start (or one before it) and may end anywhere on its
@@ -1770,6 +1792,29 @@ void Editor::isearch_delete_char() {
     return;
   }
   isearch_prepare();
+}
+
+void Editor::isearch_delete_pattern() {
+  if (!isearch_active()) {
+    fail(L"Not in isearch");
+    return;
+  }
+  if (isearch_.now.pattern.empty()) return;
+  // One input as a typed character: DEL goes back to the step before. The
+  // search string is not kept for the next empty C-s (isearch_end keeps the
+  // pattern it ends with only).
+  isearch_push();
+  IsearchStep& s = isearch_.now;
+  s.pattern.clear();
+  s.has_match = false;
+  s.match = SearchMatch();
+  s.failing = false;
+  s.wrapped = false;
+  s.invalid = false;
+  s.searched_sensitive = -1;
+  main_.point = std::min(isearch_.start_point, main_.text.length());
+  s.origin = main_.point;
+  s.point = main_.point;
 }
 
 void Editor::isearch_toggle_regexp() {

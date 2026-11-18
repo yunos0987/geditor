@@ -15,6 +15,7 @@ add_executable(geditor_tests
   test_files.cpp
   test_grapheme.cpp
   test_grapheme_commands.cpp
+  test_isearch_skip_cu.cpp
   test_jsonc.cpp
   test_key.cpp
   test_keymap.cpp

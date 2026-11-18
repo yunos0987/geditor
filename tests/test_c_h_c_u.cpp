@@ -285,16 +285,8 @@ TEST(c_u_kills_whole_clusters_before_point) {
   CHECK_EQ(s.host.clipboard, head);
 }
 
-TEST(c_u_in_isearch_ends_it_and_kills) {
-  Session s;
-  s.load(L"ab foo\n");
-  s.keys(L"C-s");
-  s.type(L"foo");
-  s.keys(L"C-u");
-  CHECK(!s.ed.isearch_active());
-  CHECK_EQ(s.text(), std::wstring(L"\n"));
-  CHECK_EQ(s.host.clipboard, std::wstring(L"ab foo"));
-}
+// C-u inside isearch and query-replace (2026-11-18, decision 5 b):
+// tests/test_isearch_skip_cu.cpp.
 
 // ---- universal-argument without a default key ----
 
@@ -430,11 +422,14 @@ RepeatStep step_of(const Session& s) {
 }
 
 // `start_keys` then `pattern` from `point`, then `presses` of `repeat`.
+// `raw_rule`: the repeat of HEAD 078b156 (no match skipped inside a cluster).
 std::vector<RepeatStep> repeat_steps(const std::wstring& text, size_t point, const wchar_t* start_keys,
-                                     const std::wstring& pattern, const wchar_t* repeat, int presses, bool old_rule) {
+                                     const std::wstring& pattern, const wchar_t* repeat, int presses, bool old_rule,
+                                     bool raw_rule = false) {
   Session s;
   s.load(text);
   s.ed.use_old_backward_repeat_for_testing(old_rule);
+  s.ed.use_raw_repeat_for_testing(raw_rule);
   s.set_point(point);
   s.keys(start_keys);
   s.type(pattern);
@@ -492,12 +487,14 @@ TEST(c12_repeated_c_r_moves_back_on_every_press_for_empty_capable_patterns) {
   }
 }
 
-// [C12] inside clusters of several units (retry 2): the rule works on the
-// raw match (UTF-16 units); the highlight and the point are snapped to
-// cluster boundaries, so some presses leave the display as it is (also
-// before retry 1 and at HEAD 006ab9d). The raw matches are those of the
-// rule replayed on SearchPattern (the editor keeps its raw match private);
-// the editor's displayed start must be their cluster start at every press.
+// [C12] inside clusters of several units (retry 2), with the repeat of HEAD
+// 078b156 (use_raw_repeat_for_testing: the comparison base of
+// tests/test_isearch_skip_cu.cpp): the rule works on the raw match (UTF-16
+// units); the highlight and the point are snapped to cluster boundaries, so
+// some presses left the display as it was. Since 2026-11-18 a repeat skips
+// such matches (tests/test_isearch_skip_cu.cpp). The raw matches are those
+// of the rule replayed on SearchPattern; the editor's displayed start must
+// be their cluster start at every press.
 TEST(c12_repeated_c_r_inside_clusters_moves_the_raw_match_only) {
   const std::wstring texts[] = {
       L"a\U0001F468\x200D\U0001F469\x200D\U0001F467" L"b",  // a, a ZWJ family (8 units), b
@@ -506,7 +503,7 @@ TEST(c12_repeated_c_r_inside_clusters_moves_the_raw_match_only) {
   for (const std::wstring& text : texts) {
     const geditor::PieceTree tree(text);
     for (const wchar_t* pattern : {L".*", L"o*"}) {
-      const std::vector<RepeatStep> now = repeat_steps(text, text.size(), L"C-M-r", pattern, L"C-r", 20, false);
+      const std::vector<RepeatStep> now = repeat_steps(text, text.size(), L"C-M-r", pattern, L"C-r", 20, false, true);
       CHECK(!now.front().failing && now.front().has_current);
       geditor::SearchPattern p;
       CHECK(p.set(pattern, true, false));

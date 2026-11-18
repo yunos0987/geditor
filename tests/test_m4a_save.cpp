@@ -370,6 +370,7 @@ constexpr const char* kNonEditingCommands[] = {
     "isearch-query-replace", "isearch-repeat-backward", "isearch-repeat-forward", "isearch-toggle-case-fold",
     "isearch-toggle-regexp", "query-replace-exit", "query-replace-skip",
     "isearch-backward-regexp", "isearch-forward-regexp",  // 2026-11-17
+    "ignore", "isearch-delete-pattern",                   // 2026-11-18
     "keyboard-escape-quit", "keyboard-quit",
     // M6: the macro commands edit nothing themselves; the keys a macro runs
     // are refused one by one (test_m6.cpp).

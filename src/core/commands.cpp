@@ -939,6 +939,10 @@ void isearch_delete_char(Editor& ed) {
   ed.isearch_delete_char();
 }
 
+void isearch_delete_pattern(Editor& ed) {
+  ed.isearch_delete_pattern();
+}
+
 void isearch_exit(Editor& ed) {
   ed.isearch_exit();
 }
@@ -989,6 +993,9 @@ void query_replace_all(Editor& ed) {
 void query_replace_exit(Editor& ed) {
   ed.query_replace_exit();
 }
+
+// Does nothing: C-u during query-replace (2026-11-18).
+void ignore(Editor&) {}
 
 // goto-line LINE (the prefix argument gives LINE directly, Editor::run_call).
 void goto_line(Editor& ed) {
@@ -1110,12 +1117,14 @@ constexpr CommandInfo kCommands[] = {
     {"forward-char", &forward_char},
     {"forward-word", &forward_word},
     {"goto-line", &goto_line, kLineParams},
+    {"ignore", &ignore},
     {"insert-tab", &insert_tab},
     {"insert-text", &insert_text, kTextParams},
     {"isearch-abort", &isearch_abort},
     {"isearch-backward", &isearch_backward},
     {"isearch-backward-regexp", &isearch_backward_regexp},
     {"isearch-delete-char", &isearch_delete_char},
+    {"isearch-delete-pattern", &isearch_delete_pattern},
     {"isearch-exit", &isearch_exit},
     {"isearch-forward", &isearch_forward},
     {"isearch-forward-regexp", &isearch_forward_regexp},

@@ -4398,7 +4398,9 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     (no killed timer replayed, input after an opened question dropped, no
     drag left behind) and P1 / P2 (non-client mouse input, F10 without a
     menu bar); and the changes of 2026-11-17: B (non-client clicks during a
-    run dropped, C-g behind them), the default keys C-h, C-u and C-M-s."""
+    run dropped, C-g behind them), the default keys C-h, C-u and C-M-s; and
+    those of 2026-11-18: C-u inside isearch and query-replace, a repeated
+    isearch over a cluster of several units."""
     work = out / "files_deferred"
     work.mkdir(parents=True, exist_ok=True)
     shots = out / "shots"
@@ -4911,6 +4913,84 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
               found.get("isearch_pattern") == "[0-9]+",
               f"echo after C-M-s {prompt.get('echo')!r}; point {found.get('point')} pattern "
               f"{found.get('isearch_pattern')!r}")
+    finally:
+        app.kill()
+
+    # 2026-11-18 (decisions 5 b and 4 a): C-u inside isearch empties the
+    # search string and isearch goes on; C-u inside query-replace does
+    # nothing; a repeated isearch moves the cursor on every press over a
+    # cluster of several units (a ZWJ family).
+    cu_text = "ab foo bar\nfoo a a\n"
+    cu_doc = work / "keys_c_u_modes.txt"
+    cu_doc.write_bytes(cu_text.encode("utf-8"))
+    app = d.App(exe, [str(cu_doc)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("text") == cu_text)
+        app.set_clipboard("keep")
+        app.keys("C-s")
+        app.type("foo")
+        searching = wait_state(app, lambda s: s.get("isearch_pattern") == "foo" and s.get("point") == "6")
+        app.keys("C-u")
+        emptied = wait_state(app, lambda s: s.get("isearch_pattern", "x") == "" or s.get("isearch") != "1")
+        clip = app.clipboard()
+        check("[C-u isearch] C-s foo, then C-u: isearch goes on with an empty search string, the text and the "
+              "private clipboard are unchanged",
+              searching.get("point") == "6" and emptied.get("isearch") == "1" and
+              emptied.get("isearch_pattern") == "" and emptied.get("text") == cu_text and clip == "keep" and
+              emptied.get("point") == "0",
+              f"before C-u: point {searching.get('point')} pattern {searching.get('isearch_pattern')!r}; after: "
+              f"isearch {emptied.get('isearch')} pattern {emptied.get('isearch_pattern')!r} point "
+              f"{emptied.get('point')} echo {emptied.get('echo')!r} text changed {emptied.get('text') != cu_text}; "
+              f"clipboard {clip!r}")
+        app.keys("C-g")
+        wait_state(app, lambda s: s.get("isearch") == "0")
+        app.keys("M-%")
+        app.type("a")
+        app.keys("RET")
+        app.type("b")
+        app.keys("RET")
+        asking = wait_state(app, lambda s: s.get("query_replace") == "1")
+        app.keys("C-u")
+        time.sleep(0.3)
+        after_c_u = app.state()
+        clip = app.clipboard()
+        check("[C-u query-replace] M-% a RET b RET, then C-u: the text, the point and the private clipboard are "
+              "unchanged and query-replace goes on",
+              asking.get("query_replace") == "1" and after_c_u.get("query_replace") == "1" and
+              after_c_u.get("text") == cu_text and after_c_u.get("point") == asking.get("point") and clip == "keep",
+              f"query_replace before {asking.get('query_replace')} after {after_c_u.get('query_replace')}; point "
+              f"{asking.get('point')} -> {after_c_u.get('point')}; text changed {after_c_u.get('text') != cu_text}; "
+              f"clipboard {clip!r}; echo {after_c_u.get('echo')!r}")
+        app.keys("q")
+    finally:
+        app.kill()
+
+    family = "a\U0001F468‍\U0001F469‍\U0001F467b"  # 1 + 8 + 1 UTF-16 units
+    zwj_doc = work / "repeat_clusters.txt"
+    zwj_doc.write_bytes(family.encode("utf-8"))
+    app = d.App(exe, [str(zwj_doc)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("text") == family)
+        app.keys("C-M-s")
+        app.type(".")
+        first = wait_state(app, lambda s: s.get("isearch_pattern") == "." and s.get("point") == "1")
+        points = [first.get("point")]
+        echoes = []
+        for _ in range(4):
+            app.keys("C-s")
+            time.sleep(0.2)
+            state = app.state()
+            points.append(state.get("point"))
+            echoes.append(state.get("echo", ""))
+            if state.get("echo", "").startswith("Failing"):
+                break
+        moved = all(points[i] != points[i - 1] for i in range(1, len(points) - 1))
+        failed = bool(echoes) and echoes[-1].startswith("Failing") and points[-1] == points[-2]
+        check("[repeat clusters] a, a ZWJ family, b: C-M-s . then C-s: the point changes on every press until "
+              "Failing",
+              moved and failed and points[:3] == ["1", "9", "10"],
+              f"points {points} (UTF-16 units; the family is 8 units, 1 to 9); echoes {echoes}")
+        app.keys("RET")
     finally:
         app.kill()
 

@@ -241,6 +241,7 @@ constexpr DefaultBinding kIsearchBindings[] = {
     {L"C-M-r", "isearch-repeat-backward"},
     {L"DEL", "isearch-delete-char"},
     {L"C-h", "isearch-delete-char"},
+    {L"C-u", "isearch-delete-pattern"},  // 2026-11-18 (decision 5 b)
     {L"RET", "isearch-exit"},
     {L"C-g", "isearch-abort"},
     {L"M-r", "isearch-toggle-regexp"},
@@ -259,6 +260,7 @@ constexpr DefaultBinding kQueryReplaceBindings[] = {
     {L".", "query-replace-act-and-exit"},
     {L"q", "query-replace-exit"},
     {L"RET", "query-replace-exit"},
+    {L"C-u", "ignore"},  // 2026-11-18 (decision 5 b): does nothing
 };
 
 }  // namespace
