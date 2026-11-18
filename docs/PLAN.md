@@ -257,12 +257,12 @@ Emacs 互換（global）:
 | 表示 | `C-x C-+` / `C-x C-=` text-scale-increase, `C-x C--` text-scale-decrease, `C-x C-0` text-scale-reset（Emacs では 3 キーとも text-scale-adjust。geditor は動作ごとにコマンドを分ける）。既定のキーが無いコマンド: toggle-line-numbers, toggle-eol-marks, toggle-whitespace-marks, set-wrap-mode（`none` / `window` / `fixed` / `max`）。メニュー View と M-x から使う |
 | メニュー | `<f10>` menu-bar-open |
 | 前置引数 | `M-0`〜`M-9` digit-argument, `M--` negative-argument。universal-argument（Emacs の `C-u`）は 2026-11-17 から既定のキーが無い（M-x と設定の割り当てで使える。`"C-u": "universal-argument"` で以前の `C-u` に戻る） |
-| マクロ | `C-x (` / `<f3>` / `C-(` kmacro-start-macro, `C-x )` / `C-)` / `<f4>`（記録中）kmacro-end-macro, `C-x e` / `<f4>` / `C-S-e` kmacro-end-and-call-macro（続けて `e` で繰り返し。記録中は `C-x e` も `C-S-e` も記録を終えるだけ。M6）。`C-(` / `C-)` / `C-S-e` は 2026-11-18 にユーザーが決定した、1 回の押下で済む geditor 独自のキー（下の「マクロの 1 回の押下のキー」） |
+| マクロ | `C-x (` / `<f3>` / `C-(` kmacro-start-macro, `C-x )` / `C-)` / `<f4>`（記録中）kmacro-end-macro, `C-x e` / `<f4>` / `C-S-e` kmacro-end-and-call-macro（続けて `e` で繰り返し。記録中は `C-x e` も `C-S-e` も記録を終えるだけ。M6）。`C-(` / `C-)` / `C-S-e` は 2026-11-18 にユーザーが決定した、1 回の押下で済むキー（下の「マクロの 1 回の押下のキー」） |
 | その他 | `M-x` execute-extended-command |
 
 マクロの 1 回の押下のキー（2026-11-18 にユーザーが決定: 記録 `C-(`、記録の終了 `C-)`、実行 `C-S-e`）: 今までのキー（`C-x (` / `<f3>` / `C-x )` / `C-x e` / `<f4>`）は残し、働きも同じ。`C-(` と `C-)` は 4.2 の表記どおり Shift 込みで出る文字で書く（Ctrl を押しながら `(` / `)` を打つ。どのキーかはキーボードの配列で決まり、日本語配列では Ctrl+Shift+8 / Ctrl+Shift+9。`C-S-8` という表記は無い）。次の細部は実装のときに決めた（ユーザーの決定ではない）:
 
-- 3 つとも上の表（Emacs 互換の global）に置き、Windows 互換キーの 12 個には足さない。このため 4.3 の解決順では設定ファイルの次に Windows 互換キー、その次で、ミニバッファ・isearch・問い合わせ置換の途中でも `C-x e` / `<f4>` などと同じに働く（isearch は今の一致で終えてから実行する）
+- 3 つとも上の表（Emacs 互換の global）に置き、Windows 互換キーの 12 個には足さない。このため 4.3 の解決順では設定ファイルの次に Windows 互換キー、その次で、ミニバッファ・isearch・問い合わせ置換の途中でも `C-x e` / `<f4>` などと同じに働く（isearch は今の一致で終えてから実行する）。ただし isearch の中では isearch の表を先に引き、その中でシフト変換するので、設定の `isearch_keys` で `C-e` に割り当てがあると、isearch の中の `C-S-e` はその割り当てを動かし、マクロは実行しない（2026-11-18 にヘッドレスの実アプリで確かめた。既定の isearch の表に `C-e` は無い）
 - `C-S-e` は割り当てを持つので `C-e` へのシフト変換をしない（Shift 選択にならない）。行末までの選択は `S-<end>`
 - 設定で `"C-S-e": null` と書くと未割当（`C-S-e is undefined`）になり、シフト変換には戻らない（4.3 の `null` の規則。Windows 互換キーの `null` と同じ）
 
