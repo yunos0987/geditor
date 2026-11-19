@@ -791,6 +791,11 @@ void Editor::insert_text(std::wstring_view text) {
     macro_repeat_ = false;
     if (macro_recording_ && !text.empty()) record_macro_text(text);
   }
+  // A prefix argument typed just before (C-3, M-3, C-u ...) repeats the whole
+  // committed text, as it repeats a typed character (user decision of
+  // 2026-11-20). One left with an unfinished key sequence (C-3 C-x, then the
+  // text) is dropped with the sequence, as before.
+  const PrefixArg prefix = pending_.empty() ? prefix_ : PrefixArg();
   cancel_pending_input();
   quoted_insert_pending_ = false;
   if (text.empty()) return;
@@ -809,12 +814,33 @@ void Editor::insert_text(std::wstring_view text) {
     after_input();
     return;
   }
+  std::wstring inserted = normalize_line_ends(text);
+  if (prefix.active) {
+    // The same checks as self-insert-command (insert_count in commands.cpp).
+    const int count = std::clamp(prefix.count(), -1000000000, 1000000000);
+    const wchar_t* refusal = nullptr;
+    if (count <= 0) {
+      refusal = L"Repeat count must be positive";
+    } else if (static_cast<size_t>(count) > kMaxRepeatedInsert / inserted.size()) {
+      refusal = L"Repeat count too large";
+    }
+    if (refusal != nullptr) {
+      message_ = refusal;
+      ++errors_;
+      note_non_command();
+      return;
+    }
+    const std::wstring one = std::move(inserted);
+    inserted.clear();
+    inserted.reserve(one.size() * static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) inserted += one;
+  }
   this_command_ = "insert-text";
   Buffer& b = current();
   main_.edited_in_command = false;
   mini_.edited_in_command = false;
   b.undo.begin_command(b.point, false);
-  insert(b, normalize_line_ends(text));
+  insert(b, inserted);
   finish_command(b);
   b.undo.end_command(b.point);  // after the snapping (E1)
 }

@@ -31,6 +31,7 @@ add_executable(geditor_tests
   test_m6.cpp
   test_macro_keys.cpp
   test_emacs_keys.cpp
+  test_ime_prefix.cpp
   test_readme.cpp
   test_layout_cache.cpp
   test_layout_lone.cpp

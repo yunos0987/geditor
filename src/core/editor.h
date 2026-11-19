@@ -48,7 +48,9 @@ class Editor {
   // ---- Input from the host ----
   void handle_key(const Key& key);
   // Text committed by the IME: inserted as one undo group ("\r\n" and "\r"
-  // become "\n").
+  // become "\n"). A prefix argument typed before it inserts the whole text
+  // that many times (a count of 0 or less, or too large, is refused as by
+  // self-insert-command).
   void insert_text(std::wstring_view text);
   // Opens `path` (absolute or relative to the current directory) following
   // the "open another file" rules: used by find-file, drag and drop and the
