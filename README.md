@@ -44,7 +44,7 @@ geditor.exe [--encoding=NAME] [--settings=PATH] [+LINE] [file]
 
 ### キーの書き方
 
-この文書のキーは Emacs の書き方です。`C-` は Ctrl、`M-` は Alt（または Esc を押してから次のキー）、`S-` は Shift です。`C-x C-s` は「Ctrl+X を押して離し、続けて Ctrl+S」です。`RET` は Enter、`DEL` は Backspace、`SPC` は Space、`<delete>` `<home>` `<prior>` `<next>` は Delete / Home / PageUp / PageDown です。Shift を押して打つ記号は、その記号で書きます（`S-` は付けません）。`C-(` は Ctrl を押しながら `(` を打つキーで、日本語配列のキーボードでは Ctrl+Shift+8 です（`C-S-8` とは書けません）。どのキーが `(` になるかはキーボードの配列で決まります。
+この文書のキーは Emacs の書き方です。`C-` は Ctrl、`M-` は Alt（または Esc を押してから次のキー）、`S-` は Shift です。`C-x C-s` は「Ctrl+X を押して離し、続けて Ctrl+S」です。`RET` は Enter、`DEL` は Backspace、`SPC` は Space、`<delete>` `<insert>` `<home>` `<prior>` `<next>` は Delete / Insert / Home / PageUp / PageDown です。Shift を押して打つ記号は、その記号で書きます（`S-` は付けません）。`C-(` は Ctrl を押しながら `(` を打つキーで、日本語配列のキーボードでは Ctrl+Shift+8 です（`C-S-8` とは書けません）。どのキーが `(` になるかはキーボードの配列で決まります。
 
 ### よく使う操作
 
@@ -52,15 +52,16 @@ geditor.exe [--encoding=NAME] [--settings=PATH] [+LINE] [file]
 - 取り消し `C-/`（または `C-S-z`）、やり直し `C-?`（または `C-S-y`）
 - 検索 `C-s`（後ろ向きは `C-r`、正規表現は `C-M-s` / `C-M-r`）、置換 `M-%`、行へ移動 `M-g g`
 - `C-h` は `DEL`（Backspace）と同じく前の 1 文字を消します。`C-u` はカーソルから行の先頭までを kill します（Bash と同じ）。isearch の中の `C-u` は検索語を消し、問い合わせ置換の中の `C-u` は何もしません
-- 前置引数（繰り返しの回数）は `M-3` のように Alt+数字で打ちます。続けて数字も打てます（`M-1 2` は 12）
+- 前置引数（繰り返しの回数）は `M-3` のように Alt+数字で打ちます。続けて数字も打てます（`M-1 2` は 12）。Emacs と同じく `C-3`（Ctrl+数字）と `C-M-3` でも打て、負の数は `M--`・`C--`・`C-M--` です
 - コマンドを名前で実行 `M-x`（Tab で補完）
 - メニューは F10 かマウスで開きます
 
 ### 選択と kill
 
-- `C-SPC` で今の位置に印（マーク）を置き、カーソルを動かすと、その間が選択範囲（リージョン）になります。`C-w` で切り取り、`M-w` でコピー、`C-y` で貼り付けます。Windows のクリップボードを使います
+- `C-SPC` で今の位置に印（マーク）を置き、カーソルを動かすと、その間が選択範囲（リージョン）になります。`C-w` で切り取り、`M-w` でコピー、`C-y` で貼り付けます。Windows のクリップボードを使います。`C-@` も `C-SPC` と同じです
+- Emacs と同じく、Shift+Delete（`S-<delete>`）で切り取り、Ctrl+Insert（`C-<insert>`）でコピー、Shift+Insert（`S-<insert>`）で貼り付けます（`C-w` / `M-w` / `C-y` と同じコマンド）。Shift+Delete は `C-w` と同じく、選択が見えていなくても印（マーク）があれば印からカーソルまでを切り取り、印が無ければ理由を出して何も消しません（1 文字消すのは `<delete>`）。Ctrl+Delete（`C-<delete>`）と Ctrl+Backspace（`C-DEL`）は `M-d` / `M-DEL` と同じく単語を kill し、Alt+←→（`M-<left>` / `M-<right>`）は `M-b` / `M-f` と同じく単語の単位で動きます
 - Shift を押しながら移動キー（`S-<left>`、`C-S-<right>`、`S-<end>`、`S-<next>` など、下のキー表の「Windows の編集キー」の移動）を押すと、移動しながら選択します。Shift を離して移動すると選択は消えます。`C-SPC` で選択していたときは、Shift 付きの移動はその選択を広げます。`C-S-b` のように、Shift を付けても割り当ての無い Emacs の移動キーも同じく選択します（`C-S-a` / `C-S-f` などの Windows 互換キーと、マクロを実行する `C-S-e` は除く。行末までの選択は `S-<end>`）。設定で `S-` 付きのキーに別のコマンドを割り当てると、そちらが動きます
-- `C-k`（行の残りを kill）、`C-u`（行の先頭までを kill）、`M-d`（単語を kill）、`M-DEL`（前の単語を kill）、`C-w` を続けて使うと、kill した文字列をつなげてクリップボードに入れます（`C-u` と `M-DEL` は前に足します）。間にほかのコマンド（`M-2` などの前置引数を除く）やマウスのクリックがあると、新しく入れ直します。続けている間に別のアプリがクリップボードを書き換えても気づかず、つなげた文字列で上書きします
+- `C-k`（行の残りを kill）、`C-u`（行の先頭までを kill）、`M-d`（単語を kill）、`M-DEL`（前の単語を kill）、`C-w` を続けて使うと、kill した文字列をつなげてクリップボードに入れます（`C-u` と `M-DEL` は前に足します。同じコマンドの `C-<delete>`・`C-DEL`・`S-<delete>` も同じです）。間にほかのコマンド（`M-2` などの前置引数を除く）やマウスのクリックがあると、新しく入れ直します。続けている間に別のアプリがクリップボードを書き換えても気づかず、つなげた文字列で上書きします
 - Emacs の kill ring と `M-y` はありません。クリップボードの中身は 1 つです
 
 ### キーボードマクロ
@@ -276,15 +277,15 @@ Windows の Ctrl+英字の操作は Ctrl+Shift+英字に割り当てています
 | `C-p` / `<up>` | `previous-line` |
 | `C-a` / `<home>` | `beginning-of-line` |
 | `C-e` / `<end>` | `end-of-line` |
-| `M-f` / `C-<right>` | `forward-word` |
-| `M-b` / `C-<left>` | `backward-word` |
+| `M-f` / `C-<right>` / `M-<right>` | `forward-word` |
+| `M-b` / `C-<left>` / `M-<left>` | `backward-word` |
 | `M-<` / `C-<home>` | `beginning-of-buffer` |
 | `M->` / `C-<end>` | `end-of-buffer` |
 | `C-v` / `<next>` | `scroll-up-command` |
 | `M-v` / `<prior>` | `scroll-down-command` |
 | `C-l` | `recenter-top-bottom` |
 | `M-g g` / `M-g M-g` | `goto-line` |
-| `C-SPC` | `set-mark-command` |
+| `C-SPC` / `C-@` | `set-mark-command` |
 | `C-x C-x` | `exchange-point-and-mark` |
 | `C-x h` | `mark-whole-buffer` |
 | `C-g` | `keyboard-quit` |
@@ -293,11 +294,11 @@ Windows の Ctrl+英字の操作は Ctrl+Shift+英字に割り当てています
 | `DEL` / `C-h` | `delete-backward-char` |
 | `C-k` | `kill-line` |
 | `C-u` | `backward-kill-line` |
-| `M-d` | `kill-word` |
-| `M-DEL` | `backward-kill-word` |
-| `C-w` | `kill-region` |
-| `M-w` | `kill-ring-save` |
-| `C-y` | `yank` |
+| `M-d` / `C-<delete>` | `kill-word` |
+| `M-DEL` / `C-DEL` | `backward-kill-word` |
+| `C-w` / `S-<delete>` | `kill-region` |
+| `M-w` / `C-<insert>` | `kill-ring-save` |
+| `C-y` / `S-<insert>` | `yank` |
 | `RET` / `C-j` | `newline` |
 | `C-o` | `open-line` |
 | `TAB` | `insert-tab` |
@@ -327,8 +328,8 @@ Windows の Ctrl+英字の操作は Ctrl+Shift+英字に割り当てています
 | `C-x C--` | `text-scale-decrease` |
 | `C-x C-0` | `text-scale-reset` |
 | `<f10>` | `menu-bar-open` |
-| `M-0` / `M-1` / `M-2` / `M-3` / `M-4` / `M-5` / `M-6` / `M-7` / `M-8` / `M-9` | `digit-argument` |
-| `M--` | `negative-argument` |
+| `M-0` / `M-1` / `M-2` / `M-3` / `M-4` / `M-5` / `M-6` / `M-7` / `M-8` / `M-9` / `C-0` / `C-1` / `C-2` / `C-3` / `C-4` / `C-5` / `C-6` / `C-7` / `C-8` / `C-9` / `C-M-0` / `C-M-1` / `C-M-2` / `C-M-3` / `C-M-4` / `C-M-5` / `C-M-6` / `C-M-7` / `C-M-8` / `C-M-9` | `digit-argument` |
+| `M--` / `C--` / `C-M--` | `negative-argument` |
 | `C-x (` / `<f3>` / `C-(` | `kmacro-start-macro` |
 | `C-x )` / `C-)` | `kmacro-end-macro` |
 | `C-x e` / `<f4>` / `C-S-e` | `kmacro-end-and-call-macro` |

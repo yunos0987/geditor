@@ -4401,7 +4401,8 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
     run dropped, C-g behind them), the default keys C-h, C-u and C-M-s; and
     those of 2026-11-18: C-u inside isearch and query-replace, a repeated
     isearch over a cluster of several units, the macro keys C-( / C-) /
-    C-S-e."""
+    C-S-e; and those of 2026-11-19: Emacs's default keys S-<insert> and
+    others."""
     work = out / "files_deferred"
     work.mkdir(parents=True, exist_ok=True)
     shots = out / "shots"
@@ -5021,6 +5022,51 @@ def run_deferred_checks(exe: pathlib.Path, out: pathlib.Path):
               f"after C-): recording {defined.get('macro_recording')} events {defined.get('macro_events')} message "
               f"{defined.get('message')!r}; after C-S-e: text {ran.get('text')!r} message {ran.get('message')!r}; "
               f"after the second C-S-e: text {again.get('text')!r}")
+    finally:
+        app.kill()
+
+    # 2026-11-19: Emacs's default keys S-<insert> / C-<insert> / S-<delete>
+    # / C-<delete> / C-DEL / M-<right> / C-@ / C-<digit> / C-M-<digit>,
+    # through the real key path (key down with the lParam modifier bits).
+    emacs_doc = work / "emacs_keys.txt"
+    emacs_doc.write_bytes(b"one two three")
+    app = d.App(exe, [str(emacs_doc)], cwd=work, settings=settings, height=300)
+    try:
+        wait_state(app, lambda s: s.get("length") == "13")
+        steps = []
+
+        def step(keys: str, ok) -> dict:
+            app.keys(keys)
+            state = wait_state(app, ok)
+            steps.append(f"{keys}: text {state.get('text')!r} point {state.get('point')} clipboard "
+                         f"{state.get('clipboard_text')!r}")
+            return state
+
+        word = step("M-<right>", lambda s: s.get("point") == "3")
+        step("C-@", lambda s: s.get("message") == "Mark set")
+        step("C-e", lambda s: s.get("point") == "13")
+        copied = step("C-<insert>", lambda s: s.get("clipboard_text") == " two three")
+        app.set_clipboard("XY")
+        step("C-<home>", lambda s: s.get("point") == "0")
+        pasted = step("S-<insert>", lambda s: s.get("text") == "XYone two three")
+        step("C-<end>", lambda s: s.get("point") == "15")
+        back = step("C-DEL", lambda s: s.get("text") == "XYone two ")
+        step("C-<home>", lambda s: s.get("point") == "0")
+        forward = step("C-<delete>", lambda s: s.get("text") == " two ")
+        step("C-@", lambda s: s.get("message") == "Mark set")
+        step("C-e", lambda s: s.get("point") == "5")
+        cut = step("S-<delete>", lambda s: s.get("text") == "")
+        step("C-3", lambda s: True)
+        step("x", lambda s: s.get("text") == "xxx")
+        step("C-M-2", lambda s: True)
+        digits = step("y", lambda s: s.get("text") == "xxxyy")
+        check("[emacs keys] M-<right>, C-@, C-<insert>, S-<insert>, C-DEL, C-<delete>, S-<delete>, C-3 and C-M-2 "
+              "do what M-f, C-SPC, M-w, C-y, M-DEL, M-d, C-w, M-3 and M-2 do",
+              word.get("point") == "3" and copied.get("clipboard_text") == " two three" and
+              pasted.get("text") == "XYone two three" and back.get("text") == "XYone two " and
+              forward.get("text") == " two " and cut.get("text") == "" and
+              cut.get("clipboard_text") == " two " and digits.get("text") == "xxxyy",
+              "; ".join(steps))
     finally:
         app.kill()
 

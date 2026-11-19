@@ -42,6 +42,7 @@ constexpr LayoutRow kJisRows[] = {
     {VK_OEM_2, U'/', U'?'},     {VK_OEM_MINUS, U'-', U'='}, {VK_OEM_PLUS, U';', U'+'},
     {VK_OEM_COMMA, U',', U'<'}, {VK_OEM_PERIOD, U'.', U'>'}, {VK_OEM_7, U'^', U'~'},
     {VK_OEM_102, U'\\', U'_'},  {'8', U'8', U'('},          {'9', U'9', U')'},
+    {VK_OEM_3, U'@', U'`'},
 };
 
 template <size_t N>
@@ -376,4 +377,36 @@ TEST(win_input_ctrl_parens_and_ctrl_shift_e) {
   CHECK_KEY(translate_key_down('8', 0, headless, &jis_layout, nullptr), L"C-(");
   CHECK_KEY(translate_key_down('9', 0, headless, &jis_layout, nullptr), L"C-)");
   CHECK_KEY(translate_key_down('E', 0, headless, &jis_layout, nullptr), L"C-S-e");
+}
+
+// 2026-11-19: Emacs's default keys S-<insert> / C-<insert> / S-<delete> /
+// C-<delete> / C-DEL / M-<left> / M-<right> / C-@ / C-<digit> / C-M-<digit>
+// / C-- / C-M--. Named keys keep Shift; "@" is the character the layout
+// gives (JIS: its own key, US: Shift + 2).
+TEST(win_input_emacs_default_keys_of_2026_11_19) {
+  for (auto* f : {&us, &jis}) {
+    CHECK_KEY(f(VK_INSERT, kS), L"S-<insert>");
+    CHECK_KEY(f(VK_INSERT, kC), L"C-<insert>");
+    CHECK_KEY(f(VK_DELETE, kS), L"S-<delete>");
+    CHECK_KEY(f(VK_DELETE, kC), L"C-<delete>");
+    CHECK_KEY(f(VK_BACK, kC), L"C-DEL");
+    CHECK_KEY(f(VK_LEFT, kM), L"M-<left>");
+    CHECK_KEY(f(VK_RIGHT, kM), L"M-<right>");
+    CHECK_KEY(f('0', kC), L"C-0");
+    CHECK_KEY(f('5', kC | kM), L"C-M-5");
+    CHECK_KEY(f(VK_OEM_MINUS, kC), L"C--");
+    CHECK_KEY(f(VK_OEM_MINUS, kC | kM), L"C-M--");
+  }
+  CHECK_KEY(jis(VK_OEM_3, kC), L"C-@");
+  CHECK_KEY(us('2', kC | kS), L"C-@");
+  // Ctrl+Backspace is one C-DEL: the key down is consumed, no WM_CHAR 0x7F.
+  const std::vector<Key> ctrl_back = keys_of_press(VK_BACK, mods_of(kC), 0x7F);
+  CHECK_EQ(ctrl_back.size(), size_t{1});
+  if (!ctrl_back.empty()) CHECK_EQ(shown(ctrl_back[0]), std::wstring(L"C-DEL"));
+  // Headless: the modifiers of the lParam bits give the same keys.
+  const ModifierState shift = geditor::win::headless_key_modifiers(geditor::win::kHeadlessKeyShift);
+  CHECK_KEY(translate_key_down(VK_INSERT, 0, shift, &jis_layout, nullptr), L"S-<insert>");
+  CHECK_KEY(translate_key_down(VK_DELETE, 0, shift, &jis_layout, nullptr), L"S-<delete>");
+  const ModifierState alt = geditor::win::headless_key_modifiers(geditor::win::kHeadlessKeyAlt);
+  CHECK_KEY(translate_key_down(VK_LEFT, 0, alt, &jis_layout, nullptr), L"M-<left>");
 }

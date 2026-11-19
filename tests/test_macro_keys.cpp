@@ -398,12 +398,16 @@ TEST(macro_keys_other_shift_keys_are_unchanged) {
     CHECK(!s.ed.buffer().mark_active);
   }
   {
-    Session s;  // C-8 / C-9 / C-0 without Shift are not the macro keys
-    s.load(L"abc");
+    // C-8 / C-9 without Shift are not the macro keys: digit-argument since
+    // 2026-11-19 (Emacs's default), so C-8 C-9 a types 89 a's.
+    Session s;
+    s.load(L"");
     s.keys(L"C-8");
-    CHECK_EQ(s.message(), std::wstring(L"C-8 is undefined"));
+    CHECK(!s.ed.macro_recording());
     s.keys(L"C-9");
-    CHECK_EQ(s.message(), std::wstring(L"C-9 is undefined"));
+    CHECK(!s.ed.macro_recording());
+    s.keys(L"a");
+    CHECK_EQ(s.text(), std::wstring(89, L'a'));
     CHECK(!s.ed.macro_recording());
   }
 }

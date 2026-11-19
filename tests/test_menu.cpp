@@ -262,11 +262,15 @@ TEST(menu_key_texts_follow_decision_b1) {
 TEST(menu_key_texts_cover_each_slot_case) {
   Session s;
   s.load(L"abc");
-  // Both slots, only Emacs, neither (only Windows: below, with C-w unbound).
+  // Both slots, only Emacs, neither (only Windows: below, with C-w and
+  // S-<delete> (2026-11-19) unbound).
   CHECK_EQ(key_text(s, L"Edit > Undo"), std::wstring(L"C-S-z  C-/"));
   CHECK_EQ(key_text(s, L"File > Open..."), std::wstring(L"C-x C-f"));
   CHECK_EQ(key_text(s, L"File > Settings"), std::wstring(L""));
   s.settings(R"({"keys": {"C-w": null}})");
+  CHECK(s.ed.settings_errors().empty());
+  CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x  S-<delete>"));  // kill-region's other key
+  s.settings(R"({"keys": {"C-w": null, "S-<delete>": null}})");
   CHECK(s.ed.settings_errors().empty());
   CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x"));
   // The same key in both slots shows once.
@@ -324,19 +328,23 @@ TEST(menu_key_text_skips_shadowed_and_sequence_bindings) {
 TEST(menu_key_texts_same_action_keys_follow_the_emacs_slot_rules) {
   Session s;
   s.load(L"abc");
-  // A setting that rebinds C-w removes it from Cut's Emacs slot.
+  // A setting that rebinds C-w removes it from Cut's Emacs slot; the other
+  // Emacs key of kill-region (S-<delete>, 2026-11-19) takes its place.
   s.settings(R"({"keys": {"C-w": "end-of-line"}})");
   CHECK(s.ed.settings_errors().empty());
-  CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x"));
+  CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x  S-<delete>"));
   CHECK_EQ(key_text(s, L"Edit > Copy"), std::wstring(L"C-S-c  M-w"));
   // A longer settings key of kill-region does not replace C-w (and settings
   // keys of the same-action command are not Emacs keys).
   s.settings(R"({"keys": {"C-c k": "kill-region"}})");
   CHECK(s.ed.settings_errors().empty());
   CHECK_EQ(key_text(s, L"Edit > Cut"), std::wstring(L"C-S-x  C-w"));
-  // Same sequence in both slots: shown once.
-  s.settings(R"({"keys": {"C-y": "paste"}})");
+  // Same sequence in both slots: shown once (yank's other Emacs key
+  // S-<insert>, 2026-11-19, unbound; with it, it fills the Emacs slot).
+  s.settings(R"({"keys": {"C-y": "paste", "S-<insert>": null}})");
   CHECK_EQ(key_text(s, L"Edit > Paste"), std::wstring(L"C-y"));
+  s.settings(R"({"keys": {"C-y": "paste"}})");
+  CHECK_EQ(key_text(s, L"Edit > Paste"), std::wstring(L"C-y  S-<insert>"));
   // Unbinding the Windows key leaves the same-action Emacs key alone.
   s.settings(R"({"keys": {"C-S-a": null}})");
   CHECK_EQ(key_text(s, L"Edit > Select All"), std::wstring(L"C-x h"));
