@@ -166,6 +166,13 @@ bool MainWindow::create(HINSTANCE instance, bool measure_startup, bool measure_i
   wc.lpfnWndProc = window_proc;
   wc.hInstance = instance;
   wc.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
+  // The application icon (resource 1, geditor.rc.in): the title bar and
+  // Alt+Tab take the size they need from it.
+  wc.hIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+                                           GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+  wc.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                             GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                                             LR_DEFAULTCOLOR));
   wc.lpszClassName = kWindowClass;
   if (RegisterClassExW(&wc) == 0) return false;
 

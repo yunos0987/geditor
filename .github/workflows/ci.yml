@@ -1,0 +1,68 @@
+# Build and test on Windows (release and debug, as AGENTS.md "Build and test").
+# A tag vX.Y.Z also packages the release build as geditor-X.Y.Z-windows-x64.zip
+# (an artifact of the run; the GitHub release is made by hand from it).
+
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [release, debug]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja --no-progress -y
+          }
+          clang-cl --version
+          llvm-rc /? | Select-Object -First 1
+          cmake --version
+          ninja --version
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: Package
+        if: matrix.preset == 'release' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ("v$version" -ne '${{ github.ref_name }}') {
+            throw "The tag ${{ github.ref_name }} does not match VERSION $version"
+          }
+          $dir = "geditor-$version"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item build/release/geditor.exe, README.md, CHANGELOG.md, LICENSE $dir
+          Copy-Item third_party/pcre2/LICENCE.md "$dir/PCRE2-LICENCE.md"
+          Compress-Archive -Path $dir -DestinationPath "$dir-windows-x64.zip"
+          Get-FileHash "$dir-windows-x64.zip" -Algorithm SHA256 | Format-List
+
+      - name: Upload the package
+        if: matrix.preset == 'release' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: geditor-windows-x64
+          path: geditor-*-windows-x64.zip
+          if-no-files-found: error

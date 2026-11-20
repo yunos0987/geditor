@@ -32,6 +32,7 @@ add_executable(geditor_tests
   test_macro_keys.cpp
   test_emacs_keys.cpp
   test_ime_prefix.cpp
+  test_version.cpp
   test_readme.cpp
   test_layout_cache.cpp
   test_layout_lone.cpp
@@ -60,9 +61,13 @@ add_executable(geditor_tests
   test_win_save.cpp
   test_win_settings.cpp)
 target_link_libraries(geditor_tests PRIVATE
-  geditor_options geditor_core geditor_win_logic geditor_text pcre2_16 user32)
-# test_readme.cpp reads README.md of the source tree ([M6-3]).
-target_compile_definitions(geditor_tests PRIVATE GEDITOR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  geditor_options geditor_core geditor_win_logic geditor_text pcre2_16 user32 version)
+# test_readme.cpp reads README.md of the source tree ([M6-3]); test_version.cpp
+# reads VERSION and CHANGELOG.md there and the version resource of the built
+# geditor.exe.
+target_compile_definitions(geditor_tests PRIVATE GEDITOR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  GEDITOR_EXE_PATH="$<TARGET_FILE:geditor>" GEDITOR_VERSION="${PROJECT_VERSION}")
+add_dependencies(geditor_tests geditor)
 
 add_test(NAME geditor_tests COMMAND geditor_tests)
 

@@ -343,6 +343,17 @@ M6 までに保留にした 2 件（K1: 長い 1 行での 1 打鍵の処理、K
 - テストは `tests/test_ime_prefix.cpp`（前置引数の各キー・設定の `universal-argument`・undo・1 回だけ効くこと・打った `x` と同じになること・0 と負の数・大きすぎる回数・改行・キー列の途中・ミニバッファ・マクロの記録と実行・断ったときにマクロが止まること・読み取り専用）。app_check の項目は足していない（ヘッドレスの経路で IME の確定文字列を送る手段が無い）
 - 画面に出したウィンドウで IME をオンにした本物の入力は、ユーザーが確かめる
 
+## 版・リリース・CI（2026-11-20）
+
+ユーザーが 2026-11-20 に決めた: 版の番号は `VERSION`（`MAJOR.MINOR.PATCH` の 1 行、LF）に置き、正式なリリースは MINOR が偶数、開発中は奇数とする。最初の正式なリリースは 0.2.0（0.1.0 のタグは付けない）。CMake が `VERSION` を読んで `project()` の版にし、exe に版の情報を埋め込む。GitHub のリリースには exe の zip を付ける。変更点は `CHANGELOG.md` に書く。CI を GitHub Actions で回す。
+
+- `CMakeLists.txt` が `VERSION` を読み（形が違えば設定で止まる。`VERSION` を変えると設定し直す）、`src/win/geditor.rc.in` から `geditor.rc`（`VERSIONINFO` とアイコン）を作って `geditor.exe` に入れる（`llvm-rc`）
+- アイコン（2026-11-20 にユーザーが提案の「案 14」を選んだ）: 青いタイトルバーと 3 つのボタンのウィンドウに、本文の行とカーソル、紫のモードライン、青緑のエコー領域。`tools/gen_icon.py` が 64 の格子で定めた形を各サイズ（16・20・24・32・40・48・64・256）で、端を整数の画素にそろえて描き、PNG を 1 つずつ入れた `src/win/geditor.ico` を書く（生成物。手で直さない。`python -B tools/gen_icon.py`。Pillow が要る。同じ Pillow の版なら同じバイト列）。リソースの番号 1 なので、エクスプローラーとタスクバーはこれを使う。ウィンドウクラスの `hIcon` / `hIconSm` も同じアイコンを `LoadImageW` で読む（`MainWindow` の作成）
+- テストは `tests/test_version.cpp`: `VERSION` の形と CMake の読んだ版が同じこと、`CHANGELOG.md` の最初の `## ` の見出しの版が同じこと、ビルドした `geditor.exe` の版の情報（固定部分と `FileVersion` / `ProductVersion`）が同じこと（`GetFileVersionInfoW`）
+- CI（`.github/workflows/ci.yml`）: develop / main への push、`v*` のタグ、pull request、手動で、`windows-2025` でリリースとデバッグを設定・ビルド・`ctest` する。app_check と計測は CI では行わない（手元で行う）。タグのときはリリースのビルドで、タグが `VERSION` と同じことを確かめてから `geditor-X.Y.Z-windows-x64.zip`（exe・README・CHANGELOG・LICENSE・PCRE2 のライセンス）を作り、実行の成果物（artifact）にする
+- リリースの手順: (1) develop で `VERSION` を偶数の MINOR にし、`CHANGELOG.md` の先頭にその版の節を書く。(2) 手元でリリースとデバッグのテスト、`app_check.py`（ヘッドレス）を通し、develop を push して CI が通るのを見る。(3) main を develop の位置まで進め（fast-forward）、push する。(4) main の commit に注釈付きのタグ `vX.Y.Z` を付けて push し、CI の成果物の zip を `gh run download` で取る。(5) `gh release create vX.Y.Z <zip> --notes-file <CHANGELOG のその版の節>` でリリースを作る。(6) develop の `VERSION` を次の奇数の MINOR（0.2.0 の後は 0.3.0）にし、`CHANGELOG.md` の先頭に `## 0.3.0（開発中）` の節を足す
+- `build/publish/` の公開用スクリプトはリリースには使わない
+
 ## 構成
 
 - `src/core/`: 編集の核（静的ライブラリ `geditor_core`）。書記素クラスタの区切りと幅（`grapheme.*`）・piece tree・undo・文字コード・キー表記・キーマップ・コマンド・ミニバッファ・升目計算・JSONC パーサー（`jsonc.*`。リポジトリで唯一の JSON パーサー）・設定の検査とキーマップの層（`config.*`）を持つ。折り返し（論理行を画面の行に分ける計算。長い行は 64K 文字ごとの区切りを記録して再利用する。1024 単位以上の行は最後に通った行の区切りと行末も記録する。M6 の後の K1）は `layout.*` の `WrapLayout` にあり、描画・上下移動・スクロール・スクロールバーのすべてがこれを使う（描画側で折り返し位置を計算しない）。行番号の幅・空白記号・改行記号・text-scale の大きさ・View の切り替えは `display.*`。メニューの中身（項目・コマンドと引数・区切り線・サブメニュー・チェックとラジオ・有効無効・キー表示）は `menu.*`、ホイールの量の累積は `mouse.*`。検索の照合（PCRE2。isearch・強調表示・問い合わせ置換が共用）は `search.*`、isearch と問い合わせ置換の状態と動きは `editor.*`。ファイル・クリップボード・ダイアログ・ウィンドウ起動などの環境依存の処理は `src/core/host.h` の `Host`（抽象クラス）を通して呼ぶ。Win32 側（`src/win/`）がこれを実装し、テストは `tests/fake_host.*` の偽物を使う

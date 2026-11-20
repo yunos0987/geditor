@@ -1,5 +1,15 @@
 cmake_minimum_required(VERSION 3.25)
-project(geditor LANGUAGES C CXX)
+
+# The version lives in VERSION only (one line "MAJOR.MINOR.PATCH"). An even
+# minor is a release, an odd minor is development towards the next release.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" GEDITOR_VERSION)
+string(STRIP "${GEDITOR_VERSION}" GEDITOR_VERSION)
+if(NOT GEDITOR_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+  message(FATAL_ERROR "VERSION must be MAJOR.MINOR.PATCH, not '${GEDITOR_VERSION}'")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS VERSION)
+
+project(geditor VERSION ${GEDITOR_VERSION} LANGUAGES C CXX RC)
 
 if(NOT WIN32)
   message(FATAL_ERROR "geditor supports Windows only")
@@ -80,7 +90,13 @@ add_executable(geditor WIN32
   src/win/measure.cpp
   src/win/renderer.cpp
   src/win/window.cpp
-  src/win/geditor.manifest)
+  src/win/geditor.manifest
+  ${CMAKE_CURRENT_BINARY_DIR}/geditor.rc)
+# The resources: the version from VERSION (Explorer > Properties > Details)
+# and the icon (src/win/geditor.ico, written by tools/gen_icon.py).
+configure_file(src/win/geditor.rc.in ${CMAKE_CURRENT_BINARY_DIR}/geditor.rc @ONLY)
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/geditor.rc PROPERTIES
+  OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/win/geditor.ico)
 target_link_libraries(geditor PRIVATE
   geditor_options geditor_win_logic geditor_text geditor_core d2d1 dwrite imm32 comctl32 shell32
   delayimp)

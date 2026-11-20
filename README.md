@@ -395,6 +395,13 @@ Shift を足した移動キー（`S-<left>`、`C-S-<end>` など）は、同じ�
 | `q` / `RET` | `query-replace-exit` |
 | `C-u` | `ignore` |
 
+## 版とリリース
+
+- 版の番号は `VERSION` に書きます（`MAJOR.MINOR.PATCH`）。正式なリリースは MINOR が偶数（0.2.0、0.4.0 …）で、開発中は奇数（0.3.x …）です。`geditor.exe` の版はエクスプローラーのプロパティの「詳細」に出ます
+- 変更点は [CHANGELOG.md](CHANGELOG.md) にあります
+- リリースは GitHub の Releases に、タグ `vX.Y.Z` と、ビルドした `geditor.exe` の zip（`geditor-X.Y.Z-windows-x64.zip`。README・CHANGELOG・LICENSE・PCRE2 のライセンスも入っています）を置きます。zip の exe はデジタル署名をしていないので、開くときに Windows の SmartScreen やウイルス対策ソフトが警告することがあります
+- GitHub Actions（`.github/workflows/ci.yml`）が、push と pull request のたびにリリースとデバッグのビルドとテストを行います
+
 ## ライセンス
 
 MIT License（[LICENSE](LICENSE)）。同梱の PCRE2（`third_party/pcre2/`）は BSD-3-Clause WITH PCRE2-exception で、ライセンスは [third_party/pcre2/LICENCE.md](third_party/pcre2/LICENCE.md) にあります。
