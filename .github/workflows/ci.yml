@@ -77,7 +77,7 @@ jobs:
 
       - name: Upload the package
         if: matrix.preset == 'release' && startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: geditor-windows-x64
           path: geditor-*-windows-x64.zip
