@@ -883,6 +883,16 @@ void set_wrap_mode(Editor& ed) {
   ed.set_wrap_mode(mode);
 }
 
+// The next mode in the order of View > Wrap, after Max back to None
+// (2026-11-21).
+void cycle_wrap_mode(Editor& ed) {
+  constexpr WrapMode kOrder[] = {WrapMode::kNone, WrapMode::kWindow, WrapMode::kFixed, WrapMode::kMax};
+  const WrapMode now = ed.wrap_mode();
+  size_t i = 0;
+  while (i < std::size(kOrder) && kOrder[i] != now) ++i;
+  ed.set_wrap_mode(kOrder[(i + 1) % std::size(kOrder)]);
+}
+
 void text_scale_increase(Editor& ed) {
   ed.text_scale_adjust(1);
 }
@@ -1102,6 +1112,7 @@ constexpr CommandInfo kCommands[] = {
     {"capitalize-word", &capitalize_word},
     {"copy", &kill_ring_save},
     {"cut", &kill_region},
+    {"cycle-wrap-mode", &cycle_wrap_mode},
     {"delete-backward-char", &delete_backward_char},
     {"delete-char", &delete_char},
     {"digit-argument", &digit_argument, {}, true},

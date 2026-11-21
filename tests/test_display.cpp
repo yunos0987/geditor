@@ -322,6 +322,44 @@ TEST(view_set_wrap_mode) {
   CHECK_EQ(s.message(), std::wstring(L"Wrap: none"));
 }
 
+// 2026-11-21: cycle-wrap-mode (C-x x t, M-z) steps through View > Wrap in
+// order, after Max back to None.
+TEST(view_cycle_wrap_mode) {
+  Session s;
+  s.load(std::wstring(100, L'x'));
+  const std::string settings_before = s.host.file(test::kSettingsPath);
+  CHECK(s.ed.wrap_mode() == WrapMode::kMax);  // the default
+  const WrapMode order[] = {WrapMode::kNone, WrapMode::kWindow, WrapMode::kFixed, WrapMode::kMax};
+  const wchar_t* const names[] = {L"none", L"window", L"fixed", L"max"};
+  for (const wchar_t* key : {L"M-z", L"C-x x t"}) {
+    for (size_t i = 0; i < 4; ++i) {
+      s.keys(key);
+      CHECK(s.ed.wrap_mode() == order[i]);
+      CHECK_EQ(s.message(), std::wstring(L"Wrap: ") + names[i]);
+      CHECK(s.ed.mode_line().find(std::wstring(L"wrap:") + names[i]) != std::wstring::npos);
+    }
+  }
+  run_mx(s, L"cycle-wrap-mode");
+  CHECK(s.ed.wrap_mode() == WrapMode::kNone);
+  // The text, the point and the settings file do not change.
+  CHECK_EQ(s.text(), std::wstring(100, L'x'));
+  CHECK_EQ(s.host.file(test::kSettingsPath), settings_before);
+  // Another key after C-x x is not bound and leaves the mode as it is.
+  s.keys(L"C-x x g");
+  CHECK(s.ed.wrap_mode() == WrapMode::kNone);
+  // It goes on from the mode the settings file gives.
+  s.settings("{\"wrap\": {\"mode\": \"window\"}}");
+  CHECK(s.ed.wrap_mode() == WrapMode::kWindow);
+  s.keys(L"M-z");
+  CHECK(s.ed.wrap_mode() == WrapMode::kFixed);
+  // It works in read-only-mode (it changes the view only).
+  s.keys(L"C-x C-q");
+  CHECK(s.ed.buffer().read_only);
+  s.keys(L"M-z");
+  CHECK(s.ed.wrap_mode() == WrapMode::kMax);
+  CHECK_EQ(s.text(), std::wstring(100, L'x'));
+}
+
 TEST(view_commands_never_write_the_settings_file) {
   Session s;
   s.settings("{\"line_numbers\": true}");

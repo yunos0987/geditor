@@ -84,6 +84,8 @@ constexpr Expected kExpectedGlobal[] = {
     {L"C-x C-=", "text-scale-increase"},
     {L"C-x C--", "text-scale-decrease"},
     {L"C-x C-0", "text-scale-reset"},
+    {L"C-x x t", "cycle-wrap-mode"},
+    {L"M-z", "cycle-wrap-mode"},
     {L"<f10>", "menu-bar-open"},
     {L"M-0", "digit-argument"},
     {L"M-1", "digit-argument"},
@@ -258,6 +260,6 @@ TEST(dispatch_esc_key_acts_as_meta) {
   CHECK_EQ(s.point(), size_t{3});
   s.keys(L"ESC DEL");
   CHECK_EQ(s.text(), std::wstring(L" two"));
-  s.keys(L"ESC z");
-  CHECK_EQ(s.message(), std::wstring(L"ESC z is undefined"));
+  s.keys(L"ESC q");  // was ESC z until M-z got cycle-wrap-mode (2026-11-21)
+  CHECK_EQ(s.message(), std::wstring(L"ESC q is undefined"));
 }

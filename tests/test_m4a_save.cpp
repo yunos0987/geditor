@@ -385,6 +385,7 @@ constexpr const char* kNonEditingCommands[] = {
     "text-scale-increase",
     "text-scale-reset", "toggle-eol-marks", "toggle-line-numbers", "toggle-whitespace-marks",
     "universal-argument", "write-file",
+    "cycle-wrap-mode",  // 2026-11-21
 };
 
 // M5: the query-replace keys that replace. They edit only inside

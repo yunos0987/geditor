@@ -177,6 +177,7 @@ Windows の Ctrl+英字の操作は Ctrl+Shift+英字に割り当てています
 | `capitalize-word` | 次の単語の先頭を大文字、残りを小文字にする |
 | `copy` | 選択範囲をクリップボードへコピーする（`kill-ring-save` と同じ） |
 | `cut` | 選択範囲を切り取る（`kill-region` と同じ） |
+| `cycle-wrap-mode` | このウィンドウの折り返しを `none` → `window` → `fixed` → `max` → `none` の順に次へ切り替える |
 | `delete-backward-char` | 前の 1 文字を消す（選択中は選択範囲を消す） |
 | `delete-char` | 次の 1 文字を消す（選択中は選択範囲を消す） |
 | `digit-argument` | 前置引数の数字（`M-0`〜`M-9`） |
@@ -327,6 +328,7 @@ Windows の Ctrl+英字の操作は Ctrl+Shift+英字に割り当てています
 | `C-x C-+` / `C-x C-=` | `text-scale-increase` |
 | `C-x C--` | `text-scale-decrease` |
 | `C-x C-0` | `text-scale-reset` |
+| `C-x x t` / `M-z` | `cycle-wrap-mode` |
 | `<f10>` | `menu-bar-open` |
 | `M-0` / `M-1` / `M-2` / `M-3` / `M-4` / `M-5` / `M-6` / `M-7` / `M-8` / `M-9` / `C-0` / `C-1` / `C-2` / `C-3` / `C-4` / `C-5` / `C-6` / `C-7` / `C-8` / `C-9` / `C-M-0` / `C-M-1` / `C-M-2` / `C-M-3` / `C-M-4` / `C-M-5` / `C-M-6` / `C-M-7` / `C-M-8` / `C-M-9` | `digit-argument` |
 | `M--` / `C--` / `C-M--` | `negative-argument` |

@@ -171,6 +171,10 @@ constexpr DefaultBinding kGlobalBindings[] = {
     {L"C-x C-=", "text-scale-increase"},
     {L"C-x C--", "text-scale-decrease"},
     {L"C-x C-0", "text-scale-reset"},
+    // 2026-11-21: C-x x t as Emacs 28's toggle-truncate-lines, M-z as Alt+Z
+    // of VS Code's word wrap.
+    {L"C-x x t", "cycle-wrap-mode"},
+    {L"M-z", "cycle-wrap-mode"},
     {L"<f10>", "menu-bar-open"},
     // Prefix argument (universal-argument: no default key, M-x or settings)
     {L"M-0", "digit-argument"},

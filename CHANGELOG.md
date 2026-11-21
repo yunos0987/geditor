@@ -4,7 +4,7 @@
 
 ## 0.3.0（開発中）
 
-まだありません。
+- 折り返し（View > Wrap）を None → Window → Fixed → Max の順に切り替えるコマンド `cycle-wrap-mode` とキー `C-x x t` / `M-z`
 
 ## 0.2.0（2026-11-21）
 
